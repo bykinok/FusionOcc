@@ -52,3 +52,4 @@ results.*
 *.tar.gz
 *.zip
 *_results.*
+ckpt
