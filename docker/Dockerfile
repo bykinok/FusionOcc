@@ -61,14 +61,19 @@ RUN python -m pip install --upgrade pip setuptools wheel
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install -r /tmp/requirements.txt --extra-index-url https://download.pytorch.org/whl/cu113
 
-# 9. torch-scatter를 PyTorch Geometric 저장소에서 직접 설치
+# 9. mmcv-full 별도 설치
+RUN pip install mmcv-full==1.5.3 -f https://download.openmmlab.com/mmcv/dist/cu113/torch1.10.1/index.html --no-cache-dir
+
+# 10. torch-scatter를 PyTorch Geometric 저장소에서 직접 설치
 RUN pip install torch-scatter==2.0.9 -f https://data.pyg.org/whl/torch-1.10.1+cu113.html
 
-# 10. 작업 디렉토리 설정
+# 11. 작업 디렉토리 설정
 WORKDIR /workspace
 
-# 11. FusionOcc 리포지토리 클론
-RUN git clone https://github.com/bykinok/FusionOcc.git
+# 12. FusionOcc 리포지토리 클론 및 설치
+RUN git clone https://github.com/bykinok/FusionOcc.git && \
+    cd FusionOcc && \
+    pip install -v -e .
 
-# 12. 컨테이너 시작 시 기본 명령어
+# 13. 컨테이너 시작 시 기본 명령어
 CMD ["python"]
