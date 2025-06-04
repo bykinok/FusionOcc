@@ -114,10 +114,15 @@ RUN git clone https://github.com/bykinok/FusionOcc.git && \
 # 13. 컨테이너 시작 시 기본 명령어
 CMD ["python"]
 
-# GUI Visualization 사용을 위한 Docker 실행 명령어 예시:
-# docker run -it --gpus all \
-#   -e DISPLAY=$DISPLAY \
-#   -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
-#   -v $(pwd):/workspace \
-#   --name fusionocc_container \
-#   fusionocc:latest /bin/bash
+# ------------------------------------------------------------------------------------------------
+# 컨테이너 build 명령어
+# docker build --network=host -t fusionocc .
+
+# 컨테이너 실행 명령어
+# docker run --gpus all --dns=8.8.8.8 --dns=8.8.4.4 --shm-size=16g -it -v /home/mando/DATA:/NAS fusionocc /bin/bash
+
+# 모델 prediction 결과를 파일로 저장
+# python tools/test.py configs/fusion_occ/fusion_occ.py ckpt/fusion_occ_mask.pth --out results.pkl
+
+# 모델 prediction 과정에서 matplotlib와 open3d로 visualization
+# python tools/test.py configs/fusion_occ/fusion_occ.py ckpt/fusion_occ_mask.pth --load-results results/results.pkl --show-dir ./datasets_vis
