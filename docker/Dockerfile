@@ -32,6 +32,7 @@ RUN apt-get install -y \
     software-properties-common \
     net-tools \
     iputils-ping \
+    ninja-build \
     || (apt-get update && apt-get install -y \
     python3.8 \
     python3.8-dev \
@@ -46,13 +47,22 @@ RUN apt-get install -y \
     ca-certificates \
     software-properties-common \
     net-tools \
-    iputils-ping) \
+    iputils-ping \
+    ninja-build) \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
 # 6. Python 3.8을 기본 python으로 설정
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.8 1 && \
     update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.8 1
+
+# 6.5. CUDA 환경 변수 설정
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+ENV LIBRARY_PATH=${CUDA_HOME}/lib64:${LIBRARY_PATH}
+ENV CPATH=${CUDA_HOME}/include:${CPATH}
+ENV TORCH_CUDA_ARCH_LIST="6.0;6.1;7.0;7.5;8.0;8.6"
 
 # 7. pip 업그레이드
 RUN python -m pip install --upgrade pip setuptools wheel
