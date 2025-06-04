@@ -67,5 +67,8 @@ RUN pip install torch-scatter==2.0.9 -f https://data.pyg.org/whl/torch-1.10.1+cu
 # 10. 작업 디렉토리 설정
 WORKDIR /workspace
 
-# 11. 컨테이너 시작 시 기본 명령어
+# 11. FusionOcc 리포지토리 클론
+RUN git clone https://github.com/bykinok/FusionOcc.git
+
+# 12. 컨테이너 시작 시 기본 명령어
 CMD ["python"]
