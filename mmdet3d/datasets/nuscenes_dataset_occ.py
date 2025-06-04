@@ -6,6 +6,19 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
+# Set matplotlib to use GUI backend if DISPLAY is available
+import matplotlib
+if 'DISPLAY' in os.environ:
+    try:
+        matplotlib.use('TkAgg')  # Try TkAgg first
+    except ImportError:
+        try:
+            matplotlib.use('Qt5Agg')  # Try Qt5Agg as fallback
+        except ImportError:
+            matplotlib.use('Agg')  # Fall back to non-GUI
+else:
+    matplotlib.use('Agg')  # Use non-GUI backend if no DISPLAY
+
 from .builder import DATASETS
 from .nuscenes_dataset import NuScenesDataset
 from .occ_metrics import Metric_mIoU, Metric_FScore
@@ -143,6 +156,11 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         try:
             import open3d as o3d
             import matplotlib.pyplot as plt
+            # Force software rendering for Open3D in Docker environment
+            import os
+            os.environ['MESA_GL_VERSION_OVERRIDE'] = '3.3'
+            os.environ['MESA_GLSL_VERSION_OVERRIDE'] = '330'
+            os.environ['LIBGL_ALWAYS_SOFTWARE'] = '1'
         except ImportError:
             print("Open3D or matplotlib not installed. Skipping 3D visualization.")
             return

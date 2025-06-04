@@ -40,6 +40,7 @@ mmdet3d/.mim/
 build/
 datasets_vis/
 work_dirs/
+results/
 
 # Large files that exceed GitHub limits
 *.pkl
