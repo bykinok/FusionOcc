@@ -54,3 +54,4 @@ results.*
 *.zip
 *_results.*
 ckpt
+results
