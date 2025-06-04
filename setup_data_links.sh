@@ -44,5 +44,8 @@ ln -s /NAS/mmDataset/nuscenes/v1.0-trainval/ /workspace/FusionOcc/data/nuscenes/
 echo "  - 체크포인트 디렉토리 링크 생성..."
 ln -s /NAS/mmDataset/nuscenes_fusionocc/ckpt/ /workspace/FusionOcc/ckpt
 
+echo "  - results 디렉토리 링크 생성..."
+ln -s /NAS/mmDataset/nuscenes_fusionocc/results /workspace/FusionOcc/results
+
 echo "설정이 완료되었습니다!"
 echo "생성된 링크를 확인하려면 'ls -la /workspace/FusionOcc/data/nuscenes/' 명령어를 사용하세요." 
