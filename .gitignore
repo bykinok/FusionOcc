@@ -1,0 +1,54 @@
+# Data directories
+data/
+./data/
+/data/
+
+# Additional common ignores for ML projects
+*.pyc
+__pycache__/
+*.so
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
+
+# Model checkpoints and outputs
+ckpt/
+checkpoints/
+logs/
+outputs/
+results/
+visualizations/
+
+mmdet3d/.mim/
+build/
+datasets_vis/
+work_dirs/
+
+# Large files that exceed GitHub limits
+*.pkl
+*.pth
+*.pt
+*.h5
+*.hdf5
+*.npz
+results.*
+*.tar.gz
+*.zip
+*_results.*
