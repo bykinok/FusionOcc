@@ -129,3 +129,6 @@ CMD ["python"]
 
 # 모델 prediction 과정에서 visualization 없이 결과를 파일로 저장
 # python tools/test.py configs/fusion_occ/fusion_occ.py ckpt/my_fusion_occ_mask_ep1.pth --load-results my_results.pkl --log-file my_results.log
+
+# 기존 파일 불러들여서 학습
+# ./tools/dist_train.sh configs/fusion_occ/fusion_occ.py 4 --resume-from work_dirs/fusion_occ/epoch_1_ema.pth --cfg-options runner.max_epochs=25
