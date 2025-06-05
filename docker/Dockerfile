@@ -126,3 +126,6 @@ CMD ["python"]
 
 # 모델 prediction 과정에서 matplotlib와 open3d로 visualization
 # python tools/test.py configs/fusion_occ/fusion_occ.py ckpt/fusion_occ_mask.pth --load-results results/results.pkl --show-dir ./datasets_vis
+
+# 모델 prediction 과정에서 visualization 없이 결과를 파일로 저장
+# python tools/test.py configs/fusion_occ/fusion_occ.py ckpt/my_fusion_occ_mask_ep1.pth --load-results my_results.pkl --log-file my_results.log
