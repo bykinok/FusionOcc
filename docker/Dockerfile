@@ -120,6 +120,7 @@ CMD ["python"]
 
 # 컨테이너 실행 명령어
 # docker run --gpus all --dns=8.8.8.8 --dns=8.8.4.4 --shm-size=16g -it -v /home/mando/DATA:/NAS fusionocc /bin/bash
+# docker run --gpus all --env DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix --dns=8.8.8.8 --dns=8.8.4.4 --shm-size=16g -it -v /home/h00323/DATA_ubuntu:/NAS fusionocc /bin/bash
 
 # 모델 prediction 결과를 파일로 저장
 # python tools/test.py configs/fusion_occ/fusion_occ.py ckpt/fusion_occ_mask.pth --out results.pkl
