@@ -1,0 +1,36 @@
+{
+  "exclude": [
+    "**/__pycache__",
+    "**/node_modules",
+    "**/.git",
+    "data/**",
+    "results/**",
+    "ckpt/**",
+    "datasets_vis/**",
+    "work_dirs/**",
+    "build/**",
+    ".dist_test/**",
+    "**/*.pkl",
+    "**/*.pth",
+    "**/*.pt",
+    "**/*.h5",
+    "**/*.hdf5",
+    "**/*.npz",
+    "**/*.tar.gz",
+    "**/*.zip"
+  ],
+  "include": [
+    "mmdet3d/**",
+    "tools/**",
+    "configs/**"
+  ],
+  "pythonVersion": "3.8",
+  "typeCheckingMode": "basic",
+  "useLibraryCodeForTypes": true,
+  "reportMissingImports": "warning",
+  "reportMissingTypeStubs": false,
+  "reportUnusedImport": "warning",
+  "reportUnusedClass": "warning",
+  "reportUnusedFunction": "warning",
+  "reportUnusedVariable": "warning"
+} 
