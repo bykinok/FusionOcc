@@ -1,2 +1,13 @@
 # Add directories or file patterns to ignore during indexing (e.g. foo/ or *.csv)
-./data/
+# 빌드 관련 폴더들만 무시
+build/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+.venv

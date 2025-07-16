@@ -1,0 +1,40 @@
+# Cursor 설정 파일
+# 인덱싱 성능 최적화를 위한 설정
+
+# 파일 크기 제한 (MB)
+max_file_size_mb: 10
+
+# 무시할 파일 패턴
+ignore_patterns:
+  - "**/node_modules/**"
+  - "**/bower_components/**"
+  - "**/*.code-search"
+  - "**/build/**"
+  - "**/*.egg-info/**"
+  - "**/__pycache__/**"
+  - "**/*.pyc"
+  - "**/*.pyo"
+  - "**/*.pyd"
+  - "**/.Python"
+  - "**/env/**"
+  - "**/venv/**"
+  - "**/.env"
+  - "**/.venv"
+
+# 인덱싱할 파일 확장자
+index_extensions:
+  - "*.py"
+  - "*.js"
+  - "*.ts"
+  - "*.jsx"
+  - "*.tsx"
+  - "*.json"
+  - "*.md"
+  - "*.txt"
+  - "*.yml"
+  - "*.yaml"
+  - "*.xml"
+  - "*.html"
+  - "*.css"
+  - "*.scss"
+  - "*.less" 
