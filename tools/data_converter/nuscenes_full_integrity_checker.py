@@ -1,44 +1,53 @@
 #!/usr/bin/env python3
 """
-NuScenes 데이터 무결성 검증 스크립트
+전체 NuScenes 데이터 무결성 검증 스크립트
 
-이 스크립트는 NuScenes 데이터셋의 무결성을 확인합니다:
-- 메타데이터 파일 존재 여부
-- 센서 데이터 파일 존재 여부
-- 데이터 일관성 검증
-- 파일 크기 및 형식 검증
+이 스크립트는 NuScenes 데이터셋의 모든 파일에 대해 무결성을 확인합니다:
+- 모든 메타데이터 파일 검증
+- 모든 센서 데이터 파일 검증
+- 진행률 표시 및 상세한 리포트 생성
+- 병렬 처리 지원 (선택적)
 """
 
 import os
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 import argparse
 from datetime import datetime
+import time
+from tqdm import tqdm
+import multiprocessing as mp
+from functools import partial
 
 from nuscenes import NuScenes
 from nuscenes.utils.data_classes import LidarPointCloud
 import numpy as np
 
 
-class NuScenesIntegrityChecker:
-    """NuScenes 데이터 무결성 검증 클래스"""
+class NuScenesFullIntegrityChecker:
+    """전체 NuScenes 데이터 무결성 검증 클래스"""
     
-    def __init__(self, data_root: str, version: str = 'v1.0-trainval'):
+    def __init__(self, data_root: str, version: str = 'v1.0-trainval', 
+                 use_parallel: bool = False, num_workers: int = 4):
         """
         Args:
             data_root: NuScenes 데이터 루트 디렉토리
             version: NuScenes 버전
+            use_parallel: 병렬 처리 사용 여부
+            num_workers: 병렬 처리 시 워커 수
         """
         self.data_root = Path(data_root)
         self.version = version
         self.nusc = None
+        self.use_parallel = use_parallel
+        self.num_workers = num_workers
         self.logger = self._setup_logger()
         
     def _setup_logger(self) -> logging.Logger:
         """로거 설정"""
-        logger = logging.getLogger('NuScenesIntegrityChecker')
+        logger = logging.getLogger('NuScenesFullIntegrityChecker')
         logger.setLevel(logging.INFO)
         
         if not logger.handlers:
@@ -105,8 +114,11 @@ class NuScenesIntegrityChecker:
             'radar': []
         }
         
-        # 모든 sample_data 확인
-        for sample_data in self.nusc.sample_data:
+        # 진행률 표시와 함께 모든 sample_data 확인
+        total_files = len(self.nusc.sample_data)
+        self.logger.info(f"총 {total_files}개 센서 데이터 파일 검증 중...")
+        
+        for sample_data in tqdm(self.nusc.sample_data, desc="센서 파일 검증"):
             file_path = self.data_root / sample_data['filename']
             
             if not file_path.exists():
@@ -117,16 +129,16 @@ class NuScenesIntegrityChecker:
         for sensor_type, files in missing_files.items():
             if len(files) > 0:
                 self.logger.warning(f"{sensor_type} 센서에서 {len(files)}개 파일 누락")
-                for file in files[:5]:  # 처음 5개만 표시
+                for file in files[:10]:  # 처음 10개만 표시
                     self.logger.warning(f"  - {file}")
-                if len(files) > 5:
-                    self.logger.warning(f"  ... 및 {len(files) - 5}개 더")
+                if len(files) > 10:
+                    self.logger.warning(f"  ... 및 {len(files) - 10}개 더")
             else:
                 self.logger.info(f"{sensor_type} 센서 파일 모두 존재 ✓")
                 
         return missing_files
     
-    def check_data_consistency(self) -> Dict[str, any]:
+    def check_data_consistency(self) -> Dict[str, Any]:
         """데이터 일관성 검증"""
         self.logger.info("데이터 일관성 검증 시작...")
         
@@ -148,7 +160,7 @@ class NuScenesIntegrityChecker:
         
         # 각 씬의 샘플 수 확인
         scene_sample_counts = []
-        for scene in self.nusc.scene:
+        for scene in tqdm(self.nusc.scene, desc="씬별 샘플 수 계산"):
             # 씬의 첫 번째 샘플을 찾아서 해당 씬의 샘플들을 카운트
             first_sample = self.nusc.get('sample', scene['first_sample_token'])
             sample_count = 0
@@ -174,8 +186,39 @@ class NuScenesIntegrityChecker:
                 
         return consistency_checks
     
-    def check_lidar_data_integrity(self, max_samples: int = 10) -> Dict[str, any]:
-        """LiDAR 데이터 무결성 검증"""
+    def _check_single_lidar_file(self, sample_data: Dict) -> Dict[str, Any]:
+        """단일 LiDAR 파일 검증 (병렬 처리용)"""
+        result = {
+            'success': False,
+            'point_count': 0,
+            'file_size': 0,
+            'error': None,
+            'file_path': str(self.data_root / sample_data['filename'])
+        }
+        
+        try:
+            # LiDAR 데이터 로드
+            pc = LidarPointCloud.from_file(
+                str(self.data_root / sample_data['filename'])
+            )
+            
+            # 포인트 수 확인
+            point_count = pc.points.shape[1]
+            result['point_count'] = point_count
+            
+            # 파일 크기 확인
+            file_path = self.data_root / sample_data['filename']
+            file_size = file_path.stat().st_size
+            result['file_size'] = file_size
+            result['success'] = True
+            
+        except Exception as e:
+            result['error'] = str(e)
+            
+        return result
+    
+    def check_lidar_data_integrity(self) -> Dict[str, Any]:
+        """LiDAR 데이터 무결성 검증 (전체 데이터)"""
         self.logger.info("LiDAR 데이터 무결성 검증 시작...")
         
         if not self.nusc:
@@ -187,7 +230,8 @@ class NuScenesIntegrityChecker:
             'successful_loads': 0,
             'failed_loads': 0,
             'point_count_stats': [],
-            'file_size_stats': []
+            'file_size_stats': [],
+            'failed_files': []
         }
         
         # LiDAR 샘플 데이터 찾기
@@ -195,35 +239,33 @@ class NuScenesIntegrityChecker:
                         if sd['sensor_modality'] == 'lidar']
         
         lidar_checks['total_lidar_samples'] = len(lidar_samples)
+        self.logger.info(f"총 {len(lidar_samples)}개 LiDAR 파일 검증 시작...")
         
-        # 일부 샘플만 검증 (성능상 이유)
-        test_samples = lidar_samples[:max_samples]
+        if self.use_parallel and len(lidar_samples) > 100:
+            # 병렬 처리
+            self.logger.info(f"병렬 처리 사용 (워커 수: {self.num_workers})")
+            with mp.Pool(self.num_workers) as pool:
+                results = list(tqdm(
+                    pool.imap(self._check_single_lidar_file, lidar_samples),
+                    total=len(lidar_samples),
+                    desc="LiDAR 파일 검증"
+                ))
+        else:
+            # 순차 처리
+            results = []
+            for sample_data in tqdm(lidar_samples, desc="LiDAR 파일 검증"):
+                result = self._check_single_lidar_file(sample_data)
+                results.append(result)
         
-        for i, sample_data in enumerate(test_samples):
-            try:
-                # LiDAR 데이터 로드
-                pc = LidarPointCloud.from_file(
-                    str(self.data_root / sample_data['filename'])
-                )
-                
-                # 포인트 수 확인
-                point_count = pc.points.shape[1]
-                lidar_checks['point_count_stats'].append(point_count)
-                
-                # 파일 크기 확인
-                file_path = self.data_root / sample_data['filename']
-                file_size = file_path.stat().st_size
-                lidar_checks['file_size_stats'].append(file_size)
-                
+        # 결과 집계
+        for result in results:
+            if result['success']:
                 lidar_checks['successful_loads'] += 1
-                self.logger.info(f"LiDAR 샘플 {i+1}/{len(test_samples)}: "
-                               f"{point_count} 포인트, {file_size/1024/1024:.2f}MB")
-                
-            except Exception as e:
-                import pdb; pdb.set_trace()
-
+                lidar_checks['point_count_stats'].append(result['point_count'])
+                lidar_checks['file_size_stats'].append(result['file_size'])
+            else:
                 lidar_checks['failed_loads'] += 1
-                self.logger.error(f"LiDAR 샘플 {i+1} 로드 실패: {e}")
+                lidar_checks['failed_files'].append(result['file_path'])
                 
         # 통계 계산
         if lidar_checks['point_count_stats']:
@@ -236,8 +278,32 @@ class NuScenesIntegrityChecker:
             
         return lidar_checks
     
-    def check_camera_data_integrity(self, max_samples: int = 10) -> Dict[str, any]:
-        """카메라 데이터 무결성 검증"""
+    def _check_single_camera_file(self, sample_data: Dict) -> Dict[str, Any]:
+        """단일 카메라 파일 검증 (병렬 처리용)"""
+        result = {
+            'success': False,
+            'file_size': 0,
+            'error': None,
+            'file_path': str(self.data_root / sample_data['filename'])
+        }
+        
+        try:
+            file_path = self.data_root / sample_data['filename']
+            
+            if file_path.exists():
+                file_size = file_path.stat().st_size
+                result['file_size'] = file_size
+                result['success'] = True
+            else:
+                result['error'] = "파일이 존재하지 않음"
+                
+        except Exception as e:
+            result['error'] = str(e)
+            
+        return result
+    
+    def check_camera_data_integrity(self) -> Dict[str, Any]:
+        """카메라 데이터 무결성 검증 (전체 데이터)"""
         self.logger.info("카메라 데이터 무결성 검증 시작...")
         
         if not self.nusc:
@@ -248,7 +314,8 @@ class NuScenesIntegrityChecker:
             'total_camera_samples': 0,
             'successful_loads': 0,
             'failed_loads': 0,
-            'file_size_stats': []
+            'file_size_stats': [],
+            'failed_files': []
         }
         
         # 카메라 샘플 데이터 찾기
@@ -256,28 +323,32 @@ class NuScenesIntegrityChecker:
                          if sd['sensor_modality'] == 'camera']
         
         camera_checks['total_camera_samples'] = len(camera_samples)
+        self.logger.info(f"총 {len(camera_samples)}개 카메라 파일 검증 시작...")
         
-        # 일부 샘플만 검증
-        test_samples = camera_samples[:max_samples]
+        if self.use_parallel and len(camera_samples) > 100:
+            # 병렬 처리
+            self.logger.info(f"병렬 처리 사용 (워커 수: {self.num_workers})")
+            with mp.Pool(self.num_workers) as pool:
+                results = list(tqdm(
+                    pool.imap(self._check_single_camera_file, camera_samples),
+                    total=len(camera_samples),
+                    desc="카메라 파일 검증"
+                ))
+        else:
+            # 순차 처리
+            results = []
+            for sample_data in tqdm(camera_samples, desc="카메라 파일 검증"):
+                result = self._check_single_camera_file(sample_data)
+                results.append(result)
         
-        for i, sample_data in enumerate(test_samples):
-            try:
-                file_path = self.data_root / sample_data['filename']
-                
-                if file_path.exists():
-                    file_size = file_path.stat().st_size
-                    camera_checks['file_size_stats'].append(file_size)
-                    camera_checks['successful_loads'] += 1
-                    
-                    self.logger.info(f"카메라 샘플 {i+1}/{len(test_samples)}: "
-                                   f"{file_size/1024/1024:.2f}MB")
-                else:
-                    camera_checks['failed_loads'] += 1
-                    self.logger.error(f"카메라 파일 없음: {sample_data['filename']}")
-                    
-            except Exception as e:
+        # 결과 집계
+        for result in results:
+            if result['success']:
+                camera_checks['successful_loads'] += 1
+                camera_checks['file_size_stats'].append(result['file_size'])
+            else:
                 camera_checks['failed_loads'] += 1
-                self.logger.error(f"카메라 샘플 {i+1} 검증 실패: {e}")
+                camera_checks['failed_files'].append(result['file_path'])
                 
         # 통계 계산
         if camera_checks['file_size_stats']:
@@ -285,15 +356,18 @@ class NuScenesIntegrityChecker:
             
         return camera_checks
     
-    def generate_report(self, results: Dict[str, any]) -> str:
+    def generate_report(self, results: Dict[str, Any]) -> str:
         """검증 결과 리포트 생성"""
         report = []
-        report.append("=" * 60)
-        report.append("NuScenes 데이터 무결성 검증 리포트")
-        report.append("=" * 60)
+        report.append("=" * 80)
+        report.append("전체 NuScenes 데이터 무결성 검증 리포트")
+        report.append("=" * 80)
         report.append(f"검증 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         report.append(f"데이터 루트: {self.data_root}")
         report.append(f"버전: {self.version}")
+        report.append(f"병렬 처리: {'사용' if self.use_parallel else '미사용'}")
+        if self.use_parallel:
+            report.append(f"워커 수: {self.num_workers}")
         report.append("")
         
         # 메타데이터 검증 결과
@@ -326,31 +400,52 @@ class NuScenesIntegrityChecker:
         if 'lidar_integrity' in results:
             report.append("\nLiDAR 데이터 무결성:")
             lidar = results['lidar_integrity']
-            report.append(f"  총 샘플: {lidar.get('total_lidar_samples', 'N/A')}")
-            report.append(f"  성공 로드: {lidar.get('successful_loads', 'N/A')}")
-            report.append(f"  실패 로드: {lidar.get('failed_loads', 'N/A')}")
+            report.append(f"  총 샘플: {lidar.get('total_lidar_samples', 'N/A'):,}")
+            report.append(f"  성공 로드: {lidar.get('successful_loads', 'N/A'):,}")
+            report.append(f"  실패 로드: {lidar.get('failed_loads', 'N/A'):,}")
+            success_rate = (lidar.get('successful_loads', 0) / lidar.get('total_lidar_samples', 1)) * 100
+            report.append(f"  성공률: {success_rate:.1f}%")
             if 'avg_points' in lidar:
                 report.append(f"  평균 포인트 수: {lidar['avg_points']:.0f}")
             if 'avg_file_size_mb' in lidar:
                 report.append(f"  평균 파일 크기: {lidar['avg_file_size_mb']:.2f}MB")
+            
+            # 실패한 파일 경로 출력 (처음 20개만)
+            if 'failed_files' in lidar and lidar['failed_files']:
+                report.append(f"  실패한 파일들 (처음 20개):")
+                for failed_file in lidar['failed_files'][:20]:
+                    report.append(f"    - {failed_file}")
+                if len(lidar['failed_files']) > 20:
+                    report.append(f"    ... 및 {len(lidar['failed_files']) - 20}개 더")
                 
         # 카메라 검증 결과
         if 'camera_integrity' in results:
             report.append("\n카메라 데이터 무결성:")
             camera = results['camera_integrity']
-            report.append(f"  총 샘플: {camera.get('total_camera_samples', 'N/A')}")
-            report.append(f"  성공 로드: {camera.get('successful_loads', 'N/A')}")
-            report.append(f"  실패 로드: {camera.get('failed_loads', 'N/A')}")
+            report.append(f"  총 샘플: {camera.get('total_camera_samples', 'N/A'):,}")
+            report.append(f"  성공 로드: {camera.get('successful_loads', 'N/A'):,}")
+            report.append(f"  실패 로드: {camera.get('failed_loads', 'N/A'):,}")
+            success_rate = (camera.get('successful_loads', 0) / camera.get('total_camera_samples', 1)) * 100
+            report.append(f"  성공률: {success_rate:.1f}%")
             if 'avg_file_size_mb' in camera:
                 report.append(f"  평균 파일 크기: {camera['avg_file_size_mb']:.2f}MB")
+            
+            # 실패한 파일 경로 출력 (처음 20개만)
+            if 'failed_files' in camera and camera['failed_files']:
+                report.append(f"  실패한 파일들 (처음 20개):")
+                for failed_file in camera['failed_files'][:20]:
+                    report.append(f"    - {failed_file}")
+                if len(camera['failed_files']) > 20:
+                    report.append(f"    ... 및 {len(camera['failed_files']) - 20}개 더")
                 
-        report.append("\n" + "=" * 60)
+        report.append("\n" + "=" * 80)
         
         return "\n".join(report)
     
-    def run_full_check(self, max_samples: int = 10) -> Dict[str, any]:
+    def run_full_check(self) -> Dict[str, Any]:
         """전체 무결성 검증 실행"""
-        self.logger.info("NuScenes 데이터 무결성 검증 시작")
+        start_time = time.time()
+        self.logger.info("전체 NuScenes 데이터 무결성 검증 시작")
         
         results = {}
         
@@ -368,32 +463,41 @@ class NuScenesIntegrityChecker:
         results['consistency'] = self.check_data_consistency()
         
         # 5. LiDAR 데이터 무결성 검증
-        results['lidar_integrity'] = self.check_lidar_data_integrity(max_samples)
+        results['lidar_integrity'] = self.check_lidar_data_integrity()
         
         # 6. 카메라 데이터 무결성 검증
-        results['camera_integrity'] = self.check_camera_data_integrity(max_samples)
+        results['camera_integrity'] = self.check_camera_data_integrity()
         
-        self.logger.info("무결성 검증 완료")
+        elapsed_time = time.time() - start_time
+        self.logger.info(f"무결성 검증 완료 (소요 시간: {elapsed_time:.1f}초)")
+        
         return results
 
 
 def main():
     """메인 함수"""
-    parser = argparse.ArgumentParser(description='NuScenes 데이터 무결성 검증')
+    parser = argparse.ArgumentParser(description='전체 NuScenes 데이터 무결성 검증')
     parser.add_argument('--data-root', required=True, 
                        help='NuScenes 데이터 루트 디렉토리')
     parser.add_argument('--version', default='v1.0-trainval',
                        help='NuScenes 버전 (기본값: v1.0-trainval)')
-    parser.add_argument('--max-samples', type=int, default=10,
-                       help='검증할 최대 샘플 수 (기본값: 10)')
-    parser.add_argument('--output', default='nuscenes_integrity_report.txt',
-                       help='리포트 출력 파일 (기본값: nuscenes_integrity_report.txt)')
+    parser.add_argument('--parallel', action='store_true',
+                       help='병렬 처리 사용')
+    parser.add_argument('--num-workers', type=int, default=4,
+                       help='병렬 처리 시 워커 수 (기본값: 4)')
+    parser.add_argument('--output', default='nuscenes_full_integrity_report.txt',
+                       help='리포트 출력 파일 (기본값: nuscenes_full_integrity_report.txt)')
     
     args = parser.parse_args()
     
     # 검증 실행
-    checker = NuScenesIntegrityChecker(args.data_root, args.version)
-    results = checker.run_full_check(args.max_samples)
+    checker = NuScenesFullIntegrityChecker(
+        args.data_root, 
+        args.version,
+        use_parallel=args.parallel,
+        num_workers=args.num_workers
+    )
+    results = checker.run_full_check()
     
     # 리포트 생성 및 저장
     report = checker.generate_report(results)
