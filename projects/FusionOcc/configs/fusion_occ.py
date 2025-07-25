@@ -1,4 +1,4 @@
-_base_ = ['../../configs/_base_/datasets/nus-3d.py', '../../configs/_base_/default_runtime.py']
+_base_ = ['../../../configs/_base_/datasets/nus-3d.py', '../../../configs/_base_/default_runtime.py']
 # Global
 # If point cloud range is changed, the models should also change their point
 # cloud range accordingly
@@ -58,71 +58,70 @@ model = dict(
     align_after_view_transformation=True,
     num_adj=len(range(*multi_adj_frame_id_cfg)),
     fuse_loss_weight=0.1,
-    # Placeholder for image backbone (would need to be implemented)
-    # img_backbone=dict(
-    #     type='SwinTransformer',
-    #     pretrain_img_size=224,
-    #     patch_size=4,
-    #     window_size=12,
-    #     mlp_ratio=4,
-    #     embed_dims=128,
-    #     depths=[2, 2, 18, 2],
-    #     num_heads=[4, 8, 16, 32],
-    #     strides=(4, 2, 2, 2),
-    #     out_indices=(2, 3),
-    #     qkv_bias=True,
-    #     qk_scale=None,
-    #     patch_norm=True,
-    #     drop_rate=0.,
-    #     attn_drop_rate=0.,
-    #     drop_path_rate=0.1,
-    #     use_abs_pos_embed=False,
-    #     return_stereo_feat=True,
-    #     act_cfg=dict(type='GELU'),
-    #     norm_cfg=dict(type='LN', requires_grad=True),
-    #     pretrain_style='official',
-    #     output_missing_index_as_none=False),
-    # img_neck=dict(
-    #     type='FPN_LSS',
-    #     in_channels=512 + 1024,
-    #     out_channels=img_backbone_out_channel,
-    #     extra_upsample=None,
-    #     input_feature_index=(0, 1),
-    #     scale_factor=2),
-    # img_view_transformer=dict(
-    #     type='CrossModalLSS',
-    #     feature_channels=feature_channel,
-    #     seg_num_classes=num_classes,
-    #     grid_config=grid_config,
-    #     input_size=data_config['input_size'],
-    #     in_channels=img_backbone_out_channel,
-    #     mid_channels=128,
-    #     depth_channels=88,
-    #     is_train=True,  # set to False during inference
-    #     out_channels=img_channels,
-    #     sid=False,
-    #     collapse_z=False,
-    #     depthnet_cfg=dict(aspp_mid_channels=96, ),
-    #     downsample=16),
-    # pre_process=dict(
-    #     type='CustomResNet3D',
-    #     numC_input=img_channels,
-    #     with_cp=False,
-    #     num_layer=[1, ],
-    #     num_channels=[img_channels, ],
-    #     stride=[1, ],
-    #     backbone_output_ids=[0, ]),
-    # occ_encoder_backbone=dict(
-    #     type='CustomResNet3D',
-    #     numC_input=img_channels * (len(range(*multi_adj_frame_id_cfg)) + 1) + lidar_out_channel,
-    #     num_layer=[1, 2, 3],
-    #     with_cp=False,
-    #     num_channels=[numC_Trans, numC_Trans * 2, numC_Trans * 4],
-    #     stride=[1, 2, 2],
-    #     backbone_output_ids=[0, 1, 2]),
-    # occ_encoder_neck=dict(type='LSSFPN3D',
-    #                       in_channels=numC_Trans * 7,
-    #                       out_channels=numC_Trans),
+    img_backbone=dict(
+        type='SwinTransformer',
+        pretrain_img_size=224,
+        patch_size=4,
+        window_size=12,
+        mlp_ratio=4,
+        embed_dims=128,
+        depths=[2, 2, 18, 2],
+        num_heads=[4, 8, 16, 32],
+        strides=(4, 2, 2, 2),
+        out_indices=(2, 3),
+        qkv_bias=True,
+        qk_scale=None,
+        patch_norm=True,
+        drop_rate=0.,
+        attn_drop_rate=0.,
+        drop_path_rate=0.1,
+        use_abs_pos_embed=False,
+        return_stereo_feat=True,
+        act_cfg=dict(type='GELU'),
+        norm_cfg=dict(type='LN', requires_grad=True),
+        pretrain_style='official',
+        output_missing_index_as_none=False),
+    img_neck=dict(
+        type='FPN_LSS',
+        in_channels=512 + 1024,
+        out_channels=img_backbone_out_channel,
+        extra_upsample=None,
+        input_feature_index=(0, 1),
+        scale_factor=2),
+    img_view_transformer=dict(
+        type='CrossModalLSS',
+        feature_channels=feature_channel,
+        seg_num_classes=num_classes,
+        grid_config=grid_config,
+        input_size=data_config['input_size'],
+        in_channels=img_backbone_out_channel,
+        mid_channels=128,
+        depth_channels=88,
+        is_train=True,  # set to False during inference
+        out_channels=img_channels,
+        sid=False,
+        collapse_z=False,
+        depthnet_cfg=dict(aspp_mid_channels=96, ),
+        downsample=16),
+    pre_process=dict(
+        type='CustomResNet3D',
+        numC_input=img_channels,
+        with_cp=False,
+        num_layer=[1, ],
+        num_channels=[img_channels, ],
+        stride=[1, ],
+        backbone_output_ids=[0, ]),
+    occ_encoder_backbone=dict(
+        type='CustomResNet3D',
+        numC_input=img_channels * (len(range(*multi_adj_frame_id_cfg)) + 1) + lidar_out_channel,
+        num_layer=[1, 2, 3],
+        with_cp=False,
+        num_channels=[numC_Trans, numC_Trans * 2, numC_Trans * 4],
+        stride=[1, 2, 2],
+        backbone_output_ids=[0, 1, 2]),
+    occ_encoder_neck=dict(type='LSSFPN3D',
+                          in_channels=numC_Trans * 7,
+                          out_channels=numC_Trans),
     out_dim=numC_Trans,
     loss_occ=dict(
         type='CrossEntropyLoss',
@@ -134,7 +133,7 @@ model = dict(
 # Data
 dataset_type = 'FusionOccDataset'  # Use FusionOcc specific dataset
 data_root = 'data/nuscenes/'
-# img_seg_dir = 'data/nuscenes/imgseg/samples'  # Commented out as not available
+img_seg_dir = 'data/nuscenes/imgseg/samples'
 file_client_args = dict(backend='disk')
 
 bda_aug_conf = dict(
@@ -144,15 +143,15 @@ bda_aug_conf = dict(
     flip_dy_ratio=0.5)
 
 train_pipeline = [
-    # dict(
-    #     type='PrepareImageSeg',
-    #     downsample=1,
-    #     is_train=True,
-    #     data_config=data_config,
-    #     sequential=True,
-    #     img_seg_dir=img_seg_dir
-    # ),
-    # dict(type='LoadOccGTFromFile'),
+    dict(
+        type='PrepareImageSeg',
+        downsample=1,
+        is_train=True,
+        data_config=data_config,
+        sequential=True,
+        img_seg_dir=img_seg_dir
+    ),
+    dict(type='LoadOccGTFromFile'),
     dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',
@@ -179,15 +178,15 @@ train_pipeline = [
 ]
 
 test_pipeline = [
-    # dict(
-    #     type='PrepareImageSeg',
-    #     restore_upsample=8,  # Consistent with downsampling when generating image segmentation
-    #     downsample=1,
-    #     data_config=data_config,
-    #     sequential=True,
-    #     img_seg_dir=img_seg_dir
-    # ),
-    # dict(type='LoadOccGTFromFile'),
+    dict(
+        type='PrepareImageSeg',
+        restore_upsample=8,  # Consistent with downsampling when generating image segmentation
+        downsample=1,
+        data_config=data_config,
+        sequential=True,
+        img_seg_dir=img_seg_dir
+    ),
+    dict(type='LoadOccGTFromFile'),
     dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',
@@ -277,6 +276,17 @@ lr_config = dict(
 
 evaluation = dict(interval=1, pipeline=test_pipeline)
 runner = dict(type='EpochBasedRunner', max_epochs=24)
+
+# Test settings - these should be None for testing
+train_dataloader = None
+train_cfg = None
+optim_wrapper = None
+val_dataloader = None
+val_cfg = None
+val_evaluator = None
+test_dataloader = None
+test_cfg = None
+test_evaluator = None
 
 custom_hooks = [
     dict(
