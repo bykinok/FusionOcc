@@ -7,9 +7,14 @@ import warnings
 from os import path as osp
 from setuptools import find_packages, setup
 
-import torch
-from torch.utils.cpp_extension import (BuildExtension, CppExtension,
-                                       CUDAExtension)
+try:
+    import torch
+    from torch.utils.cpp_extension import (BuildExtension, CppExtension,
+                                           CUDAExtension)
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    print("Warning: PyTorch not available, skipping CUDA extensions")
 
 
 def readme():
@@ -33,6 +38,10 @@ def make_cuda_ext(name,
                   sources_cuda=[],
                   extra_args=[],
                   extra_include_path=[]):
+
+    if not TORCH_AVAILABLE:
+        print('PyTorch not available, skipping CUDA extension: {}'.format(name))
+        return None
 
     define_macros = []
     extra_compile_args = {'cxx': [] + extra_args}
@@ -223,5 +232,5 @@ if __name__ == '__main__':
             'mim': parse_requirements('requirements/mminstall.txt'),
         },
         ext_modules=[],
-        cmdclass={'build_ext': BuildExtension},
+        cmdclass={'build_ext': BuildExtension} if TORCH_AVAILABLE else {},
         zip_safe=False)

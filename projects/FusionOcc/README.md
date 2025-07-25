@@ -108,7 +108,7 @@ bash tools/dist_test.sh projects/FusionOcc/configs/fusion_occ.py work_dirs/fusio
 2. FusionOcc용 데이터 전처리 실행:
 
 ```bash
-python tools/create_data.py fusionocc --root-path ./data/nuscenes/ --out-dir ./data/nuscenes/ --extra-tag fusionocc-nuscenes
+python tools/create_data.py fusionocc --root-path ./data/nuscenes/ --out-dir ./data/nuscenes/ --extra-tag fusionocc-nuscenes --version v1.0-trainval
 ```
 
 ## 모델 성능

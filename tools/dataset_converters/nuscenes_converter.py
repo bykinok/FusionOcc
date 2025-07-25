@@ -558,8 +558,12 @@ def post_process_coords(
 
     if polygon_from_2d_box.intersects(img_canvas):
         img_intersection = polygon_from_2d_box.intersection(img_canvas)
-        intersection_coords = np.array(
-            [coord for coord in img_intersection.exterior.coords])
+        if hasattr(img_intersection, 'exterior'):
+            intersection_coords = np.array(
+                [coord for coord in img_intersection.exterior.coords])
+        else:
+            # Fallback for non-Polygon intersection types
+            return None
 
         min_x = min(intersection_coords[:, 0])
         min_y = min(intersection_coords[:, 1])
@@ -632,4 +636,4 @@ def generate_record(ann_rec: dict, x1: float, y1: float, x2: float, y2: float,
     coco_rec['bbox'] = [x1, y1, x2 - x1, y2 - y1]
     coco_rec['iscrowd'] = 0
 
-    return coco_rec
+    return OrderedDict(coco_rec)
