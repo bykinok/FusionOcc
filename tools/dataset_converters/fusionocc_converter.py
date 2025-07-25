@@ -516,7 +516,7 @@ def create_fusionocc_infos(root_path,
                     'cam2ego': cam2ego_matrix,
                     'sample_data_token': cam_info['sample_data_token'],
                     'timestamp': cam_info['timestamp'] / 1e6,  # Convert to seconds
-                    'lidar2cam': lidar2sensor.tolist()  # Convert to list like nuscenes_converter.py
+                    'lidar2cam': lidar2sensor.astype(np.float32).tolist()  # Convert to float32 list like nuscenes_converter.py
                 }
                 
                 # Generate camera instances for each camera using nuScenes visibility annotation
