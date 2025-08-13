@@ -1,0 +1,5 @@
+Acquire::https::Verify-Peer "false";
+Acquire::https::Verify-Host "false";
+
+Acquire::http::Proxy "http://10.225.20.208:3128";
+Acquire::https::Proxy "http://10.225.20.208:3128";

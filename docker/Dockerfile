@@ -1,92 +1,68 @@
 # Use NVIDIA CUDA base image with Python 3.10
-FROM nvidia/cuda:12.1-devel-ubuntu20.04
+FROM nvidia/cuda:12.4.1-devel-ubuntu20.04
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
-ENV TORCH_CUDA_ARCH_LIST="6.0 6.1 7.0 7.5 8.0 8.6+PTX"
+ENV TORCH_CUDA_ARCH_LIST="6.0 6.1 7.0 7.5 8.0 8.6 9.0+PTX"
 ENV TORCH_NVCC_FLAGS="-Xfatbin -compress-all"
 ENV FORCE_CUDA="1"
 
-# Set working directory
-WORKDIR /workspace/FusionOcc
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    python3.10 \
-    python3.10-dev \
-    python3-pip \
-    git \
-    wget \
-    curl \
-    vim \
-    build-essential \
-    cmake \
-    ninja-build \
-    libglib2.0-0 \
-    libsm6 \
-    libxrender-dev \
-    libxext6 \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    ffmpeg \
-    libsm6 \
-    libxext6 \
+# Install the required packages
+RUN apt-get update \
+    && apt-get install -y ffmpeg libsm6 libxext6 git ninja-build libglib2.0-0 libsm6 libxrender-dev libxext6 \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Create symbolic link for python
-RUN ln -s /usr/bin/python3.10 /usr/bin/python
 
-# Upgrade pip
-RUN python -m pip install --upgrade pip
+# Miniconda 설치
+RUN apt-get update && apt-get install -y wget bzip2 && \
+    wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh && \
+    bash /tmp/miniconda.sh -b -p /opt/conda && \
+    rm /tmp/miniconda.sh && \
+    /opt/conda/bin/conda clean -afy
 
-# Install PyTorch with CUDA support
-RUN pip install torch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu121
+ENV PATH="/opt/conda/bin:$PATH"
 
-# Install MMCV and MMDetection
+# conda 최신화 및 pytorch 설치
+RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+
+RUN conda update -n base -c defaults conda -y 
+
+# Miniconda base 환경의 Python 버전을 3.10으로 맞춤
+RUN conda install -y python=3.10
+
+# Install PyTorch with CUDA support 
+RUN pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu124
+
+
+# Install MMCV and MMDetection (skip for now due to network issues)
 RUN pip install openmim && \
-    mim install "mmengine>=0.10.3" "mmcv>=2.1.0" "mmdet>=3.2.0"
+    mim install "mmengine==0.10.3" "mmcv==2.1.0" "mmdet==3.2.0"
 
-# Install additional dependencies
+# Install additional dependencies (skip for now due to network issues)
 RUN pip install \
     lyft_dataset_sdk \
-    networkx>=2.5 \
-    numba \
-    numpy<2.0 \
-    nuscenes-devkit \
-    open3d \
+    "networkx>=2.5" \
+    "numba" \
+    "numpy<2.0" \
+    "nuscenes-devkit" \
+    "open3d" \
     plyfile \
     scikit-image \
     tensorboard \
     trimesh \
-    torch-scatter==2.1.2
+    torch-scatter -f https://data.pyg.org/whl/torch-2.4.0+cu124.html
 
-# Install optional dependencies
-RUN pip install \
-    black==20.8b1 \
-    typing-extensions \
-    waymo-open-dataset-tf-2-11-0
+# Install MMDetection3D
+RUN conda clean --all \
+&& git clone https://github.com/bykinok/FusionOcc.git -b fusionocc-integration /workspace/FusionOcc \
+&& cd /workspace/FusionOcc \
+&& pip install --no-cache-dir -e .
 
-# Install test dependencies
-RUN pip install \
-    codecov \
-    flake8 \
-    interrogate \
-    isort \
-    kwarray \
-    parameterized \
-    pytest \
-    pytest-cov \
-    pytest-runner \
-    ubelt \
-    xdoctest>=0.10.0 \
-    yapf
-
-# Copy the current project files
-COPY . /workspace/FusionOcc/
-
-# Install the project in development mode
-RUN pip install -e .
+# Set working directory
+WORKDIR /workspace/FusionOcc
 
 # Set default command
 CMD ["/bin/bash"] 
