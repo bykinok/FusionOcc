@@ -8,12 +8,15 @@ ENV TORCH_CUDA_ARCH_LIST="6.0 6.1 7.0 7.5 8.0 8.6 9.0+PTX"
 ENV TORCH_NVCC_FLAGS="-Xfatbin -compress-all"
 ENV FORCE_CUDA="1"
 
+# 사내 CA 인증서 복사
+COPY ssl_hlcompany.crt /usr/local/share/ca-certificates/ssl_hlcompany.crt
+RUN update-ca-certificates
+
 # Install the required packages
 RUN apt-get update \
     && apt-get install -y ffmpeg libsm6 libxext6 git ninja-build libglib2.0-0 libsm6 libxrender-dev libxext6 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-
 
 # Miniconda 설치
 RUN apt-get update && apt-get install -y wget bzip2 && \
@@ -25,16 +28,19 @@ RUN apt-get update && apt-get install -y wget bzip2 && \
 ENV PATH="/opt/conda/bin:$PATH"
 
 # conda 최신화 및 pytorch 설치
-RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
-    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-
-RUN conda update -n base -c defaults conda -y 
+RUN conda config --set ssl_verify false && \
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r && \
+    conda update -n base -c defaults conda -y
 
 # Miniconda base 환경의 Python 버전을 3.10으로 맞춤
 RUN conda install -y python=3.10
 
 # Install PyTorch with CUDA support 
-RUN pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu124
+RUN pip install --trusted-host download.pytorch.org \
+    torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
+    --index-url https://download.pytorch.org/whl/cu124 \
+    --trusted-host pypi.org --trusted-host files.pythonhosted.org
 
 
 # Install MMCV and MMDetection (skip for now due to network issues)
