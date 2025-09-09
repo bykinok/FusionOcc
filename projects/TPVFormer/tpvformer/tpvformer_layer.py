@@ -173,16 +173,12 @@ class TPVFormerLayer(BaseModule):
             if layer == 'self_attn':
                 ss = torch.tensor(
                     [[tpv_h, tpv_w], [tpv_z, tpv_h], [tpv_w, tpv_z]],
-                    device=query[0].device)
+                    device=query.device)
                 lsi = torch.tensor(
                     [0, tpv_h * tpv_w, tpv_h * tpv_w + tpv_z * tpv_h],
-                    device=query[0].device)
+                    device=query.device)
 
-                if not isinstance(query, (list, tuple)):
-                    query = torch.split(
-                        query, [tpv_h * tpv_w, tpv_z * tpv_h, tpv_w * tpv_z],
-                        dim=1)
-
+                # 원본 구현과 호환되도록 단일 텐서로 전달
                 query = self.attentions[attn_index](
                     query,
                     identity if self.pre_norm else None,
@@ -192,7 +188,6 @@ class TPVFormerLayer(BaseModule):
                     level_start_index=lsi,
                     **kwargs)
                 attn_index += 1
-                query = torch.cat(query, dim=1)
                 identity = query
 
             elif layer == 'norm':
@@ -218,6 +213,6 @@ class TPVFormerLayer(BaseModule):
                 query = self.ffns[ffn_index](
                     query, identity if self.pre_norm else None)
                 ffn_index += 1
-        query = torch.split(
-            query, [tpv_h * tpv_w, tpv_z * tpv_h, tpv_w * tpv_z], dim=1)
+        
+        # 원본 구현과 호환되도록 단일 텐서 반환
         return query

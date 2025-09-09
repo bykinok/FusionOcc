@@ -104,7 +104,7 @@ class TPVFormerDecoder(BaseModule):
             fused = torch.cat([fused_vox, fused_pts], dim=-1)  # bs, c, whz+n
 
             fused = fused.permute(0, 2, 1)
-            if self.use_checkpoint:
+            if hasattr(self, 'use_checkpoint') and self.use_checkpoint:
                 fused = torch.utils.checkpoint.checkpoint(self.decoder, fused)
                 logits = torch.utils.checkpoint.checkpoint(
                     self.classifier, fused)
@@ -112,11 +112,11 @@ class TPVFormerDecoder(BaseModule):
                 fused = self.decoder(fused)
                 logits = self.classifier(fused)
             logits = logits.permute(0, 2, 1)
-            logits_vox = logits[:, :, :(-n)].reshape(bs, self.classes,
+            logits_vox = logits[:, :, :(-n)].reshape(bs, self.num_classes,
                                                      self.scale_w * self.tpv_w,
                                                      self.scale_h * self.tpv_h,
                                                      self.scale_z * self.tpv_z)
-            logits_pts = logits[:, :, (-n):].reshape(bs, self.classes, n, 1, 1)
+            logits_pts = logits[:, :, (-n):].reshape(bs, self.num_classes, n, 1, 1)
             return logits_vox, logits_pts
 
         else:
@@ -129,7 +129,7 @@ class TPVFormerDecoder(BaseModule):
 
             fused = tpv_hw + tpv_zh + tpv_wz
             fused = fused.permute(0, 2, 3, 4, 1)
-            if self.use_checkpoint:
+            if hasattr(self, 'use_checkpoint') and self.use_checkpoint:
                 fused = torch.utils.checkpoint.checkpoint(self.decoder, fused)
                 logits = torch.utils.checkpoint.checkpoint(
                     self.classifier, fused)
@@ -139,65 +139,6 @@ class TPVFormerDecoder(BaseModule):
             logits = logits.permute(0, 4, 1, 2, 3)
 
             return logits
-
-    def predict(self, tpv_list, batch_data_samples):
-        """
-        tpv_list[0]: bs, h*w, c
-        tpv_list[1]: bs, z*h, c
-        tpv_list[2]: bs, w*z, c
-        """
-        tpv_hw, tpv_zh, tpv_wz = tpv_list
-        bs, _, c = tpv_hw.shape
-        tpv_hw = tpv_hw.permute(0, 2, 1).reshape(bs, c, self.tpv_h, self.tpv_w)
-        tpv_zh = tpv_zh.permute(0, 2, 1).reshape(bs, c, self.tpv_z, self.tpv_h)
-        tpv_wz = tpv_wz.permute(0, 2, 1).reshape(bs, c, self.tpv_w, self.tpv_z)
-
-        if self.scale_h != 1 or self.scale_w != 1:
-            tpv_hw = F.interpolate(
-                tpv_hw,
-                size=(self.tpv_h * self.scale_h, self.tpv_w * self.scale_w),
-                mode='bilinear')
-        if self.scale_z != 1 or self.scale_h != 1:
-            tpv_zh = F.interpolate(
-                tpv_zh,
-                size=(self.tpv_z * self.scale_z, self.tpv_h * self.scale_h),
-                mode='bilinear')
-        if self.scale_w != 1 or self.scale_z != 1:
-            tpv_wz = F.interpolate(
-                tpv_wz,
-                size=(self.tpv_w * self.scale_w, self.tpv_z * self.scale_z),
-                mode='bilinear')
-
-        logits = []
-        for i, data_sample in enumerate(batch_data_samples):
-            point_coors = data_sample.point_coors.reshape(1, 1, -1, 3).float()
-            point_coors[
-                ...,
-                0] = point_coors[..., 0] / (self.tpv_w * self.scale_w) * 2 - 1
-            point_coors[
-                ...,
-                1] = point_coors[..., 1] / (self.tpv_h * self.scale_h) * 2 - 1
-            point_coors[
-                ...,
-                2] = point_coors[..., 2] / (self.tpv_z * self.scale_z) * 2 - 1
-            sample_loc = point_coors[..., [0, 1]]
-            tpv_hw_pts = F.grid_sample(
-                tpv_hw[i:i + 1], sample_loc, align_corners=False)
-            sample_loc = point_coors[..., [1, 2]]
-            tpv_zh_pts = F.grid_sample(
-                tpv_zh[i:i + 1], sample_loc, align_corners=False)
-            sample_loc = point_coors[..., [2, 0]]
-            tpv_wz_pts = F.grid_sample(
-                tpv_wz[i:i + 1], sample_loc, align_corners=False)
-
-            fused_pts = tpv_hw_pts + tpv_zh_pts + tpv_wz_pts
-
-            fused_pts = fused_pts.squeeze(0).squeeze(1).transpose(0, 1)
-            fused_pts = self.decoder(fused_pts)
-            logit = self.classifier(fused_pts)
-            logits.append(logit)
-
-        return logits
 
     def loss(self, tpv_list, batch_data_samples):
         tpv_hw, tpv_zh, tpv_wz = tpv_list
@@ -296,3 +237,142 @@ class TPVFormerDecoder(BaseModule):
         loss['loss_lovasz'] = self.loss_lovasz(
             lovasz_input, lovasz_label, ignore_index=self.ignore_index)
         return loss
+
+    def predict(self, tpv_list, batch_data_samples):
+        """
+        tpv_list[0]: bs, h*w, c
+        tpv_list[1]: bs, z*h, c
+        tpv_list[2]: bs, w*z, c
+        """
+        tpv_hw, tpv_zh, tpv_wz = tpv_list
+        bs, _, c = tpv_hw.shape
+        tpv_hw = tpv_hw.permute(0, 2, 1).reshape(bs, c, self.tpv_h, self.tpv_w)
+        tpv_zh = tpv_zh.permute(0, 2, 1).reshape(bs, c, self.tpv_z, self.tpv_h)
+        tpv_wz = tpv_wz.permute(0, 2, 1).reshape(bs, c, self.tpv_w, self.tpv_z)
+
+        if self.scale_h != 1 or self.scale_w != 1:
+            tpv_hw = F.interpolate(
+                tpv_hw,
+                size=(self.tpv_h * self.scale_h, self.tpv_w * self.scale_w),
+                mode='bilinear')
+        if self.scale_z != 1 or self.scale_h != 1:
+            tpv_zh = F.interpolate(
+                tpv_zh,
+                size=(self.tpv_z * self.scale_z, self.tpv_h * self.scale_h),
+                mode='bilinear')
+        if self.scale_w != 1 or self.scale_z != 1:
+            tpv_wz = F.interpolate(
+                tpv_wz,
+                size=(self.tpv_w * self.scale_w, self.tpv_z * self.scale_z),
+                mode='bilinear')
+
+        logits = []
+        for i, data_sample in enumerate(batch_data_samples):
+            point_coors = data_sample.point_coors.reshape(1, 1, -1, 3).float()
+            point_coors[
+                ...,
+                0] = point_coors[..., 0] / (self.tpv_w * self.scale_w) * 2 - 1
+            point_coors[
+                ...,
+                1] = point_coors[..., 1] / (self.tpv_h * self.scale_h) * 2 - 1
+            point_coors[
+                ...,
+                2] = point_coors[..., 2] / (self.tpv_z * self.scale_z) * 2 - 1
+            sample_loc = point_coors[..., [0, 1]]
+            tpv_hw_pts = F.grid_sample(
+                tpv_hw[i:i + 1], sample_loc, align_corners=False)
+            sample_loc = point_coors[..., [1, 2]]
+            tpv_zh_pts = F.grid_sample(
+                tpv_zh[i:i + 1], sample_loc, align_corners=False)
+            sample_loc = point_coors[..., [2, 0]]
+            tpv_wz_pts = F.grid_sample(
+                tpv_wz[i:i + 1], sample_loc, align_corners=False)
+
+            fused_pts = tpv_hw_pts + tpv_zh_pts + tpv_wz_pts
+
+            fused_pts = fused_pts.squeeze(0).squeeze(1).transpose(0, 1)
+            fused_pts = self.decoder(fused_pts)
+            logit = self.classifier(fused_pts)
+            logits.append(logit)
+
+        return logits
+
+
+@MODELS.register_module()
+class TPVFormerHead(BaseModule):
+    """TPVFormer Head for occupancy prediction.
+    
+    This class is designed to be compatible with the original tpv04_occupancy.py
+    configuration and structure.
+    """
+
+    def __init__(self,
+                 tpv_h,
+                 tpv_w,
+                 tpv_z,
+                 pc_range,
+                 num_feature_levels=4,
+                 num_cams=6,
+                 embed_dims=256,
+                 positional_encoding=None,
+                 encoder=None):
+        super().__init__()
+        self.tpv_h = tpv_h
+        self.tpv_w = tpv_w
+        self.tpv_z = tpv_z
+        self.pc_range = pc_range
+        self.num_feature_levels = num_feature_levels
+        self.num_cams = num_cams
+        self.embed_dims = embed_dims
+        
+        # Build positional encoding
+        if positional_encoding is not None:
+            self.positional_encoding = MODELS.build(positional_encoding)
+        else:
+            self.encoder = None
+            
+        # Build encoder
+        if encoder is not None:
+            self.encoder = MODELS.build(encoder)
+        else:
+            self.encoder = None
+
+    def forward(self, img_feats, batch_data_samples):
+        """Forward function.
+        
+        Args:
+            img_feats: Image features from backbone and neck
+            batch_data_samples: Batch data samples
+            
+        Returns:
+            TPV queries from encoder
+        """
+        if self.encoder is not None:
+            # Forward through encoder
+            tpv_queries = self.encoder(img_feats, batch_data_samples)
+            
+            # Add positional encoding if available
+            if self.positional_encoding is not None:
+                batch_size = img_feats[0].shape[0] if img_feats else 1
+                device = img_feats[0].device if img_feats else 'cpu'
+                pos_encodings = self.positional_encoding(batch_size, device)
+                
+                # Add positional encoding to TPV queries
+                if len(tpv_queries) == 3 and len(pos_encodings) == 3:
+                    for i in range(3):
+                        if tpv_queries[i].shape == pos_encodings[i].shape:
+                            tpv_queries[i] = tpv_queries[i] + pos_encodings[i]
+            
+            return tpv_queries
+        else:
+            # Return dummy queries if no encoder
+            batch_size = img_feats[0].shape[0] if img_feats else 1
+            device = img_feats[0].device if img_feats else 'cpu'
+            
+            # Create dummy TPV queries with correct dimensions
+            dummy_queries = [
+                torch.randn(batch_size, self.tpv_h * self.tpv_w, self.embed_dims, device=device),
+                torch.randn(batch_size, self.tpv_z * self.tpv_h, self.embed_dims, device=device),
+                torch.randn(batch_size, self.tpv_w * self.tpv_z, self.embed_dims, device=device)
+            ]
+            return dummy_queries

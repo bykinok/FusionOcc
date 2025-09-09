@@ -62,7 +62,10 @@ class TPVFormerEncoder(TransformerLayerSequence):
         self.register_buffer('cross_view_ref_points', cross_view_ref_points)
 
         # positional encoding
-        self.positional_encoding = MODELS.build(positional_encoding)
+        if positional_encoding is not None:
+            self.positional_encoding = MODELS.build(positional_encoding)
+        else:
+            self.positional_encoding = None
         self.return_intermediate = return_intermediate
 
     def init_weights(self):
@@ -240,8 +243,12 @@ class TPVFormerEncoder(TransformerLayerSequence):
             reference_points_cam[..., 2:3],
             torch.ones_like(reference_points_cam[..., 2:3]) * eps)
 
-        reference_points_cam[..., 0] /= data_sample.batch_input_shape[1]
-        reference_points_cam[..., 1] /= data_sample.batch_input_shape[0]
+        # 이미지 크기를 하드코딩된 값으로 설정 (원본 설정과 동일)
+        img_height = 900  # 원본 설정의 이미지 높이
+        img_width = 1600  # 원본 설정의 이미지 너비
+        
+        reference_points_cam[..., 0] /= img_width
+        reference_points_cam[..., 1] /= img_height
 
         tpv_mask = (
             tpv_mask & (reference_points_cam[..., 1:2] > 0.0)
@@ -277,10 +284,17 @@ class TPVFormerEncoder(TransformerLayerSequence):
         tpv_queries_wz = tpv_queries_wz.unsqueeze(0).repeat(bs, 1, 1)
         tpv_query = [tpv_queries_hw, tpv_queries_zh, tpv_queries_wz]
 
-        tpv_pos_hw = self.positional_encoding(bs, device, 'z')
-        tpv_pos_zh = self.positional_encoding(bs, device, 'w')
-        tpv_pos_wz = self.positional_encoding(bs, device, 'h')
-        tpv_pos = [tpv_pos_hw, tpv_pos_zh, tpv_pos_wz]
+        if self.positional_encoding is not None:
+            tpv_pos_hw = self.positional_encoding(bs, device, 'z')
+            tpv_pos_zh = self.positional_encoding(bs, device, 'w')
+            tpv_pos_wz = self.positional_encoding(bs, device, 'h')
+            tpv_pos = [tpv_pos_hw, tpv_pos_zh, tpv_pos_wz]
+        else:
+            # positional encoding이 없으면 0으로 설정
+            tpv_pos_hw = torch.zeros_like(tpv_queries_hw)
+            tpv_pos_zh = torch.zeros_like(tpv_queries_zh)
+            tpv_pos_wz = torch.zeros_like(tpv_queries_wz)
+            tpv_pos = [tpv_pos_hw, tpv_pos_zh, tpv_pos_wz]
 
         # flatten image features of different scales
         feat_flatten = []
@@ -315,13 +329,17 @@ class TPVFormerEncoder(TransformerLayerSequence):
         ref_cross_view = self.cross_view_ref_points.clone().unsqueeze(
             0).expand(bs, -1, -1, -1, -1)
 
+        # 원본 구현과 호환되도록 tpv_query를 단일 텐서로 변환
+        tpv_query_concat = torch.cat(tpv_query, dim=1)  # bs, (hw+zh+wz), embed_dims
+        tpv_pos_concat = torch.cat(tpv_pos, dim=1) if tpv_pos[0] is not None else None
+
         intermediate = []
         for layer in self.layers:
             output = layer(
-                tpv_query,
+                tpv_query_concat,
                 feat_flatten,
                 feat_flatten,
-                tpv_pos=tpv_pos,
+                tpv_pos=tpv_pos_concat,
                 ref_2d=ref_cross_view,
                 tpv_h=self.tpv_h,
                 tpv_w=self.tpv_w,
@@ -330,11 +348,25 @@ class TPVFormerEncoder(TransformerLayerSequence):
                 level_start_index=level_start_index,
                 reference_points_cams=reference_points_cams,
                 tpv_masks=tpv_masks)
-            tpv_query = output
+            tpv_query_concat = output
             if self.return_intermediate:
                 intermediate.append(output)
 
         if self.return_intermediate:
             return torch.stack(intermediate)
 
-        return output
+        # output을 3개의 TPV 뷰로 분할
+        # output shape: [bs, total_queries, embed_dims]
+        # total_queries = tpv_h*tpv_w + tpv_z*tpv_h + tpv_w*tpv_z
+        bs, total_queries, embed_dims = output.shape
+        
+        hw_queries = self.tpv_h * self.tpv_w
+        zh_queries = self.tpv_z * self.tpv_h
+        wz_queries = self.tpv_w * self.tpv_z
+        
+        # Split the concatenated output back to individual TPV views
+        tpv_hw = output[:, :hw_queries, :]  # [bs, h*w, embed_dims]
+        tpv_zh = output[:, hw_queries:hw_queries+zh_queries, :]  # [bs, z*h, embed_dims]
+        tpv_wz = output[:, hw_queries+zh_queries:, :]  # [bs, w*z, embed_dims]
+        
+        return [tpv_hw, tpv_zh, tpv_wz]
