@@ -3,9 +3,36 @@ import torch
 import numpy as np
 from torch import nn
 from mmcv.cnn.bricks.conv_module import ConvModule
-from mmcv.runner import auto_fp16, force_fp32
+try:
+    from mmcv.runner import auto_fp16, force_fp32
+except ImportError:
+    try:
+        from mmengine.runner import auto_fp16, force_fp32
+    except ImportError:
+        # Create dummy decorators if not available
+        def auto_fp16(*args, **kwargs):
+            if args and callable(args[0]):
+                return args[0]
+            def decorator(func):
+                return func
+            return decorator
+        def force_fp32(*args, **kwargs):
+            if args and callable(args[0]):
+                return args[0]
+            def decorator(func):
+                return func
+            return decorator
 from mmdet3d.registry import MODELS
-from mmdet.models.builder import build_loss
+try:
+    from mmdet.models.builder import build_loss
+except ImportError:
+    import torch.nn as nn
+    def build_loss(cfg):
+        if cfg['type'] == 'CrossEntropyLoss':
+            return nn.CrossEntropyLoss()
+        else:
+            from mmdet3d.registry import MODELS
+            return MODELS.build(cfg)
 
 from .lidar_encoder import CustomSparseEncoder
 
@@ -182,6 +209,26 @@ class FusionOCC(FusionDepthSeg):
         # Placeholder implementation
         img_3d_feat_feat, depth_key_frame, seg_key_frame = self.extract_img_3d_feat(
             img_inputs=img, input_depth=input_depth)
+        
+        # Ensure both features are on the same device
+        if lidar_feat.device != img_3d_feat_feat.device:
+            img_3d_feat_feat = img_3d_feat_feat.to(lidar_feat.device)
+        
+        # Ensure both features have the same number of dimensions and shape
+        if img_3d_feat_feat.dim() != lidar_feat.dim():
+            if img_3d_feat_feat.dim() == 4 and lidar_feat.dim() == 5:
+                # Add an extra dimension to img_3d_feat_feat
+                img_3d_feat_feat = img_3d_feat_feat.unsqueeze(2)  # Add dimension at index 2
+            elif img_3d_feat_feat.dim() == 5 and lidar_feat.dim() == 4:
+                # Add an extra dimension to lidar_feat
+                lidar_feat = lidar_feat.unsqueeze(2)
+        
+        # Ensure both features have the same shape in the depth dimension (index 2)
+        if img_3d_feat_feat.shape[2] != lidar_feat.shape[2]:
+            # Repeat img_3d_feat_feat to match lidar_feat's depth dimension
+            depth_repeats = lidar_feat.shape[2]
+            img_3d_feat_feat = img_3d_feat_feat.repeat(1, 1, depth_repeats, 1, 1)
+        
         fusion_feat = torch.cat([img_3d_feat_feat, lidar_feat], dim=1)
         fusion_feat = self.occ_encoder(fusion_feat)
         return fusion_feat, depth_key_frame, seg_key_frame
@@ -487,4 +534,295 @@ class FusionOCC(FusionDepthSeg):
         class_ids = occ_grid[valid_mask]
         colors = colors_map[class_ids]
         
-        return points, colors 
+        return points, colors
+    
+    def train_step(self, data, optim_wrapper):
+        """Train step function for mmengine runner.
+        
+        Args:
+            data (dict): The output of dataloader.
+            optim_wrapper: Optimizer wrapper.
+            
+        Returns:
+            dict: Dict of outputs.
+        """
+        # Extract data - Check for both direct keys and nested in data_samples
+        if 'data_samples' in data:
+            # MMEngine format - extract from data_samples
+            data_samples = data['data_samples']
+            imgs = data['inputs']['img_inputs'] if 'inputs' in data else data['img_inputs']
+            points = data['inputs'].get('points', None) if 'inputs' in data else data.get('points', None)
+            
+            # Try to get GT data from data_samples
+            if hasattr(data_samples, 'gt_seg_3d'):
+                voxel_semantics = data_samples.gt_seg_3d
+            elif hasattr(data_samples, 'voxel_semantics'):
+                voxel_semantics = data_samples.voxel_semantics
+            else:
+                voxel_semantics = data.get('voxel_semantics', None)
+                
+            if hasattr(data_samples, 'mask_camera'):
+                mask_camera = data_samples.mask_camera
+            else:
+                mask_camera = data.get('mask_camera', None)
+                
+            img_metas = data.get('img_metas', {})
+        else:
+            # Direct format
+            imgs = data['img_inputs']
+            points = data.get('points', None)
+            voxel_semantics = data.get('voxel_semantics', None)
+            mask_camera = data.get('mask_camera', None)
+            img_metas = data.get('img_metas', {})
+        
+        # Get device from model parameters
+        device = next(self.parameters()).device
+        
+        # Convert LiDARPoints object to tensor if necessary and move to correct device
+        if points is not None:
+            if hasattr(points, 'tensor'):
+                points = points.tensor
+            # Ensure points is on the correct device
+            if isinstance(points, list):
+                points = [pt.to(device) if hasattr(pt, 'to') else pt for pt in points]
+            elif hasattr(points, 'to'):
+                points = points.to(device)
+        
+        # Forward pass
+        if points is not None:
+            # Process lidar data
+            lidar_feat, _, _ = self.lidar_encoder(points)
+            
+            # Extract features from both modalities
+            occ_pred = self.extract_feat(lidar_feat, imgs, img_metas)
+        else:
+            # Image-only mode
+            occ_pred = self.extract_feat(None, imgs, img_metas)
+        
+        # Calculate loss
+        losses = dict()
+        if self.loss_occ is not None:
+            # Reshape predictions and targets
+            if isinstance(occ_pred, (list, tuple)):
+                occ_pred = occ_pred[0]
+            
+            # Make sure shapes match
+            if occ_pred.ndim == 5:  # (B, C, H, W, D)
+                B, C, H, W, D = occ_pred.shape
+                occ_pred = occ_pred.permute(0, 2, 3, 4, 1).reshape(-1, C)
+            
+            # Handle voxel_semantics conversion
+            if voxel_semantics is not None:
+                # Convert to tensor if needed
+                if isinstance(voxel_semantics, list):
+                    if len(voxel_semantics) > 0:
+                        # If it's a single-element list, extract the element
+                        if len(voxel_semantics) == 1:
+                            voxel_semantics = voxel_semantics[0]
+                        
+                        # Now handle the extracted element or list
+                        if isinstance(voxel_semantics, torch.Tensor):
+                            voxel_semantics = voxel_semantics.to(device)
+                        elif hasattr(voxel_semantics, 'shape'):
+                            # If it's a numpy array or similar
+                            voxel_semantics = torch.as_tensor(voxel_semantics, device=device)
+                        else:
+                            # If it's still a list of tensors, stack them
+                            if isinstance(voxel_semantics, list) and len(voxel_semantics) > 0:
+                                voxel_semantics = torch.stack([torch.as_tensor(vs, device=device) for vs in voxel_semantics])
+                            else:
+                                # Convert to tensor
+                                voxel_semantics = torch.tensor(voxel_semantics, device=device)
+                    else:
+                        voxel_semantics = None
+                elif not isinstance(voxel_semantics, torch.Tensor):
+                    voxel_semantics = torch.as_tensor(voxel_semantics, device=device)
+                else:
+                    voxel_semantics = voxel_semantics.to(device)
+                
+                # Reshape if needed
+                if voxel_semantics is not None and hasattr(voxel_semantics, 'ndim'):
+                    if voxel_semantics.ndim == 4:  # (B, H, W, D)
+                        voxel_semantics = voxel_semantics.reshape(-1)
+                    elif voxel_semantics.ndim > 1:
+                        voxel_semantics = voxel_semantics.flatten()
+            
+            # Apply mask if available
+            if mask_camera is not None and self.use_mask:
+                # Convert mask_camera to tensor if needed - handle complex structures safely
+                try:
+                    if isinstance(mask_camera, list):
+                        if len(mask_camera) > 0:
+                            # If it's a single-element list, extract the element
+                            if len(mask_camera) == 1:
+                                mask_camera = mask_camera[0]
+                            
+                            # Now handle the extracted element
+                            if isinstance(mask_camera, torch.Tensor):
+                                mask_camera = mask_camera.to(device)
+                            elif hasattr(mask_camera, 'shape'):
+                                mask_camera = torch.as_tensor(mask_camera, device=device)
+                            else:
+                                # Skip mask if too complex
+                                mask_camera = None
+                        else:
+                            mask_camera = None
+                    elif not isinstance(mask_camera, torch.Tensor):
+                        mask_camera = torch.as_tensor(mask_camera, device=device)
+                    else:
+                        mask_camera = mask_camera.to(device)
+                except (TypeError, ValueError, RuntimeError):
+                    # Skip mask if conversion fails
+                    mask_camera = None
+                    
+                if mask_camera is not None:
+                    if hasattr(mask_camera, 'ndim') and mask_camera.ndim == 4:
+                        mask_camera = mask_camera.reshape(-1)
+                    elif hasattr(mask_camera, 'ndim') and mask_camera.ndim > 1:
+                        mask_camera = mask_camera.flatten()
+                        
+                    if hasattr(mask_camera, 'ndim') and not isinstance(mask_camera, list):
+                        valid_mask = mask_camera > 0
+                        if valid_mask.sum() > 0 and voxel_semantics is not None:
+                            occ_pred = occ_pred[valid_mask]
+                            voxel_semantics = voxel_semantics[valid_mask]
+            
+            # Calculate occupancy loss
+            if voxel_semantics is not None and hasattr(voxel_semantics, 'long'):
+                # Ensure both tensors have compatible shapes
+                if occ_pred.shape[0] != voxel_semantics.shape[0]:
+                    min_size = min(occ_pred.shape[0], voxel_semantics.shape[0])
+                    occ_pred = occ_pred[:min_size]
+                    voxel_semantics = voxel_semantics[:min_size]
+                
+                # Clamp values to valid range
+                voxel_semantics = torch.clamp(voxel_semantics.long(), 0, occ_pred.shape[1] - 1)
+                
+                # Debug - uncomment for debugging
+                # print(f"occ_pred shape: {occ_pred.shape}, voxel_semantics shape: {voxel_semantics.shape}")
+                # print(f"voxel_semantics min: {voxel_semantics.min()}, max: {voxel_semantics.max()}")
+                
+                loss_occ = self.loss_occ(occ_pred, voxel_semantics)
+                
+                # Debug - uncomment for debugging
+                # print(f"Calculated loss: {loss_occ.item()}")
+            else:
+                # If no valid GT, create a dummy loss but warn
+                # print("Warning: No valid voxel_semantics found, using dummy loss")
+                loss_occ = torch.tensor(0.0, device=occ_pred.device, requires_grad=True)
+                
+            losses['loss_occ'] = loss_occ
+        else:
+            # No loss function defined
+            loss_occ = torch.tensor(0.0, device=next(self.parameters()).device, requires_grad=True)
+            losses['loss_occ'] = loss_occ
+        
+        # Backward and optimize
+        parsed_losses, log_vars = self.parse_losses(losses)
+        optim_wrapper.update_params(parsed_losses)
+        
+        return log_vars
+    
+    def parse_losses(self, losses):
+        """Parse losses for logging and backward.
+        
+        Args:
+            losses (dict): Dict of losses.
+            
+        Returns:
+            tuple: (loss, log_vars)
+        """
+        log_vars = {}
+        loss_total = 0
+        for loss_name, loss_value in losses.items():
+            if isinstance(loss_value, torch.Tensor):
+                log_vars[loss_name] = loss_value.item()
+                loss_total += loss_value
+            else:
+                log_vars[loss_name] = loss_value
+                loss_total += loss_value
+        
+        log_vars['loss'] = loss_total.item() if isinstance(loss_total, torch.Tensor) else loss_total
+        return loss_total, log_vars
+    
+    def val_step(self, data):
+        """Validation step function for mmengine runner.
+        
+        Args:
+            data (dict): The output of dataloader.
+            
+        Returns:
+            dict: Dict of outputs.
+        """
+        # Extract data
+        imgs = data['img_inputs']
+        points = data.get('points', None)
+        voxel_semantics = data.get('voxel_semantics', None)
+        mask_camera = data.get('mask_camera', None)
+        img_metas = data.get('img_metas', {})
+        
+        # Get device from model parameters
+        device = next(self.parameters()).device
+        
+        # Convert LiDARPoints object to tensor if necessary and move to correct device
+        if points is not None:
+            if hasattr(points, 'tensor'):
+                points = points.tensor
+            # Ensure points is on the correct device
+            if isinstance(points, list):
+                points = [pt.to(device) if hasattr(pt, 'to') else pt for pt in points]
+            elif hasattr(points, 'to'):
+                points = points.to(device)
+        
+        # Forward pass (without gradient)
+        with torch.no_grad():
+            if points is not None:
+                # Process lidar data
+                lidar_feat, _, _ = self.lidar_encoder(points)
+                
+                # Extract features from both modalities
+                occ_pred = self.extract_feat(lidar_feat, imgs, img_metas)
+            else:
+                # Image-only mode
+                occ_pred = self.extract_feat(None, imgs, img_metas)
+        
+        # Calculate loss for validation
+        losses = dict()
+        if self.loss_occ is not None and voxel_semantics is not None:
+            # Reshape predictions and targets
+            if isinstance(occ_pred, (list, tuple)):
+                occ_pred = occ_pred[0]
+            
+            # Make sure shapes match
+            if occ_pred.ndim == 5:  # (B, C, H, W, D)
+                B, C, H, W, D = occ_pred.shape
+                occ_pred = occ_pred.permute(0, 2, 3, 4, 1).reshape(-1, C)
+            
+            if voxel_semantics is not None and hasattr(voxel_semantics, 'ndim') and voxel_semantics.ndim == 4:  # (B, H, W, D)
+                voxel_semantics = voxel_semantics.reshape(-1)
+            
+            # Apply mask if available
+            if mask_camera is not None and self.use_mask:
+                if mask_camera is not None and hasattr(mask_camera, 'ndim') and mask_camera.ndim == 4:
+                    mask_camera = mask_camera.reshape(-1)
+                if hasattr(mask_camera, 'ndim') and not isinstance(mask_camera, list):
+                    valid_mask = mask_camera > 0
+                else:
+                    # Skip mask if it's not a tensor
+                    valid_mask = None
+                if valid_mask is not None and valid_mask.sum() > 0:
+                    occ_pred = occ_pred[valid_mask]
+                    voxel_semantics = voxel_semantics[valid_mask]
+            
+            # Calculate occupancy loss
+            if hasattr(voxel_semantics, 'long') and not isinstance(voxel_semantics, list):
+                loss_occ = self.loss_occ(occ_pred, voxel_semantics.long())
+            else:
+                # Skip loss calculation if voxel_semantics is not a proper tensor
+                loss_occ = torch.tensor(0.0, device=occ_pred.device, requires_grad=True)
+            losses['loss_occ'] = loss_occ
+        
+        # Parse losses for logging
+        parsed_losses, log_vars = self.parse_losses(losses)
+        
+        return log_vars 

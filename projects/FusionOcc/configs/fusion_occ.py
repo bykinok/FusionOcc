@@ -1,12 +1,18 @@
 _base_ = ['../../../configs/_base_/datasets/nus-3d.py', '../../../configs/_base_/default_runtime.py']
+
+# Custom imports for FusionOCC
+custom_imports = dict(
+    imports=['projects.FusionOcc.fusionocc'],
+    allow_failed_imports=False)
 # Global
 # If point cloud range is changed, the models should also change their point
 # cloud range accordingly
 point_cloud_range = [-40, -40, -1, 40, 40, 5.4]
 # For nuScenes we usually do 10-class detection
+# Use nuScenes original class order to match label IDs
 class_names = [
-    'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
-    'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
+    'car', 'truck', 'trailer', 'bus', 'construction_vehicle', 'bicycle',
+    'motorcycle', 'pedestrian', 'traffic_cone', 'barrier'
 ]
 
 data_config = {
@@ -85,6 +91,7 @@ model = dict(
         type='FPN_LSS',
         in_channels=512 + 1024,
         out_channels=img_backbone_out_channel,
+        # with_cp=False,
         extra_upsample=None,
         input_feature_index=(0, 1),
         scale_factor=2),
@@ -131,10 +138,9 @@ model = dict(
 )
 
 # Data
-dataset_type = 'FusionOccDataset'  # Use FusionOcc specific dataset
+dataset_type = 'NuScenesDatasetOccpancy'
 data_root = 'data/nuscenes/'
 img_seg_dir = 'data/nuscenes/imgseg/samples'
-file_client_args = dict(backend='disk')
 
 bda_aug_conf = dict(
     rot_lim=(-0., 0.),
@@ -156,25 +162,13 @@ train_pipeline = [
         type='LoadPointsFromFile',
         coord_type='LIDAR',
         load_dim=5,
-        use_dim=5,
-        file_client_args=file_client_args),
-    dict(
-        type='FuseAdjacentSweeps',
-        load_dim=5,
-        use_dim=5,
-        file_client_args=file_client_args),
-    dict(type='PointsLidar2Ego'),
-    dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),
+        use_dim=5),
     dict(
         type='LoadAnnotationsAll',
         bda_aug_conf=bda_aug_conf,
         classes=class_names,
         is_train=True),
-    dict(type='PointToMultiViewDepth', downsample=1, grid_config=grid_config),
-    dict(type='DefaultFormatBundle3D', class_names=class_names),
-    dict(
-        type='Collect3D',
-        keys=['img_inputs', "points", 'sparse_depth', 'segs', 'voxel_semantics', 'mask_camera'])
+    dict(type='FormatDataSamples'),
 ]
 
 test_pipeline = [
@@ -191,39 +185,17 @@ test_pipeline = [
         type='LoadPointsFromFile',
         coord_type='LIDAR',
         load_dim=5,
-        use_dim=5,
-        file_client_args=file_client_args),
-    dict(
-        type='FuseAdjacentSweeps',
-        load_dim=5,
-        use_dim=5,
-        file_client_args=file_client_args),
-    dict(type='PointsLidar2Ego'),
-    dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),
+        use_dim=5),
     dict(
         type='LoadAnnotationsAll',
         bda_aug_conf=bda_aug_conf,
         classes=class_names,
         is_train=False),
-    dict(type='PointToMultiViewDepth', downsample=1, grid_config=grid_config),
-    dict(
-        type='MultiScaleFlipAug3D',
-        img_scale=(1333, 800),
-        pts_scale_ratio=1,
-        flip=False,
-        transforms=[
-            dict(
-                type='DefaultFormatBundle3D',
-                class_names=class_names,
-                with_label=False),
-            dict(
-                type='Collect3D',
-                keys=['img_inputs', 'points', 'sparse_depth'])
-        ])
+    dict(type='FormatDataSamples'),
 ]
 
 input_modality = dict(
-    use_lidar=False,
+    use_lidar=True,
     use_camera=True,
     use_radar=False,
     use_map=False,
@@ -243,14 +215,14 @@ share_data_config = dict(
 
 test_data_config = dict(
     pipeline=test_pipeline,
-    ann_file=data_root + 'fusionocc-nuscenes_infos_val.pkl')
+    ann_file='data/nuscenes/fusionocc-nuscenes_infos_val.pkl')
 
 data = dict(
     samples_per_gpu=1,
     workers_per_gpu=4,
     train=dict(
         data_root=data_root,
-        ann_file=data_root + 'fusionocc-nuscenes_infos_train.pkl',
+        ann_file='data/nuscenes/fusionocc-nuscenes_infos_train.pkl',
         pipeline=train_pipeline,
         classes=class_names,
         test_mode=False,
@@ -261,43 +233,84 @@ data = dict(
     val=test_data_config,
     test=test_data_config
 )
+# Legacy data config for compatibility
 for key in ['val', 'train', 'test']:
     data[key].update(share_data_config)
 
-# Optimizer
-optimizer = dict(type='AdamW', lr=5e-5, weight_decay=1e-2)
-optimizer_config = dict(grad_clip=dict(max_norm=5, norm_type=2))
-lr_config = dict(
-    policy='CosineAnnealing',
-    warmup='linear',
-    warmup_iters=500,
-    warmup_ratio=1.0 / 3,
-    min_lr_ratio=1e-3)
+# MMEngine Optimizer Configuration
+optim_wrapper = dict(
+    type='OptimWrapper',
+    optimizer=dict(type='AdamW', lr=5e-5, weight_decay=1e-2),
+    clip_grad=dict(max_norm=5, norm_type=2)
+)
 
-evaluation = dict(interval=1, pipeline=test_pipeline)
-runner = dict(type='EpochBasedRunner', max_epochs=24)
+# MMEngine Parameter Scheduler
+param_scheduler = [
+    dict(
+        type='LinearLR',
+        start_factor=1.0 / 3,
+        by_epoch=False,
+        begin=0,
+        end=500
+    ),
+    dict(
+        type='CosineAnnealingLR',
+        T_max=24,
+        eta_min=5e-5 * 1e-3,
+        by_epoch=True,
+        begin=0,
+        end=24
+    )
+]
 
-# Test settings - these should be None for testing
-train_dataloader = None
-train_cfg = None
-optim_wrapper = None
-val_dataloader = None
+# MMEngine Training/Validation/Test Configuration
+train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=24, val_interval=0)
 val_cfg = None
-val_evaluator = None
-test_dataloader = None
 test_cfg = None
+
+# MMEngine Evaluator (disabled for initial training)
+val_evaluator = None
 test_evaluator = None
 
-custom_hooks = [
-    dict(
-        type='MEGVIIEMAHook',
-        init_updates=10560,
-        priority='NORMAL',
-    ),
-    dict(
-        type='SyncbnControlHook',
-        syncbn_start_epoch=0,
-    ),
-]
+# MMEngine DataLoader Configuration
+train_dataloader = dict(
+    batch_size=1,
+    num_workers=4,
+    persistent_workers=True,
+    sampler=dict(type='DefaultSampler', shuffle=True),
+    dataset=dict(
+        type=dataset_type,
+        data_root='',
+        ann_file='data/nuscenes/fusionocc-nuscenes_infos_train.pkl',
+        pipeline=train_pipeline,
+        use_mask=use_mask,
+        classes=class_names,
+        modality=input_modality,
+        stereo=False,
+        filter_empty_gt=False,
+        img_info_prototype='fusionocc',
+        multi_adj_frame_id_cfg=multi_adj_frame_id_cfg,
+        multi_adj_frame_id_cfg_lidar=multi_adj_frame_id_cfg_lidar,
+        test_mode=False,
+        use_valid_flag=True,
+        box_type_3d='LiDAR'
+    )
+)
+
+val_dataloader = None
+
+test_dataloader = None
+
+# custom_hooks = [
+#     dict(
+#         type='MEGVIIEMAHook',
+#         init_updates=10560,
+#         priority='NORMAL',
+#     ),
+#     dict(
+#         type='SyncbnControlHook',
+#         syncbn_start_epoch=0,
+#     ),
+# ]
 
 # load_from = "../../ckpt/fusion_occ_mask.pth" 
