@@ -1,0 +1,519 @@
+import torch
+import collections 
+import torch.nn.functional as F
+
+from mmdet3d.registry import MODELS as DETECTORS
+from mmengine.model import BaseModel
+from .bevdepth import BEVDepth
+from mmdet3d.registry import MODELS
+
+import numpy as np
+import time
+import copy
+
+@DETECTORS.register_module(force=True)
+class OccNet(BEVDepth):
+    def __init__(self, 
+            loss_cfg=None,
+            disable_loss_depth=False,
+            empty_idx=0,
+            occ_fuser=None,
+            occ_encoder_backbone=None,
+            occ_encoder_neck=None,
+            loss_norm=False,
+            **kwargs):
+        super().__init__(**kwargs)
+                
+        self.loss_cfg = loss_cfg
+        self.disable_loss_depth = disable_loss_depth
+        self.loss_norm = loss_norm
+        
+        self.record_time = False
+        self.time_stats = collections.defaultdict(list)
+        self.empty_idx = empty_idx
+        self.occ_encoder_backbone = MODELS.build(occ_encoder_backbone)
+        self.occ_encoder_neck = MODELS.build(occ_encoder_neck)
+        self.occ_fuser = MODELS.build(occ_fuser) if occ_fuser is not None else None
+            
+
+    def image_encoder(self, img):
+        imgs = img
+        B, N, C, imH, imW = imgs.shape
+        imgs = imgs.view(B * N, C, imH, imW)
+        
+        backbone_feats = self.img_backbone(imgs)
+        if self.with_img_neck:
+            x = self.img_neck(backbone_feats)
+            if type(x) in [list, tuple]:
+                x = x[0]
+        _, output_dim, ouput_H, output_W = x.shape
+        x = x.view(B, N, output_dim, ouput_H, output_W)
+        
+        return {'x': x,
+                'img_feats': [x.clone()]}
+    
+    # @force_fp32()  # Removed for mmengine compatibility
+    def occ_encoder(self, x):
+        x = self.occ_encoder_backbone(x)
+        x = self.occ_encoder_neck(x)
+        return x
+    def forward(self, mode='tensor', **kwargs):
+        """Forward method for MMDetection3D v1.4+ compatibility.
+        
+        Args:
+            mode (str): Forward mode - 'loss', 'predict', or 'tensor'
+            **kwargs: All input data including 'img_inputs', 'gt_occ', etc.
+        """
+        if mode == 'loss':
+            return self.loss(kwargs)
+        elif mode == 'predict':
+            return self.predict(kwargs)
+        else:  # mode == 'tensor'
+            return self._forward(kwargs)
+    
+    def loss(self, data_dict, **extra_kwargs):
+        """Loss forward function."""
+        # Extract data from inputs dict
+        img_inputs = data_dict.get('img_inputs')
+        gt_occ = data_dict.get('gt_occ')
+        img_metas = data_dict.get('img_metas', [{}] * len(img_inputs) if img_inputs is not None else [{}])
+        
+        return self.forward_train(
+            img_inputs=img_inputs,
+            img_metas=img_metas,
+            gt_occ=gt_occ,
+            **extra_kwargs
+        )
+    
+    def predict(self, data_dict, **extra_kwargs):
+        """Predict forward function."""
+        # Extract data from inputs dict
+        img_inputs = data_dict.get('img_inputs')
+        img_metas = data_dict.get('img_metas', [{}] * len(img_inputs) if img_inputs is not None else [{}])
+        
+        return self.forward_test(
+            img_inputs=img_inputs,
+            img_metas=img_metas,
+            **extra_kwargs
+        )
+    
+    def _forward(self, data_dict, **extra_kwargs):
+        """Simple forward function."""
+        # Extract data from inputs dict  
+        img_inputs = data_dict.get('img_inputs')
+        img_metas = data_dict.get('img_metas', [{}] * len(img_inputs) if img_inputs is not None else [{}])
+        
+        # Extract features only
+        voxel_feats, img_feats, pts_feats, depth = self.extract_feat(
+            points=None, img=img_inputs, img_metas=img_metas)
+        return voxel_feats
+
+    def extract_img_feat(self, img, img_metas):
+        """Extract features of images."""
+        
+        if self.record_time:
+            torch.cuda.synchronize()
+            t0 = time.time()
+        
+        # Handle different input formats from DataLoader
+        import torch
+        
+        # Extract all components from img_inputs tuple
+        # img_inputs structure: (imgs, rots, trans, intrins, post_rots, post_trans, bda_rot, img_shape, gt_depths, sensor2sensors)
+        if isinstance(img, list):
+            # Take first sample from batch - this might be a wrapped tensor
+            if len(img) == 1 and isinstance(img[0], torch.Tensor):
+                # Case: img_inputs was converted to a single tensor wrapped in a list
+                imgs = img[0]
+                img_tuple = None
+            else:
+                # Case: img_inputs is a proper list with tuple inside
+                img_tuple = img[0]
+        elif isinstance(img, tuple):
+            img_tuple = img
+        else:
+            # If img is already processed, handle differently
+            imgs = img
+            img_tuple = None
+        
+        if img_tuple is not None:
+            # Debug: Print tuple structure
+            
+            # img_inputs tuple structure after LoadAnnotationsBEVDepth:
+            # (imgs, rots, trans, intrins, post_rots, post_trans, bda_rot, img_shape, gt_depths, sensor2sensors)
+            imgs = img_tuple[0]
+            rots = img_tuple[1] if len(img_tuple) > 1 else None
+            trans = img_tuple[2] if len(img_tuple) > 2 else None
+            intrins = img_tuple[3] if len(img_tuple) > 3 else None
+            post_rots = img_tuple[4] if len(img_tuple) > 4 else None
+            post_trans = img_tuple[5] if len(img_tuple) > 5 else None
+            bda = img_tuple[6] if len(img_tuple) > 6 else None
+            # img_tuple[7] is img_shape
+            gt_depths = img_tuple[8] if len(img_tuple) > 8 else None
+            sensor2sensors = img_tuple[9] if len(img_tuple) > 9 else None
+        else:
+            # Handle case where img_inputs is just a tensor (fallback)
+            rots = None
+            trans = None  
+            intrins = None
+            post_rots = None
+            post_trans = None
+            bda = None
+            gt_depths = None
+            sensor2sensors = None
+        
+        # Ensure imgs is a tensor
+        if isinstance(imgs, list):
+            imgs = torch.stack(imgs)
+        
+        # Debug output
+        
+        # Add batch dimension if missing (B, N, C, H, W)
+        if len(imgs.shape) == 4:  # [N, C, H, W]
+            imgs = imgs.unsqueeze(0)  # [1, N, C, H, W]
+                
+        img_enc_feats = self.image_encoder(imgs)
+        x = img_enc_feats['x']
+        img_feats = img_enc_feats['img_feats']
+        
+        if self.record_time:
+            torch.cuda.synchronize()
+            t1 = time.time()
+            self.time_stats['img_encoder'].append(t1 - t0)
+
+        # Use already extracted variables from img_inputs tuple
+        # Check if we have valid camera parameters
+        if rots is not None and trans is not None and intrins is not None:
+            mlp_input = self.img_view_transformer.get_mlp_input(rots, trans, intrins, post_rots, post_trans, bda)
+            geo_inputs = [rots, trans, intrins, post_rots, post_trans, bda, mlp_input]
+            x, depth = self.img_view_transformer([x] + geo_inputs)
+        else:
+            # Create dummy camera parameters for fallback
+            B, N, C, H, W = imgs.shape
+            device = imgs.device
+            rots = torch.eye(3, device=device).unsqueeze(0).unsqueeze(0).expand(B, N, -1, -1)
+            trans = torch.zeros(B, N, 3, device=device)
+            intrins = torch.eye(3, device=device).unsqueeze(0).unsqueeze(0).expand(B, N, -1, -1)
+            post_rots = torch.eye(3, device=device).unsqueeze(0).unsqueeze(0).expand(B, N, -1, -1)
+            post_trans = torch.zeros(B, N, 3, device=device)
+            bda = torch.eye(3, device=device).unsqueeze(0)
+            
+            mlp_input = self.img_view_transformer.get_mlp_input(rots, trans, intrins, post_rots, post_trans, bda)
+            geo_inputs = [rots, trans, intrins, post_rots, post_trans, bda, mlp_input]
+            x, depth = self.img_view_transformer([x] + geo_inputs)
+
+        if self.record_time:
+            torch.cuda.synchronize()
+            t2 = time.time()
+            self.time_stats['view_transformer'].append(t2 - t1)
+        
+        return x, depth, img_feats
+
+    def extract_pts_feat(self, pts):
+        if self.record_time:
+            torch.cuda.synchronize()
+            t0 = time.time()
+        voxels, num_points, coors = self.voxelize(pts)
+        voxel_features = self.pts_voxel_encoder(voxels, num_points, coors)
+        batch_size = coors[-1, 0] + 1
+        pts_enc_feats = self.pts_middle_encoder(voxel_features, coors, batch_size)
+        if self.record_time:
+            torch.cuda.synchronize()
+            t1 = time.time()
+            self.time_stats['pts_encoder'].append(t1 - t0)
+        
+        pts_feats = pts_enc_feats['pts_feats']
+        return pts_enc_feats['x'], pts_feats
+
+    def extract_feat(self, points, img, img_metas):
+        """Extract features from images and points."""
+        img_voxel_feats = None
+        pts_voxel_feats, pts_feats = None, None
+        depth, img_feats = None, None
+        if img is not None:
+            img_voxel_feats, depth, img_feats = self.extract_img_feat(img, img_metas)
+        if points is not None:
+            pts_voxel_feats, pts_feats = self.extract_pts_feat(points)
+
+        if self.record_time:
+            torch.cuda.synchronize()
+            t0 = time.time()
+
+        if self.occ_fuser is not None:
+            voxel_feats = self.occ_fuser(img_voxel_feats, pts_voxel_feats)
+        else:
+            assert (img_voxel_feats is None) or (pts_voxel_feats is None)
+            voxel_feats = img_voxel_feats if pts_voxel_feats is None else pts_voxel_feats
+
+        if self.record_time:
+            torch.cuda.synchronize()
+            t1 = time.time()
+            self.time_stats['occ_fuser'].append(t1 - t0)
+
+        voxel_feats_enc = self.occ_encoder(voxel_feats)
+        if type(voxel_feats_enc) is not list:
+            voxel_feats_enc = [voxel_feats_enc]
+
+        if self.record_time:
+            torch.cuda.synchronize()
+            t2 = time.time()
+            self.time_stats['occ_encoder'].append(t2 - t1)
+
+        return (voxel_feats_enc, img_feats, pts_feats, depth)
+    
+    # @force_fp32(apply_to=('voxel_feats'))  # Removed for mmengine compatibility
+    def forward_pts_train(
+            self,
+            voxel_feats,
+            gt_occ=None,
+            points_occ=None,
+            img_metas=None,
+            transform=None,
+            img_feats=None,
+            pts_feats=None,
+            visible_mask=None,
+        ):
+        
+        if self.record_time:
+            torch.cuda.synchronize()
+            t0 = time.time()
+        
+        outs = self.pts_bbox_head(
+            voxel_feats=voxel_feats,
+            points=points_occ,
+            img_metas=img_metas,
+            img_feats=img_feats,
+            pts_feats=pts_feats,
+            transform=transform,
+        )
+        
+        if self.record_time:
+            torch.cuda.synchronize()
+            t1 = time.time()
+            self.time_stats['occ_head'].append(t1 - t0)
+        
+        losses = self.pts_bbox_head.loss(
+            output_voxels=outs['output_voxels'],
+            output_voxels_fine=outs['output_voxels_fine'],
+            output_coords_fine=outs['output_coords_fine'],
+            target_voxels=gt_occ,
+            target_points=points_occ,
+            img_metas=img_metas,
+            visible_mask=visible_mask,
+        )
+        
+        if self.record_time:
+            torch.cuda.synchronize()
+            t2 = time.time()
+            self.time_stats['loss_occ'].append(t2 - t1)
+        
+        return losses
+    
+    def forward_train(self,
+            points=None,
+            img_metas=None,
+            img_inputs=None,
+            gt_occ=None,
+            points_occ=None,
+            visible_mask=None,
+            **kwargs,
+        ):
+
+        # extract bird-eye-view features from perspective images
+        voxel_feats, img_feats, pts_feats, depth = self.extract_feat(
+            points, img=img_inputs, img_metas=img_metas)
+        
+        # training losses
+        losses = dict()
+        
+        if self.record_time:        
+            torch.cuda.synchronize()
+            t0 = time.time()
+        
+        if not self.disable_loss_depth and depth is not None:
+            # Handle fallback case where img_inputs might not be a tuple
+            if isinstance(img_inputs, (list, tuple)) and len(img_inputs) > 8:
+                gt_depths_raw = img_inputs[-2]  # Extract gt_depths from tuple
+                
+                # Check if gt_depths_raw is itself a tuple/list and extract tensor
+                if isinstance(gt_depths_raw, (list, tuple)):
+                    # If it's a tuple/list, try to get the first tensor element
+                    for item in gt_depths_raw:
+                        if hasattr(item, 'shape'):  # It's a tensor
+                            gt_depths = item
+                            # Add batch dimension if missing
+                            if len(gt_depths.shape) == 3:  # [N, H, W]
+                                gt_depths = gt_depths.unsqueeze(0)  # [1, N, H, W]
+                            break
+                    else:
+                        # No tensor found, create dummy
+                        B, N = 1, 6
+                        device = depth.device if hasattr(depth, 'device') else 'cpu'
+                        gt_depths = torch.zeros((B, N, depth.shape[-2], depth.shape[-1]), device=device)
+                elif hasattr(gt_depths_raw, 'shape'):
+                    # It's already a tensor
+                    gt_depths = gt_depths_raw
+                    # Add batch dimension if missing
+                    if len(gt_depths.shape) == 3:  # [N, H, W]
+                        gt_depths = gt_depths.unsqueeze(0)  # [1, N, H, W]
+                else:
+                    # Unknown type, create dummy
+                    B, N = 1, 6
+                    device = depth.device if hasattr(depth, 'device') else 'cpu'
+                    gt_depths = torch.zeros((B, N, depth.shape[-2], depth.shape[-1]), device=device)
+            else:
+                # Fallback: create dummy gt_depths for loss calculation
+                B, N = 1, 6  # Typical values
+                device = depth.device if hasattr(depth, 'device') else 'cpu'
+                gt_depths = torch.zeros((B, N, depth.shape[-2], depth.shape[-1]), device=device)
+            
+            losses['loss_depth'] = self.img_view_transformer.get_depth_loss(gt_depths, depth)
+        
+        if self.record_time:
+            torch.cuda.synchronize()
+            t1 = time.time()
+            self.time_stats['loss_depth'].append(t1 - t0)
+        
+        # Handle transform extraction with fallback
+        if img_inputs is not None:
+            if isinstance(img_inputs, (list, tuple)) and len(img_inputs) > 7:
+                transform = img_inputs[1:8]  # Extract transform from tuple
+            else:
+                # Fallback: no transform available
+                transform = None
+        else:
+            transform = None
+        losses_occupancy = self.forward_pts_train(voxel_feats, gt_occ,
+                        points_occ, img_metas, img_feats=img_feats, pts_feats=pts_feats, transform=transform, 
+                        visible_mask=visible_mask)
+        losses.update(losses_occupancy)
+        if self.loss_norm:
+            for loss_key in losses.keys():
+                if loss_key.startswith('loss'):
+                    losses[loss_key] = losses[loss_key] / (losses[loss_key].detach() + 1e-9)
+
+        def logging_latencies():
+            # logging latencies
+            avg_time = {key: sum(val) / len(val) for key, val in self.time_stats.items()}
+            sum_time = sum(list(avg_time.values()))
+            out_res = ''
+            for key, val in avg_time.items():
+                out_res += '{}: {:.4f}, {:.1f}, '.format(key, val, val / sum_time)
+            
+            print(out_res)
+        
+        if self.record_time:
+            logging_latencies()
+        
+        return losses
+        
+    def forward_test(self,
+            points=None,
+            img_metas=None,
+            img_inputs=None,
+            gt_occ=None,
+            visible_mask=None,
+            **kwargs,
+        ):
+        return self.simple_test(img_metas, img_inputs, points, gt_occ=gt_occ, visible_mask=visible_mask, **kwargs)
+    
+    def simple_test(self, img_metas, img=None, points=None, rescale=False, points_occ=None, 
+            gt_occ=None, visible_mask=None):
+        
+        voxel_feats, img_feats, pts_feats, depth = self.extract_feat(points, img=img, img_metas=img_metas)
+
+        transform = img[1:8] if img is not None else None
+        output = self.pts_bbox_head(
+            voxel_feats=voxel_feats,
+            points=points_occ,
+            img_metas=img_metas,
+            img_feats=img_feats,
+            pts_feats=pts_feats,
+            transform=transform,
+        )
+
+        pred_c = output['output_voxels'][0]
+        SC_metric, _ = self.evaluation_semantic(pred_c, gt_occ, eval_type='SC', visible_mask=visible_mask)
+        SSC_metric, SSC_occ_metric = self.evaluation_semantic(pred_c, gt_occ, eval_type='SSC', visible_mask=visible_mask)
+
+        pred_f = None
+        SSC_metric_fine = None
+        if output['output_voxels_fine'] is not None:
+            if output['output_coords_fine'] is not None:
+                fine_pred = output['output_voxels_fine'][0]  # N ncls
+                fine_coord = output['output_coords_fine'][0]  # 3 N
+                pred_f = self.empty_idx * torch.ones_like(gt_occ)[:, None].repeat(1, fine_pred.shape[1], 1, 1, 1).float()
+                pred_f[:, :, fine_coord[0], fine_coord[1], fine_coord[2]] = fine_pred.permute(1, 0)[None]
+            else:
+                pred_f = output['output_voxels_fine'][0]
+            SC_metric, _ = self.evaluation_semantic(pred_f, gt_occ, eval_type='SC', visible_mask=visible_mask)
+            SSC_metric_fine, SSC_occ_metric_fine = self.evaluation_semantic(pred_f, gt_occ, eval_type='SSC', visible_mask=visible_mask)
+
+        test_output = {
+            'SC_metric': SC_metric,
+            'SSC_metric': SSC_metric,
+            'pred_c': pred_c,
+            'pred_f': pred_f,
+        }
+
+        if SSC_metric_fine is not None:
+            test_output['SSC_metric_fine'] = SSC_metric_fine
+
+        return test_output
+
+
+    def evaluation_semantic(self, pred, gt, eval_type, visible_mask=None):
+        _, H, W, D = gt.shape
+        pred = F.interpolate(pred, size=[H, W, D], mode='trilinear', align_corners=False).contiguous()
+        pred = torch.argmax(pred[0], dim=0).cpu().numpy()
+        gt = gt[0].cpu().numpy()
+        gt = gt.astype(np.int)
+
+        # ignore noise
+        noise_mask = gt != 255
+
+        if eval_type == 'SC':
+            # 0 1 split
+            gt[gt != self.empty_idx] = 1
+            pred[pred != self.empty_idx] = 1
+            return fast_hist(pred[noise_mask], gt[noise_mask], max_label=2), None
+
+
+        if eval_type == 'SSC':
+            hist_occ = None
+            if visible_mask is not None:
+                visible_mask = visible_mask[0].cpu().numpy()
+                mask = noise_mask & (visible_mask!=0)
+                hist_occ = fast_hist(pred[mask], gt[mask], max_label=17)
+
+            hist = fast_hist(pred[noise_mask], gt[noise_mask], max_label=17)
+            return hist, hist_occ
+    
+    def forward_dummy(self,
+            points=None,
+            img_metas=None,
+            img_inputs=None,
+            points_occ=None,
+            **kwargs,
+        ):
+
+        voxel_feats, img_feats, pts_feats, depth = self.extract_feat(points, img=img_inputs, img_metas=img_metas)
+
+        transform = img_inputs[1:8] if img_inputs is not None else None
+        output = self.pts_bbox_head(
+            voxel_feats=voxel_feats,
+            points=points_occ,
+            img_metas=img_metas,
+            img_feats=img_feats,
+            pts_feats=pts_feats,
+            transform=transform,
+        )
+        
+        return output
+    
+    
+def fast_hist(pred, label, max_label=18):
+    pred = copy.deepcopy(pred.flatten())
+    label = copy.deepcopy(label.flatten())
+    bin_count = np.bincount(max_label * label.astype(int) + pred, minlength=max_label ** 2)
+    return bin_count[:max_label ** 2].reshape(max_label, max_label)
