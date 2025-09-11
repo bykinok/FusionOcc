@@ -33,8 +33,11 @@ class LoadOccupancy(object):
     
     def __call__(self, results):
         rel_path = 'scene_{0}/occupancy/{1}.npy'.format(results['scene_token'], results['lidar_token'])
+        if self.occ_path is None:
+            raise ValueError("occ_path must be provided")
+        full_path = os.path.join(self.occ_path, rel_path)
         #  [z y x cls] or [z y x vx vy vz cls]
-        pcd = np.load(os.path.join(self.occ_path, rel_path))
+        pcd = np.load(full_path)
         pcd_label = pcd[..., -1:]
         pcd_label[pcd_label==0] = 255
         pcd_np_cor = self.voxel2world(pcd[..., [2,1,0]] + 0.5)  # x y z
@@ -84,7 +87,7 @@ class LoadOccupancy(object):
                     basic_valid_occ = basic_valid_occ.cpu().numpy()
                     basic_valid_occ = basic_valid_occ.astype(np.int16)  # TODO first round then int?
                     depth_canva = np.ones((img_h, img_w), dtype=np.uint16) * 2048
-                    nb_valid_mask = np.zeros((M), dtype=np.bool)
+                    nb_valid_mask = np.zeros((M), dtype=bool)
                     nb_valid_mask = nb_process_img_points(basic_valid_occ, depth_canva, nb_valid_mask)  # M
                     img_visible_mask[basic_mask, cam_idx] = nb_valid_mask
 

@@ -248,6 +248,11 @@ class OccHead(nn.Module):
                 # No target voxels available, skip loss calculation
                 return {}
 
+        # Add batch dimension if missing
+        if target_voxels.dim() == 3:
+            target_voxels = target_voxels.unsqueeze(0)  # Add batch dimension
+
+
         # resize gt                       
         B, C, H, W, D = output_voxels.shape
         ratio = target_voxels.shape[2] // H
@@ -256,6 +261,7 @@ class OccHead(nn.Module):
         if ratio == 0:
             # Skip loss calculation for invalid ratio
             return {}
+        
         
         if ratio != 1:
             target_voxels = target_voxels.reshape(B, H, ratio, W, ratio, D, ratio).permute(0,1,3,5,2,4,6).reshape(B, H, W, D, ratio**3)
@@ -267,6 +273,9 @@ class OccHead(nn.Module):
             target_voxels = torch.mode(target_voxels, dim=-1)[0]
             target_voxels[target_voxels<0] = 255
             target_voxels = target_voxels.long()
+        else:
+            # No downsampling needed (ratio=1)
+            pass
 
         assert torch.isnan(output_voxels).sum().item() == 0
         assert torch.isnan(target_voxels).sum().item() == 0
@@ -274,10 +283,16 @@ class OccHead(nn.Module):
         loss_dict = {}
 
         # igore 255 = ignore noise. we keep the loss bascward for the label=0 (free voxels)
-        loss_dict['loss_voxel_ce_{}'.format(tag)] = self.loss_voxel_ce_weight * CE_ssc_loss(output_voxels, target_voxels, self.class_weights.type_as(output_voxels), ignore_index=255)
-        loss_dict['loss_voxel_sem_scal_{}'.format(tag)] = self.loss_voxel_sem_scal_weight * sem_scal_loss(output_voxels, target_voxels, ignore_index=255)
-        loss_dict['loss_voxel_geo_scal_{}'.format(tag)] = self.loss_voxel_geo_scal_weight * geo_scal_loss(output_voxels, target_voxels, ignore_index=255, non_empty_idx=self.empty_idx)
-        loss_dict['loss_voxel_lovasz_{}'.format(tag)] = self.loss_voxel_lovasz_weight * lovasz_softmax(torch.softmax(output_voxels, dim=1), target_voxels, ignore=255)
+        ce_loss = CE_ssc_loss(output_voxels, target_voxels, self.class_weights.type_as(output_voxels), ignore_index=255)
+        sem_loss = sem_scal_loss(output_voxels, target_voxels, ignore_index=255)
+        geo_loss = geo_scal_loss(output_voxels, target_voxels, ignore_index=255, non_empty_idx=self.empty_idx)
+        lovasz_loss = lovasz_softmax(torch.softmax(output_voxels, dim=1), target_voxels, ignore=255)
+        
+        
+        loss_dict['loss_voxel_ce_{}'.format(tag)] = self.loss_voxel_ce_weight * ce_loss
+        loss_dict['loss_voxel_sem_scal_{}'.format(tag)] = self.loss_voxel_sem_scal_weight * sem_loss
+        loss_dict['loss_voxel_geo_scal_{}'.format(tag)] = self.loss_voxel_geo_scal_weight * geo_loss
+        loss_dict['loss_voxel_lovasz_{}'.format(tag)] = self.loss_voxel_lovasz_weight * lovasz_loss
 
         return loss_dict
 
@@ -291,6 +306,12 @@ class OccHead(nn.Module):
                 # No target voxels available, skip loss calculation
                 return {}
 
+        
+        # Check if target_voxels has the expected 4D shape [batch, x, y, z]
+        if target_voxels.dim() == 3:
+            # Add batch dimension if missing
+            target_voxels = target_voxels.unsqueeze(0)
+        
         selected_gt = target_voxels[:, fine_coord[0,:], fine_coord[1,:], fine_coord[2,:]].long()[0]
         assert torch.isnan(selected_gt).sum().item() == 0, torch.isnan(selected_gt).sum().item()
         assert torch.isnan(fine_output).sum().item() == 0, torch.isnan(fine_output).sum().item()

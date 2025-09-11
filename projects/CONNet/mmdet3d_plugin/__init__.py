@@ -17,10 +17,18 @@ MODELS.register_module(module=ResNet, force=True)
 #   PhotoMetricDistortionMultiViewImage, PadMultiViewImage, 
 #   NormalizeMultiviewImage,  CustomCollect3D)
 
-# Import core models and datasets
-from .occupancy import *
+# Import core models and datasets explicitly
 from .datasets import *
 # Import only the OccMetric directly to avoid eval_hooks import issues
 from .core.evaluation.occ_metric import OccMetric
 # Import pipelines for transform registration
 from .datasets.pipelines import *
+
+# Import occupancy modules explicitly to ensure proper registration
+from .occupancy.detectors import *
+from .occupancy.dense_heads import *
+from .occupancy.necks import *
+from .occupancy.backbones import *
+from .occupancy.voxel_encoder import *
+from .occupancy.fuser import *
+from .occupancy.image2bev import *

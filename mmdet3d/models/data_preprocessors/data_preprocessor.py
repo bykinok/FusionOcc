@@ -164,11 +164,17 @@ class Det3DDataPreprocessor(DetDataPreprocessor):
         Returns:
             dict: Data in the same format as the model input.
         """
-        if 'img' in data['inputs']:
+        if 'inputs' in data and 'img' in data['inputs']:
             batch_pad_shape = self._get_pad_shape(data)
 
         data = self.collate_data(data)
-        inputs, data_samples = data['inputs'], data['data_samples']
+        # Handle case when data doesn't have inputs/data_samples structure
+        if 'inputs' in data and 'data_samples' in data:
+            inputs, data_samples = data['inputs'], data['data_samples']
+        else:
+            # Create compatible structure for legacy data format
+            inputs = {k: v for k, v in data.items() if k not in ['data_samples']}
+            data_samples = data.get('data_samples', [])
         batch_inputs = dict()
 
         if 'points' in inputs:
@@ -239,7 +245,7 @@ class Det3DDataPreprocessor(DetDataPreprocessor):
         """
         data = self.cast_data(data)  # type: ignore
 
-        if 'img' in data['inputs']:
+        if 'inputs' in data and 'img' in data['inputs']:
             _batch_imgs = data['inputs']['img']
             # Process data with `pseudo_collate`.
             if is_seq_of(_batch_imgs, torch.Tensor):

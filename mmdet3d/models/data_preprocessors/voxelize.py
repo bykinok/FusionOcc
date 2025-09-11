@@ -69,14 +69,24 @@ class _Voxelization(Function):
                 NDim=3)
             return coors
         else:
-            voxels = points.new_zeros(
-                size=(max_voxels, max_points, points.size(1)))
-            coors = points.new_zeros(size=(max_voxels, 3), dtype=torch.int)
-            num_points_per_voxel = points.new_zeros(
-                size=(max_voxels, ), dtype=torch.int)
+            # Handle both tensor and LiDARPoints objects
+            if hasattr(points, 'tensor'):
+                voxels = points.tensor.new_zeros(
+                    size=(max_voxels, max_points, points.tensor.size(1)))
+                coors = points.tensor.new_zeros(size=(max_voxels, 3), dtype=torch.int)
+                num_points_per_voxel = points.tensor.new_zeros(
+                    size=(max_voxels, ), dtype=torch.int)
+            else:
+                voxels = points.new_zeros(
+                    size=(max_voxels, max_points, points.size(1)))
+                coors = points.new_zeros(size=(max_voxels, 3), dtype=torch.int)
+                num_points_per_voxel = points.new_zeros(
+                    size=(max_voxels, ), dtype=torch.int)
             voxel_num = torch.zeros(size=(), dtype=torch.long)
+            # Use tensor representation for ext_module
+            points_tensor = points.tensor if hasattr(points, 'tensor') else points
             ext_module.hard_voxelize_forward(
-                points,
+                points_tensor,
                 torch.tensor(voxel_size, dtype=torch.float),
                 torch.tensor(coors_range, dtype=torch.float),
                 voxels,

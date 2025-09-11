@@ -62,11 +62,19 @@ class NuscOCCDataset(NuScenesDataset):
         with open(ann_file_path, 'rb') as f:
             data = pickle.load(f)
         
-        # Use the data_list from the annotation file
-        self.data_list = data['data_list']
+        # Use the infos from the annotation file as data_list
+        if 'data_list' in data:
+            self.data_list = data['data_list']
+        elif 'infos' in data:
+            self.data_list = data['infos']
+        else:
+            raise KeyError(f"Neither 'data_list' nor 'infos' found in {ann_file_path}")
+        
         # Store metainfo if available (avoid setting as attribute due to property conflicts)
         if 'metainfo' in data:
             self._metainfo_data = data['metainfo']
+        elif 'metadata' in data:
+            self._metainfo_data = data['metadata']
             
         print(f"Direct load: {len(self.data_list)} samples from {ann_file_path}")
     
@@ -125,6 +133,7 @@ class NuscOCCDataset(NuScenesDataset):
         input_dict = dict(
             sample_idx=info['token'],
             pts_filename=info['lidar_path'],
+            lidar_points=dict(lidar_path=info['lidar_path']),
             sweeps=info['sweeps'],
             lidar2ego_translation=info['lidar2ego_translation'],
             lidar2ego_rotation=info['lidar2ego_rotation'],

@@ -21,7 +21,15 @@ class OccNet(BEVDepth):
             occ_encoder_backbone=None,
             occ_encoder_neck=None,
             loss_norm=False,
+            pts_voxel_encoder=None,
+            pts_middle_encoder=None,
+            pts_voxel_layer=None,
             **kwargs):
+        # Store lidar-specific components before calling super().__init__
+        self.pts_voxel_encoder_cfg = pts_voxel_encoder  
+        self.pts_middle_encoder_cfg = pts_middle_encoder
+        self.pts_voxel_layer_cfg = pts_voxel_layer
+        
         super().__init__(**kwargs)
                 
         self.loss_cfg = loss_cfg
@@ -34,6 +42,14 @@ class OccNet(BEVDepth):
         self.occ_encoder_backbone = MODELS.build(occ_encoder_backbone)
         self.occ_encoder_neck = MODELS.build(occ_encoder_neck)
         self.occ_fuser = MODELS.build(occ_fuser) if occ_fuser is not None else None
+        
+        # Build LiDAR-specific components
+        if self.pts_voxel_encoder_cfg is not None:
+            self.pts_voxel_encoder = MODELS.build(self.pts_voxel_encoder_cfg)
+        if self.pts_middle_encoder_cfg is not None:
+            self.pts_middle_encoder = MODELS.build(self.pts_middle_encoder_cfg)
+        # pts_voxel_layer is config only, not a module
+        self.pts_voxel_layer = self.pts_voxel_layer_cfg
             
 
     def image_encoder(self, img):
@@ -57,6 +73,90 @@ class OccNet(BEVDepth):
         x = self.occ_encoder_backbone(x)
         x = self.occ_encoder_neck(x)
         return x
+    def train_step(self, data, optim_wrapper):
+        """Training step for MMEngine compatibility."""
+        # Extract gt_occ directly from the data dict (this is where it actually is!)
+        gt_occ = data.get('gt_occ', None)
+        points = data.get('points', None)
+        img_metas = data.get('img_metas', None)
+        
+        
+        # Prepare kwargs for forward pass - pass the original data structure
+        kwargs = {
+            'mode': 'loss',
+            'points': points,
+            'gt_occ': gt_occ,
+            'img_metas': img_metas
+        }
+        
+        # Remove None values
+        kwargs = {k: v for k, v in kwargs.items() if v is not None}
+        
+        # Call forward pass
+        losses = self.forward(**kwargs)
+        
+        # Format losses for MMEngine
+        parsed_losses, log_vars = self.parse_losses(losses)
+        optim_wrapper.update_params(parsed_losses)
+        
+        return log_vars
+
+    def parse_losses(self, losses):
+        """Parse losses for MMEngine compatibility."""
+        import torch
+        
+        
+        log_vars = {}
+        parsed_losses = []
+        
+        for loss_name, loss_value in losses.items():
+            if isinstance(loss_value, torch.Tensor):
+                if loss_value.requires_grad:
+                    parsed_losses.append(loss_value)
+                log_vars[loss_name] = loss_value.item()
+            else:
+                log_vars[loss_name] = loss_value
+                
+        # Sum all losses
+        if parsed_losses:
+            total_loss = sum(parsed_losses)
+        else:
+            total_loss = sum(losses.values())
+            
+        log_vars['loss'] = total_loss.item() if hasattr(total_loss, 'item') else total_loss
+        
+        
+        return total_loss, log_vars
+
+    def loss(self, data_dict):
+        """Calculate loss for training.
+        
+        Args:
+            data_dict: Input data containing gt_occ, points, img_metas, etc.
+        """
+        
+        # Extract and parse data
+        gt_occ = data_dict.get('gt_occ')
+        points = data_dict.get('points')
+        img_metas = data_dict.get('img_metas')
+        
+        
+        # Extract features
+        data_parsed = self._parse_inputs(data_dict)
+        feats = self.extract_feat(**data_parsed)
+        
+        # Call pts_bbox_head.loss
+        
+        loss_dict = self.pts_bbox_head.loss(
+            output_voxels=feats.get('output_voxels'),
+            output_coords_fine=feats.get('output_coords_fine'),
+            output_voxels_fine=feats.get('output_voxels_fine'),
+            target_voxels=gt_occ
+        )
+        
+        
+        return loss_dict
+
     def forward(self, mode='tensor', **kwargs):
         """Forward method for MMDetection3D v1.4+ compatibility.
         
@@ -65,20 +165,154 @@ class OccNet(BEVDepth):
             **kwargs: All input data including 'img_inputs', 'gt_occ', etc.
         """
         if mode == 'loss':
-            return self.loss(kwargs)
+            # Check if we have direct data format (from train_step)
+            if 'gt_occ' in kwargs and 'points' in kwargs:
+                
+                # Extract data directly
+                gt_occ = kwargs.get('gt_occ')
+                points = kwargs.get('points')
+                img_metas = kwargs.get('img_metas')
+                
+                # Ensure gt_occ is on the correct device
+                if isinstance(gt_occ, list) and len(gt_occ) > 0:
+                    if hasattr(gt_occ[0], 'cuda'):
+                        gt_occ = [item.cuda() for item in gt_occ]
+                elif hasattr(gt_occ, 'cuda'):
+                    gt_occ = gt_occ.cuda()
+                
+                
+                # Extract features directly
+                data_parsed = self._parse_inputs(kwargs)
+                # For LiDAR-only mode, extract_feat needs points, img=None, img_metas
+                feats = self.extract_feat(
+                    points=data_parsed['points'], 
+                    img=None, 
+                    img_metas=data_parsed['img_metas']
+                )
+                
+                
+                # Unpack the features tuple (voxel_feats_enc, img_feats, pts_feats, depth)
+                voxel_feats_enc, img_feats, pts_feats, depth = feats
+                
+                # Call pts_bbox_head to get outputs
+                outs = self.pts_bbox_head(
+                    voxel_feats=voxel_feats_enc,
+                    points=None,  # points_occ (not used in this case)
+                    img_metas=data_parsed['img_metas'],
+                    img_feats=img_feats,
+                    pts_feats=pts_feats,
+                    transform=None,
+                )
+                
+                
+                # Call pts_bbox_head.loss directly
+                loss_dict = self.pts_bbox_head.loss(
+                    output_voxels=outs['output_voxels'],
+                    output_coords_fine=outs['output_coords_fine'],
+                    output_voxels_fine=outs['output_voxels_fine'],
+                    target_voxels=gt_occ
+                )
+                
+                
+                return loss_dict
+            else:
+                # Use MMEngine format parsing
+                result = self.loss(kwargs)
+                return result
         elif mode == 'predict':
-            return self.predict(kwargs)
-        else:  # mode == 'tensor'
-            return self._forward(kwargs)
+            return self.predict(kwargs) 
+        else:
+            # Extract input data
+            data_dict = self._parse_inputs(kwargs)
+            return self.extract_feat(**data_dict)
+    
+    def _parse_inputs(self, kwargs):
+        """Parse inputs from MMDetection3D data structure"""
+        
+        # Extract data from inputs dictionary (MMDetection3D v1.1+)
+        if 'inputs' in kwargs:
+            inputs = kwargs['inputs']
+                
+            if isinstance(inputs, dict):
+                # Extract points and img from inputs
+                if 'points' in inputs:
+                    kwargs['points'] = inputs['points']
+                if 'img' in inputs:
+                    kwargs['img_inputs'] = inputs['img']
+                # Check for gt_occ in inputs
+                if 'gt_occ' in inputs:
+                    kwargs['gt_occ'] = inputs['gt_occ']
+                # Check inside voxels dict for gt_occ
+                elif 'voxels' in inputs and isinstance(inputs['voxels'], dict):
+                    voxels_dict = inputs['voxels']
+                    if 'gt_occ' in voxels_dict:
+                        kwargs['gt_occ'] = voxels_dict['gt_occ']
+                    
+        # Extract data_samples info
+        if 'data_samples' in kwargs:
+            data_samples = kwargs['data_samples']
+            if data_samples and len(data_samples) > 0:
+                # Try to extract gt_occ from data_samples
+                sample = data_samples[0]
+                
+                # Check various possible attribute names
+                for attr in ['gt_occ', 'gt_occ_1_1', 'gt_occupancy', 'occ_gt', 'gt_seg_3d']:
+                    if hasattr(sample, attr):
+                        val = getattr(sample, attr)
+                        if kwargs.get('gt_occ') is None:
+                            kwargs['gt_occ'] = val
+                            
+                if hasattr(sample, 'metainfo'):
+                    kwargs['img_metas'] = [sample.metainfo]
+                    
+        # Check for gt_occ directly in kwargs (this is where it should be in MMDetection3D)
+        if 'gt_occ' in kwargs:
+            pass
+        else:
+            # Try alternative keys
+            for key in ['gt_occ_1_1', 'gt_occupancy', 'occ_gt']:
+                if key in kwargs and kwargs[key] is not None:
+                    kwargs['gt_occ'] = kwargs[key]
+                    break
+                    
+        return kwargs
     
     def loss(self, data_dict, **extra_kwargs):
         """Loss forward function."""
+        # Check if data is already in direct format (from train_step)
+        if 'gt_occ' in data_dict and 'points' in data_dict:
+            # Data is already parsed, use as-is
+            pass
+        else:
+            # Parse inputs from MMDetection3D data structure
+            data_dict = self._parse_inputs(data_dict)
+        
+        # Ensure gt_occ is present
+        if data_dict.get('gt_occ') is None:
+            raise ValueError("gt_occ must be provided for training. Check your data pipeline and LoadOccupancy configuration.")
+        
+        # Handle case where gt_occ might be a list (batch of tensors)
+        if isinstance(data_dict['gt_occ'], list):
+            # Stack list of tensors into a batch tensor
+            import torch as torch_mod
+            data_dict['gt_occ'] = torch_mod.stack(data_dict['gt_occ'], dim=0)
+        
+        # Ensure gt_occ has batch dimension if not already present
+        if data_dict['gt_occ'].dim() == 3:
+            data_dict['gt_occ'] = data_dict['gt_occ'].unsqueeze(0)  # Add batch dimension
+        
+        # Move gt_occ to same device as model
+        device = next(self.parameters()).device
+        data_dict['gt_occ'] = data_dict['gt_occ'].to(device)
+        
+        
         # Extract data from inputs dict
         img_inputs = data_dict.get('img_inputs')
         gt_occ = data_dict.get('gt_occ')
         img_metas = data_dict.get('img_metas', [{}] * len(img_inputs) if img_inputs is not None else [{}])
         
         return self.forward_train(
+            points=data_dict.get('points'),
             img_inputs=img_inputs,
             img_metas=img_metas,
             gt_occ=gt_occ,
@@ -213,10 +447,39 @@ class OccNet(BEVDepth):
         if self.record_time:
             torch.cuda.synchronize()
             t0 = time.time()
-        voxels, num_points, coors = self.voxelize(pts)
+        
+        
+        # Check if pts_voxel_encoder and pts_middle_encoder exist
+        if not hasattr(self, 'pts_voxel_encoder') or self.pts_voxel_encoder is None:
+            print("ERROR: pts_voxel_encoder is not initialized!")
+            return None, None
+        if not hasattr(self, 'pts_middle_encoder') or self.pts_middle_encoder is None:
+            print("ERROR: pts_middle_encoder is not initialized!")
+            return None, None
+            
+        # Use data_preprocessor for voxelization
+        if hasattr(self, 'data_preprocessor') and hasattr(self.data_preprocessor, 'voxelize'):
+            # Create dummy data_samples for voxelization 
+            data_samples = [{}] * len(pts) if isinstance(pts, list) else [{}]
+            voxel_dict = self.data_preprocessor.voxelize(pts, data_samples)
+            voxels = voxel_dict['voxels']
+            num_points = voxel_dict['num_points']  
+            coors = voxel_dict['coors']
+        else:
+            # data_preprocessor is required for voxelization
+            raise NotImplementedError("data_preprocessor with voxelize method is required for LiDAR point processing")
+        # Move tensors to the same device as model
+        device = next(self.parameters()).device
+        voxels = voxels.to(device)
+        num_points = num_points.to(device)
+        coors = coors.to(device)
+        
+        
         voxel_features = self.pts_voxel_encoder(voxels, num_points, coors)
+        
         batch_size = coors[-1, 0] + 1
         pts_enc_feats = self.pts_middle_encoder(voxel_features, coors, batch_size)
+        
         if self.record_time:
             torch.cuda.synchronize()
             t1 = time.time()
@@ -227,6 +490,7 @@ class OccNet(BEVDepth):
 
     def extract_feat(self, points, img, img_metas):
         """Extract features from images and points."""
+        
         img_voxel_feats = None
         pts_voxel_feats, pts_feats = None, None
         depth, img_feats = None, None
@@ -239,11 +503,13 @@ class OccNet(BEVDepth):
             torch.cuda.synchronize()
             t0 = time.time()
 
+        
         if self.occ_fuser is not None:
             voxel_feats = self.occ_fuser(img_voxel_feats, pts_voxel_feats)
         else:
             assert (img_voxel_feats is None) or (pts_voxel_feats is None)
             voxel_feats = img_voxel_feats if pts_voxel_feats is None else pts_voxel_feats
+            
 
         if self.record_time:
             torch.cuda.synchronize()

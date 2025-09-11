@@ -275,7 +275,8 @@ class CustomCollect3D(object):
 
         data['img_metas'] = img_metas
         for key in self.keys:
-            data[key] = results[key]
+            if key in results:
+                data[key] = results[key]
         return data
 
     def __repr__(self):

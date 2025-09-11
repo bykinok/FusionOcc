@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import spconv.pytorch as spconv
 from spconv.pytorch import functional as Fsp
 
-from mmdet3d.models.builder import MIDDLE_ENCODERS
+from mmdet3d.registry import MODELS
 
 import copy
 
@@ -62,7 +62,7 @@ class SparseBasicBlock(spconv.SparseModule):
 
 
 
-@MIDDLE_ENCODERS.register_module()
+@MODELS.register_module()
 class SparseLiDAREnc4x(nn.Module):
     def __init__(self, input_channel, norm_cfg, base_channel, out_channel, 
                 sparse_shape_xyz, **kwargs):
@@ -120,7 +120,7 @@ class SparseLiDAREnc4x(nn.Module):
 
 
 
-@MIDDLE_ENCODERS.register_module()
+@MODELS.register_module()
 class SparseLiDAREnc8x(nn.Module):
     def __init__(self, input_channel, norm_cfg, base_channel, out_channel, 
                 sparse_shape_xyz, **kwargs):
