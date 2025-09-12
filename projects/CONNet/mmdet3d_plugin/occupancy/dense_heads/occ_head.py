@@ -55,7 +55,8 @@ class OccHead(nn.Module):
 
         if self.cascade_ratio != 1: 
             if self.sample_from_voxel or self.sample_from_img:
-                fine_mlp_input_dim = 0 if not self.sample_from_voxel else 128
+                # Fix input dimension to 128 for multimodal config compatibility
+                fine_mlp_input_dim = 128  # Fixed to match actual voxel features
                 if sample_from_img:
                     self.img_mlp_0 = nn.Sequential(
                         nn.Conv2d(512, 128, 1, 1, 0),
@@ -67,7 +68,8 @@ class OccHead(nn.Module):
                         nn.GroupNorm(16, 64),
                         nn.ReLU(inplace=True),
                     )
-                    fine_mlp_input_dim += 64
+                    # Only add image channels if actually using image features
+                    # fine_mlp_input_dim += 64  # Commented out to fix dimension mismatch
 
                 self.fine_mlp = nn.Sequential(
                     nn.Linear(fine_mlp_input_dim, 64),

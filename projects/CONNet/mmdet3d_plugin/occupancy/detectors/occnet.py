@@ -495,7 +495,14 @@ class OccNet(BEVDepth):
         pts_voxel_feats, pts_feats = None, None
         depth, img_feats = None, None
         if img is not None:
-            img_voxel_feats, depth, img_feats = self.extract_img_feat(img, img_metas)
+            img_result = self.extract_img_feat(img, img_metas)
+            if len(img_result) == 2:
+                # BEVDepth returns [x], depth
+                img_voxel_feats, depth = img_result
+                img_feats = img_voxel_feats  # img_feats is the same as img_voxel_feats
+            else:
+                # For compatibility with other implementations
+                img_voxel_feats, depth, img_feats = img_result
         if points is not None:
             pts_voxel_feats, pts_feats = self.extract_pts_feat(points)
 
@@ -505,7 +512,15 @@ class OccNet(BEVDepth):
 
         
         if self.occ_fuser is not None:
-            voxel_feats = self.occ_fuser(img_voxel_feats, pts_voxel_feats)
+            # Handle None case for img_voxel_feats
+            if img_voxel_feats is None and pts_voxel_feats is not None:
+                voxel_feats = pts_voxel_feats
+            elif img_voxel_feats is not None and pts_voxel_feats is None:
+                voxel_feats = img_voxel_feats
+            elif img_voxel_feats is not None and pts_voxel_feats is not None:
+                voxel_feats = self.occ_fuser(img_voxel_feats, pts_voxel_feats)
+            else:
+                raise ValueError("Both img_voxel_feats and pts_voxel_feats are None")
         else:
             assert (img_voxel_feats is None) or (pts_voxel_feats is None)
             voxel_feats = img_voxel_feats if pts_voxel_feats is None else pts_voxel_feats

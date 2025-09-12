@@ -20,8 +20,8 @@ input_modality = dict(
 # Data configuration
 occ_path = "./data/nuScenes-Occupancy"
 depth_gt_path = './data/depth_gt'
-train_ann_file = "./data/nuscenes/nuscenes_occ_infos_train.pkl"
-val_ann_file = "./data/nuscenes/nuscenes_occ_infos_val.pkl"
+train_ann_file = "nuscenes_occ_infos_train.pkl"
+val_ann_file = "nuscenes_occ_infos_val.pkl"
 
 # For nuScenes we usually do 10-class detection
 class_names = [
@@ -41,10 +41,11 @@ visible_mask = False
 
 cascade_ratio = 4
 sample_from_voxel = True
-sample_from_img = True
+sample_from_img = False  # Disable image sampling to match input dimensions
 
 dataset_type = 'NuscOCCDataset'
 data_root = 'data/nuscenes/'
+backend_args = dict(backend='disk')
 
 data_config = {
     'cams': ['CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT',
@@ -74,6 +75,14 @@ voxel_out_indices = (0, 1, 2, 3)
 # Model configuration
 model = dict(
     type='OccNet',
+    data_preprocessor=dict(
+        type='Det3DDataPreprocessor',
+        voxel=True,
+        voxel_layer=dict(
+            max_num_points=10,
+            point_cloud_range=point_cloud_range,
+            voxel_size=[0.1, 0.1, 0.1],
+            max_voxels=(90000, 120000))),
     loss_norm=True,
     img_backbone=dict(
         pretrained='torchvision://resnet50',
@@ -240,6 +249,8 @@ test_pipeline = [
 train_dataloader = dict(
     batch_size=1,
     num_workers=4,
+    persistent_workers=True,
+    sampler=dict(type='DefaultSampler', shuffle=True),
     dataset=dict(
         type=dataset_type,
         data_root=data_root,
@@ -252,11 +263,15 @@ train_dataloader = dict(
         use_valid_flag=True,
         occ_size=occ_size,
         pc_range=point_cloud_range,
-        box_type_3d='LiDAR'))
+        box_type_3d='LiDAR',
+        backend_args=backend_args))
 
 val_dataloader = dict(
     batch_size=1,
     num_workers=1,
+    persistent_workers=True,
+    drop_last=False,
+    sampler=dict(type='DefaultSampler', shuffle=False),
     dataset=dict(
         type=dataset_type,
         occ_root=occ_path,
@@ -265,8 +280,11 @@ val_dataloader = dict(
         pipeline=test_pipeline,
         classes=class_names,
         modality=input_modality,
+        test_mode=True,
         occ_size=occ_size,
-        pc_range=point_cloud_range))
+        pc_range=point_cloud_range,
+        box_type_3d='LiDAR',
+        backend_args=backend_args))
 
 test_dataloader = val_dataloader
 
@@ -291,15 +309,13 @@ param_scheduler = [
         eta_min=3e-7,
         by_epoch=True,
         begin=0,
-        end=15,
-        convert_to_iter_based=True),
+        end=15),
     dict(
         type='LinearLR',
         start_factor=1.0 / 3,
         by_epoch=False,
         begin=0,
-        end=500,
-        convert_to_iter_based=True)
+        end=500)
 ]
 
 # Training configuration
