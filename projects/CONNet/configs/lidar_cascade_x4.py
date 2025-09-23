@@ -1,4 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+_base_ = [
+    '_base_/default_runtime.py'
+]
 
 # Plugin configuration
 custom_imports = dict(
@@ -6,7 +9,6 @@ custom_imports = dict(
     allow_failed_imports=False)
 
 # Runtime configuration
-default_scope = 'mmdet3d'
 img_norm_cfg = None
 
 # Input modality
@@ -19,8 +21,8 @@ input_modality = dict(
 
 # Data configuration
 occ_path = "./data/nuScenes-Occupancy"
-train_ann_file = "nuscenes_occ_infos_train.pkl"
-val_ann_file = "nuscenes_occ_infos_val.pkl"
+train_ann_file = "nuscenes_occ_infos_train_fixed_valid.pkl"
+val_ann_file = "nuscenes_occ_infos_val_fixed_valid.pkl"
 
 # For nuScenes we usually do 10-class detection
 class_names = [
@@ -40,7 +42,7 @@ sample_from_img = False
 
 dataset_type = 'NuscOCCDataset'
 data_root = 'data/nuscenes/'
-file_client_args = dict(backend='disk')
+backend_args = dict(backend='disk')
 
 numC_Trans = 80
 voxel_out_channel = 256
@@ -49,21 +51,13 @@ voxel_out_indices = (0, 1, 2, 3)
 # Model configuration
 model = dict(
     type='OccNet',
-    data_preprocessor=dict(
-        type='Det3DDataPreprocessor',
-        voxel=True,
-        voxel_layer=dict(
-            max_num_points=10,
-            point_cloud_range=point_cloud_range,
-            voxel_size=[0.1, 0.1, 0.1],  # xy size follow centerpoint
-            max_voxels=(90000, 120000))),
     loss_norm=True,
     pts_voxel_layer=dict(
         max_num_points=10, 
         point_cloud_range=point_cloud_range,
         voxel_size=[0.1, 0.1, 0.1],  # xy size follow centerpoint
         max_voxels=(90000, 120000)),
-    pts_voxel_encoder=dict(type='HardSimpleVFE', num_features=5),
+    pts_voxel_encoder=dict(type='HardSimpleVFE', num_features=4),
     pts_middle_encoder=dict(
         type='SparseLiDAREnc8x',
         input_channel=4,
@@ -177,6 +171,8 @@ test_pipeline = [
 train_dataloader = dict(
     batch_size=1,
     num_workers=4,
+    persistent_workers=True,
+    sampler=dict(type='DefaultSampler', shuffle=True),
     dataset=dict(
         type=dataset_type,
         data_root=data_root,
@@ -189,11 +185,15 @@ train_dataloader = dict(
         use_valid_flag=True,
         occ_size=occ_size,
         pc_range=point_cloud_range,
-        box_type_3d='LiDAR'))
+        box_type_3d='LiDAR',
+        backend_args=backend_args))
 
 val_dataloader = dict(
     batch_size=1,
     num_workers=1,
+    persistent_workers=True,
+    drop_last=False,
+    sampler=dict(type='DefaultSampler', shuffle=False),
     dataset=dict(
         type=dataset_type,
         occ_root=occ_path,
@@ -202,8 +202,11 @@ val_dataloader = dict(
         pipeline=test_pipeline,
         classes=class_names,
         modality=input_modality,
+        test_mode=True,
         occ_size=occ_size,
-        pc_range=point_cloud_range))
+        pc_range=point_cloud_range,
+        box_type_3d='LiDAR',
+        backend_args=backend_args))
 
 test_dataloader = val_dataloader
 

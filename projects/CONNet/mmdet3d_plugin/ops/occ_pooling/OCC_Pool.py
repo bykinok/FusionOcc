@@ -62,19 +62,66 @@ class QuickCumsumCuda(torch.autograd.Function):
                 W,
             )
         else:
-            # Fallback implementation (simplified)
-            # CUDA implementation returns [b, d, h, w, c] shape
+            # Fallback implementation: proper voxel pooling with averaging
             c = x.shape[1]  # number of channels
             out = torch.zeros((B, D, H, W, c), device=x.device, dtype=x.dtype)
+            
+            # Filter valid coordinates and features
+            # Coordinate order: [x, y, z, batch]
+            valid_mask = ((geom_feats[:, 0] >= 0) & (geom_feats[:, 0] < H) & 
+                         (geom_feats[:, 1] >= 0) & (geom_feats[:, 1] < W) & 
+                         (geom_feats[:, 2] >= 0) & (geom_feats[:, 2] < D) & 
+                         (geom_feats[:, 3] >= 0) & (geom_feats[:, 3] < B))
+            
+            # Initialize counts for all voxels
+            counts = torch.zeros(B * D * H * W, device=x.device, dtype=torch.float)
+            
+            if valid_mask.any():
+                valid_coords = geom_feats[valid_mask]  # [valid_points, 4]
+                valid_features = x[valid_mask]  # [valid_points, c]
+                
+                # Convert 4D coordinates to flat indices  
+                # Coordinate order: [x, y, z, batch] -> [batch, z, x, y]
+                flat_indices = (valid_coords[:, 3] * (D * H * W) + 
+                               valid_coords[:, 2] * (H * W) + 
+                               valid_coords[:, 0] * W + 
+                               valid_coords[:, 1])  # [valid_points]
+                flat_indices = flat_indices.to(device=x.device, dtype=torch.long)
+                
+                # Reshape output for scatter operations
+                out_flat = out.view(-1, c)  # [B*D*H*W, c]
+                
+                # Count how many points go to each voxel
+                counts.scatter_add_(0, flat_indices, torch.ones_like(flat_indices, dtype=torch.float))
+                
+                # Sum features for each voxel
+                out_flat.scatter_add_(0, flat_indices.unsqueeze(1).expand(-1, c), valid_features)
+                
+                # Average: only divide voxels that have points (counts > 0)
+                non_empty_mask = counts > 0
+                out_flat[non_empty_mask] = out_flat[non_empty_mask] / counts[non_empty_mask].unsqueeze(1)
+                
+                # Reshape back
+                out = out_flat.view(B, D, H, W, c)
 
         ctx.save_for_backward(interval_starts, interval_lengths, geom_feats)
         ctx.saved_shapes = B, D, H, W
+        ctx.input_shape = x.shape  # Save input shape for backward
+        ctx.input_device = x.device  # Save input device for backward
+        
+        # Save counts for backward pass averaging (always save, even if empty)
+        if occ_pool_ext is None:
+            ctx.voxel_counts = counts
+        else:
+            ctx.voxel_counts = None
         return out
 
     @staticmethod
     def backward(ctx, out_grad):
         interval_starts, interval_lengths, geom_feats = ctx.saved_tensors
         B, D, H, W = ctx.saved_shapes
+        input_shape = ctx.input_shape
+        input_device = ctx.input_device
 
         out_grad = out_grad.contiguous()
         if occ_pool_ext is not None:
@@ -89,8 +136,44 @@ class QuickCumsumCuda(torch.autograd.Function):
                 W,
             )
         else:
-            # Fallback implementation (simplified)
-            x_grad = torch.zeros_like(geom_feats[:, :1], dtype=torch.float)
+            # Fallback implementation: gradient computation with averaging
+            x_grad = torch.zeros(input_shape, device=input_device, dtype=torch.float)
+            
+            # Filter valid coordinates
+            # Coordinate order: [x, y, z, batch]
+            valid_mask = ((geom_feats[:, 0] >= 0) & (geom_feats[:, 0] < H) & 
+                         (geom_feats[:, 1] >= 0) & (geom_feats[:, 1] < W) & 
+                         (geom_feats[:, 2] >= 0) & (geom_feats[:, 2] < D) & 
+                         (geom_feats[:, 3] >= 0) & (geom_feats[:, 3] < B))
+            
+            if valid_mask.any():
+                valid_coords = geom_feats[valid_mask]  # [valid_points, 4]
+                valid_indices = torch.where(valid_mask)[0]  # [valid_points]
+                
+                # Convert 4D coordinates to flat indices  
+                # Coordinate order: [x, y, z, batch] -> [batch, z, x, y]
+                flat_indices = (valid_coords[:, 3] * (D * H * W) + 
+                               valid_coords[:, 2] * (H * W) + 
+                               valid_coords[:, 0] * W + 
+                               valid_coords[:, 1])  # [valid_points]
+                flat_indices = flat_indices.to(device=input_device, dtype=torch.long)
+                
+                # Reshape gradient for gathering
+                out_grad_flat = out_grad.view(-1, out_grad.shape[-1])  # [B*D*H*W, c]
+                
+                # Gather gradients from corresponding voxel locations
+                gathered_grads = out_grad_flat[flat_indices]  # [valid_points, c]
+                
+                # Apply averaging gradient: divide by voxel counts
+                if ctx.voxel_counts is not None:
+                    # Get counts for each point's voxel
+                    point_counts = ctx.voxel_counts[flat_indices]  # [valid_points]
+                    # Only divide where counts > 0 to avoid division by zero
+                    valid_count_mask = point_counts > 0
+                    gathered_grads[valid_count_mask] = gathered_grads[valid_count_mask] / point_counts[valid_count_mask].unsqueeze(1)
+                
+                # Assign to valid positions
+                x_grad[valid_indices] = gathered_grads
 
         return x_grad, None, None, None, None, None, None
 

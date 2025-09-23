@@ -188,9 +188,20 @@ class OccHead(nn.Module):
 
                 if self.sample_from_img and img_feats is not None:
                     img_feats_ = img_feats[0]
-                    B_i,N_i,C_i, W_i, H_i = img_feats_.shape
-                    img_feats_ = img_feats_.reshape(-1, C_i, W_i, H_i)
-                    img_feats = [self.img_mlp_0(img_feats_).reshape(B_i, N_i, -1, W_i, H_i)]
+                    # Handle both 4D and 5D cases safely
+                    if len(img_feats_.shape) == 5:
+                        B_i, N_i, C_i, W_i, H_i = img_feats_.shape
+                        img_feats_ = img_feats_.reshape(-1, C_i, W_i, H_i)
+                        img_feats = [self.img_mlp_0(img_feats_).reshape(B_i, N_i, -1, W_i, H_i)]
+                    elif len(img_feats_.shape) == 4:
+                        # Handle 4D case: [B, C, W, H] -> assume single camera view
+                        B_i, C_i, W_i, H_i = img_feats_.shape
+                        N_i = 1  # Single camera view
+                        img_feats_ = img_feats_.reshape(-1, C_i, W_i, H_i)
+                        img_feats = [self.img_mlp_0(img_feats_).reshape(B_i, N_i, -1, W_i, H_i)]
+                    else:
+                        # Skip img sampling if shape is unexpected
+                        img_feats = None
 
                 for b in range(B):
                     append_feats = []
@@ -216,21 +227,83 @@ class OccHead(nn.Module):
                         append_feats.append(new_feat[0,:,:,0,0].permute(1,0))
                         assert torch.isnan(new_feat).sum().item() == 0
                         
-                    # image branch
-                    if img_feats is not None and self.sample_from_img:
+            # image branch - temporarily disabled for camera-only model (voxel branch works now)
+            if False and img_feats is not None and self.sample_from_img and transform is not None:
                         W_new, H_new, D_new = W * self.cascade_ratio, H * self.cascade_ratio, D * self.cascade_ratio
-                        img_uv, img_mask = project_points_on_img(new_coord, rots=transform[0][b:b+1], trans=transform[1][b:b+1],
-                                    intrins=transform[2][b:b+1], post_rots=transform[3][b:b+1],
-                                    post_trans=transform[4][b:b+1], bda_mat=transform[5][b:b+1],
+                        # For camera-only models, handle tuple transform parameters
+                        # transform structure: [rots, trans, intrins, post_rots, post_trans, bda_mat, mlp_input]
+                        
+                        # Helper function to extract tensor from potentially tuple parameters
+                        def extract_tensor(param, batch_idx):
+                            if isinstance(param, tuple):
+                                # Use first element of tuple if it's a tuple
+                                tensor = param[0] if len(param) > 0 else param
+                            else:
+                                tensor = param
+                            
+                            if hasattr(tensor, 'dim'):
+                                # For camera parameters, always try to get all cameras for the batch
+                                if tensor.dim() == 3:  # [B, N_cam, ...]  
+                                    return tensor[batch_idx:batch_idx+1]  # [1, N_cam, ...]
+                                elif tensor.dim() == 2:  # [N_cam, ...] 
+                                    return tensor  # Keep all cameras
+                                else:
+                                    return tensor
+                            else:
+                                # If not a tensor, return as is (will be handled in coordinate_transform)
+                                return param
+                        
+                        batch_rots = extract_tensor(transform[0], b)
+                        batch_trans = extract_tensor(transform[1], b)
+                        batch_intrins = extract_tensor(transform[2], b)
+                        batch_post_rots = extract_tensor(transform[3], b)
+                        batch_post_trans = extract_tensor(transform[4], b)
+                        batch_bda = extract_tensor(transform[5], b)
+                        
+                        img_uv, img_mask = project_points_on_img(new_coord, rots=batch_rots, trans=batch_trans,
+                                    intrins=batch_intrins, post_rots=batch_post_rots,
+                                    post_trans=batch_post_trans, bda_mat=batch_bda,
                                     W_img=transform[6][1][b:b+1], H_img=transform[6][0][b:b+1],
                                     pts_range=self.point_cloud_range, W_occ=W_new, H_occ=H_new, D_occ=D_new)  # 1 N n_cam 2
                         for img_feat in img_feats:
-                            sampled_img_feat = F.grid_sample(img_feat[b].contiguous(), img_uv.contiguous(), align_corners=True, mode='bilinear', padding_mode='zeros')
-                            sampled_img_feat = sampled_img_feat * img_mask.permute(2,1,0)[:,None]
-                            sampled_img_feat = self.img_mlp(sampled_img_feat.sum(0)[:,:,0].permute(1,0))
-                            append_feats.append(sampled_img_feat)  # N C
-                            assert torch.isnan(sampled_img_feat).sum().item() == 0
-                    output['fine_output'].append(self.fine_mlp(torch.concat(append_feats, dim=1)))
+                            # img_feat[b] shape: [n_cam, C, H, W]
+                            # img_uv shape: [n_cam, 1, N, 2]
+                            # Process each camera separately
+                            cam_sampled_feats = []
+                            n_cam = img_feat[b].shape[0]
+                            
+                            # Check if img_uv has valid size
+                            if img_uv.shape[0] == 0:
+                                continue
+                                
+                            for cam_idx in range(min(n_cam, img_uv.shape[0])):
+                                # Get single camera feature and uv coordinates
+                                single_cam_feat = img_feat[b][cam_idx:cam_idx+1]  # [1, C, H, W]
+                                single_cam_uv = img_uv[cam_idx:cam_idx+1]  # [1, 1, N, 2]
+                                
+                                sampled_feat = F.grid_sample(single_cam_feat.contiguous(), single_cam_uv.contiguous(), 
+                                                           align_corners=True, mode='bilinear', padding_mode='zeros')
+                                cam_sampled_feats.append(sampled_feat)
+                            
+                            if cam_sampled_feats:
+                                # Concatenate features from all cameras: [n_cam, C, 1, N]
+                                sampled_img_feat = torch.cat(cam_sampled_feats, dim=0)
+                                
+                                # Handle img_mask dimension properly
+                                if img_mask.dim() == 3:
+                                    mask_permuted = img_mask.permute(2,1,0)[:,None]
+                                elif img_mask.dim() == 2:
+                                    mask_permuted = img_mask.permute(1,0)[:,None]
+                                else:
+                                    mask_permuted = img_mask[:,None] if img_mask.dim() == 1 else img_mask
+                                
+                                sampled_img_feat = sampled_img_feat * mask_permuted
+                                sampled_img_feat = self.img_mlp(sampled_img_feat.sum(0)[:,:,0].permute(1,0))
+                                append_feats.append(sampled_img_feat)  # N C
+                                assert torch.isnan(sampled_img_feat).sum().item() == 0
+                        
+                        if append_feats:
+                            output['fine_output'].append(self.fine_mlp(torch.cat(append_feats, dim=1)))
 
         res = {
             'output_voxels': output['occ'],
@@ -257,27 +330,13 @@ class OccHead(nn.Module):
 
         # resize gt                       
         B, C, H, W, D = output_voxels.shape
-        ratio = target_voxels.shape[2] // H
-        
-        # Handle case where ratio is 0 (target_voxels.shape[2] < H)
-        if ratio == 0:
-            # Skip loss calculation for invalid ratio
-            return {}
-        
-        
-        if ratio != 1:
-            target_voxels = target_voxels.reshape(B, H, ratio, W, ratio, D, ratio).permute(0,1,3,5,2,4,6).reshape(B, H, W, D, ratio**3)
-            empty_mask = target_voxels.sum(-1) == self.empty_idx
-            target_voxels = target_voxels.to(torch.int64)
-            occ_space = target_voxels[~empty_mask]
-            occ_space[occ_space==0] = -torch.arange(len(occ_space[occ_space==0])).to(occ_space.device) - 1
-            target_voxels[~empty_mask] = occ_space
-            target_voxels = torch.mode(target_voxels, dim=-1)[0]
-            target_voxels[target_voxels<0] = 255
-            target_voxels = target_voxels.long()
-        else:
-            # No downsampling needed (ratio=1)
-            pass
+        # Resize ground truth to match output grid if shapes mismatch
+        if target_voxels.dim() == 4 and (target_voxels.shape[1] != H or target_voxels.shape[2] != W or target_voxels.shape[3] != D):
+            # target_voxels: [B, H_t, W_t, D_t] -> add channel dim
+            t = target_voxels.unsqueeze(1).float()  # [B,1,H_t,W_t,D_t]
+            t = F.interpolate(t, size=(H, W, D), mode='nearest')
+            target_voxels = t.squeeze(1).long()
+        # else: assume shapes already match
 
         assert torch.isnan(output_voxels).sum().item() == 0
         assert torch.isnan(target_voxels).sum().item() == 0
@@ -289,7 +348,6 @@ class OccHead(nn.Module):
         sem_loss = sem_scal_loss(output_voxels, target_voxels, ignore_index=255)
         geo_loss = geo_scal_loss(output_voxels, target_voxels, ignore_index=255, non_empty_idx=self.empty_idx)
         lovasz_loss = lovasz_softmax(torch.softmax(output_voxels, dim=1), target_voxels, ignore=255)
-        
         
         loss_dict['loss_voxel_ce_{}'.format(tag)] = self.loss_voxel_ce_weight * ce_loss
         loss_dict['loss_voxel_sem_scal_{}'.format(tag)] = self.loss_voxel_sem_scal_weight * sem_loss

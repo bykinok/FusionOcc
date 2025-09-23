@@ -120,6 +120,10 @@ class ViewTransformerLiftSplatShoot(BaseModule):
         """
         B, N, _ = trans.shape
 
+        # Ensure frustum is on the same device as post_trans
+        if self.frustum.device != post_trans.device:
+            self.frustum.data = self.frustum.data.to(post_trans.device)
+
         # undo post-transformation
         # B x N x D x H x W x 3
         points = self.frustum - post_trans.view(B, N, 1, 1, 1, 3)
@@ -163,7 +167,8 @@ class ViewTransformerLiftSplatShoot(BaseModule):
         x = x[kept]
         geom_feats = geom_feats[kept]
 
-        if self.use_bev_pool:
+        # Force use_bev_pool=True to avoid QuickCumsum gradient issues
+        if True:  # self.use_bev_pool or True to force
             final = occ_pool(x, geom_feats, B, self.nx[2], self.nx[0],
                                    self.nx[1])
             final = final.transpose(dim0=-2, dim1=-1)
@@ -485,6 +490,12 @@ class DepthNet(nn.Module):
         )
 
     def forward(self, x, mlp_input):
+        # Ensure mlp_input is on the same device as the model
+        if hasattr(self.bn, 'parameters'):
+            bn_params = list(self.bn.parameters())
+            if bn_params and mlp_input.device != bn_params[0].device:
+                mlp_input = mlp_input.to(bn_params[0].device)
+        
         mlp_input = self.bn(mlp_input.reshape(-1, mlp_input.shape[-1]))
         x = self.reduce_conv(x)
         context_se = self.context_mlp(mlp_input)[..., None, None]

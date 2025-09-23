@@ -347,7 +347,6 @@ class BEVDepth_Base(object):
         Returns:
             dict: Losses of different branches.
         """
-
         img_feats, pts_feats, depth = self.extract_feat(
             points, img=img_inputs, img_metas=img_metas)
         assert self.with_pts_bbox
@@ -355,6 +354,7 @@ class BEVDepth_Base(object):
         depth_gt = img_inputs[7]
         loss_depth = self.img_view_transformer.get_depth_loss(depth_gt, depth)
         losses = dict(loss_depth=loss_depth)
+        
         losses_pts = self.forward_pts_train(img_feats, gt_bboxes_3d,
                                             gt_labels_3d, img_metas,
                                             gt_bboxes_ignore)

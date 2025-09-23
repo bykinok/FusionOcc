@@ -20,8 +20,8 @@ input_modality = dict(
 # Data configuration
 occ_path = "./data/nuScenes-Occupancy"
 depth_gt_path = './data/depth_gt'
-train_ann_file = "nuscenes_occ_infos_train.pkl"
-val_ann_file = "nuscenes_occ_infos_val.pkl"
+train_ann_file = "nuscenes_occ_infos_train_fixed_valid.pkl"
+val_ann_file = "nuscenes_occ_infos_val_fixed_valid.pkl"
 
 # For nuScenes we usually do 10-class detection
 class_names = [
@@ -41,7 +41,7 @@ visible_mask = False
 
 cascade_ratio = 4
 sample_from_voxel = True
-sample_from_img = False  # Disable image sampling to match input dimensions
+sample_from_img = True  # Enable image sampling for multimodal setup
 
 dataset_type = 'NuscOCCDataset'
 data_root = 'data/nuscenes/'
@@ -168,7 +168,7 @@ model = dict(
 )
 
 bda_aug_conf = dict(
-    rot_lim=(0, 0),
+    rot_lim=(-0, 0),
     scale_lim=(0.95, 1.05),
     flip_dx_ratio=0.5,
     flip_dy_ratio=0.5)

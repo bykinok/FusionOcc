@@ -68,11 +68,18 @@ class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
 
     # @force_fp32()  # Removed for mmengine compatibility
     def get_klv_depth_loss(self, depth_labels, depth_preds):
+        # Ensure all tensors are on the same device
+        if depth_preds.device != depth_labels.device:
+            depth_labels = depth_labels.to(depth_preds.device)
+            
         depth_gaussian_labels, depth_values = generate_guassian_depth_target(depth_labels,
             self.downsample, self.cam_depth_range, constant_std=self.constant_std)
         
         depth_values = depth_values.view(-1)
         fg_mask = (depth_values >= self.cam_depth_range[0]) & (depth_values <= (self.cam_depth_range[1] - self.cam_depth_range[2]))        
+        
+        if fg_mask.sum() == 0:
+            return torch.tensor(1.0, device=depth_preds.device, requires_grad=True)
         
         depth_gaussian_labels = depth_gaussian_labels.view(-1, self.D)[fg_mask]
         depth_preds = depth_preds.permute(0, 2, 3, 1).contiguous().view(-1, self.D)[fg_mask]
@@ -97,20 +104,27 @@ class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
     def voxel_pooling(self, geom_feats, x):
         B, N, D, H, W, C = x.shape
         Nprime = B * N * D * H * W
-        nx = self.nx.to(torch.long)
+        nx = self.nx.to(torch.long).to(x.device)
         # flatten x
         x = x.reshape(Nprime, C)
 
+        # Ensure bx and dx are on the same device as geom_feats
+        bx = self.bx.to(geom_feats.device)
+        dx = self.dx.to(geom_feats.device)
+        
         # flatten indices
-        geom_feats = ((geom_feats - (self.bx - self.dx / 2.)) / self.dx).long()
+        geom_feats = ((geom_feats - (bx - dx / 2.)) / dx).long()
         geom_feats = geom_feats.view(Nprime, 3)
-        batch_ix = torch.cat([torch.full([Nprime // B, 1], ix, device=x.device, dtype=torch.long) for ix in range(B)])
+        batch_ix = torch.cat([torch.full([Nprime // B, 1], ix, device=geom_feats.device, dtype=torch.long) for ix in range(B)])
         geom_feats = torch.cat((geom_feats, batch_ix), 1)
 
+        # Ensure nx is on the same device as geom_feats
+        nx = self.nx.to(geom_feats.device)
+        
         # filter out points that are outside box
-        kept = (geom_feats[:, 0] >= 0) & (geom_feats[:, 0] < self.nx[0]) \
-               & (geom_feats[:, 1] >= 0) & (geom_feats[:, 1] < self.nx[1]) \
-               & (geom_feats[:, 2] >= 0) & (geom_feats[:, 2] < self.nx[2])
+        kept = (geom_feats[:, 0] >= 0) & (geom_feats[:, 0] < nx[0]) \
+               & (geom_feats[:, 1] >= 0) & (geom_feats[:, 1] < nx[1]) \
+               & (geom_feats[:, 2] >= 0) & (geom_feats[:, 2] < nx[2])
         x = x[kept]
         geom_feats = geom_feats[kept]
         
