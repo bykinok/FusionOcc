@@ -1,0 +1,52 @@
+Collections:
+  - Name: STCOcc
+    Metadata:
+      Training Data: nuScenes
+      Training Techniques:
+        - AdamW
+        - Multi-scale training
+      Training Resources: 8x V100 GPUs
+      Architecture:
+        - ResNet
+        - BEVFormer
+        - Temporal Fusion
+    Paper:
+      Title: 'STCOcc: Spatio-Temporal Context Occupancy Prediction'
+      URL: ''
+    README: projects/STCOcc/README.md
+    Code:
+      URL: https://github.com/open-mmlab/mmdetection3d/tree/main/projects/STCOcc
+      Version: v1.4.0
+
+Models:
+  - Name: stcocc_r50_704x256_16f_openocc_12e
+    In Collection: STCOcc
+    Config: projects/STCOcc/configs/stcocc_r50_704x256_16f_openocc_12e.py
+    Metadata:
+      Training Data: nuScenes (OpenOcc)
+      Training Memory (GB): 24.0
+      Training time (hour): 48
+    Results:
+      - Task: 3D Occupancy Prediction
+        Dataset: nuScenes (OpenOcc)
+        Metrics:
+          mIoU: 40.84
+          mAVE: 44.49
+          OCC Score: 42.31
+    Weights: ''
+
+  - Name: stcocc_r50_704x256_16f_occ3d_36e
+    In Collection: STCOcc
+    Config: projects/STCOcc/configs/stcocc_r50_704x256_16f_occ3d_36e.py
+    Metadata:
+      Training Data: nuScenes (Occ3D)
+      Training Memory (GB): 24.0
+      Training time (hour): 144
+    Results:
+      - Task: 3D Occupancy Prediction
+        Dataset: nuScenes (Occ3D)
+        Metrics:
+          mIoU: 41.74
+          mAVE: 0.0
+          OCC Score: 47.56
+    Weights: ''
