@@ -10,16 +10,46 @@ from projects.BEVFormer.utils.visual import save_tensor
 from .custom_base_transformer_layer import MyCustomBaseTransformerLayer
 import copy
 import warnings
-from mmcv.cnn.bricks.registry import (ATTENTION,
-                                      TRANSFORMER_LAYER,
-                                      TRANSFORMER_LAYER_SEQUENCE)
-from mmcv.cnn.bricks.transformer import TransformerLayerSequence
-from mmcv.runner import force_fp32, auto_fp16
+try:
+    from mmcv.cnn.bricks.registry import (ATTENTION, TRANSFORMER_LAYER, TRANSFORMER_LAYER_SEQUENCE)
+except ImportError:
+    from mmdet3d.registry import MODELS
+    ATTENTION = MODELS
+    TRANSFORMER_LAYER = MODELS
+    TRANSFORMER_LAYER_SEQUENCE = MODELS
+
+try:
+    from mmcv.cnn.bricks.transformer import TransformerLayerSequence
+except ImportError:
+    from torch.nn import Module as TransformerLayerSequence
+
+try:
+    from mmcv.runner import force_fp32, auto_fp16
+except ImportError:
+    def force_fp32(*args, **kwargs):
+        if args and callable(args[0]):
+            return args[0]
+        def decorator(func):
+            return func
+        return decorator
+    def auto_fp16(*args, **kwargs):
+        if args and callable(args[0]):
+            return args[0]
+        def decorator(func):
+            return func
+        return decorator
 import numpy as np
 import torch
 import cv2 as cv
 import mmcv
-from mmcv.utils import TORCH_VERSION, digit_version
+try:
+    from mmcv.utils import TORCH_VERSION, digit_version
+except ImportError:
+    import torch
+    TORCH_VERSION = torch.__version__
+    def digit_version(version_str):
+        from packaging import version
+        return version.parse(version_str)
 from mmcv.utils import ext_loader
 ext_module = ext_loader.load_ext(
     '_ext', ['ms_deform_attn_backward', 'ms_deform_attn_forward'])

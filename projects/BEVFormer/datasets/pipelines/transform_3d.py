@@ -1,8 +1,20 @@
 import numpy as np
 from numpy import random
 import mmcv
-from mmdet.datasets.builder import PIPELINES
-from mmcv.parallel import DataContainer as DC
+try:
+    from mmdet.datasets.builder import PIPELINES
+except ImportError:
+    from mmdet3d.registry import TRANSFORMS as PIPELINES
+try:
+    from mmcv.parallel import DataContainer as DC
+except ImportError:
+    # DataContainer is deprecated in newer versions, create a simple wrapper
+    class DC:
+        def __init__(self, data, **kwargs):
+            self.data = data
+            self._kwargs = kwargs
+        def __repr__(self):
+            return f'DC({self.data})'
 import os
 
 

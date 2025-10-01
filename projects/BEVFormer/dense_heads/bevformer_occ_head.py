@@ -5,29 +5,138 @@
 # ---------------------------------------------
 
 import copy
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mmcv.cnn import Linear, bias_init_with_prob
-from mmcv.utils import TORCH_VERSION, digit_version
+from mmcv.cnn import Linear
+try:
+    from mmcv.cnn import bias_init_with_prob
+except ImportError:
+    # In newer versions, this might be in mmengine or removed
+    import math
+    def bias_init_with_prob(prior_prob=0.01):
+        """initialize conv/fc bias value according to a given probability value."""
+        bias_init = float(-math.log((1 - prior_prob) / prior_prob))
+        return bias_init
+try:
+    from mmcv.utils import TORCH_VERSION, digit_version
+except ImportError:
+    # In newer versions, use torch version directly
+    import torch
+    TORCH_VERSION = torch.__version__
+    def digit_version(version_str):
+        from packaging import version
+        return version.parse(version_str)
 
-from mmdet.core import (multi_apply, multi_apply, reduce_mean)
-from mmdet.models.utils.transformer import inverse_sigmoid
-from mmdet.models import HEADS
-from mmdet.models.dense_heads import DETRHead
-from mmdet3d.core.bbox.coders import build_bbox_coder
+# Import utilities with compatibility layer
+try:
+    from mmdet.core import multi_apply, reduce_mean
+except ImportError:
+    try:
+        from mmengine.utils import multi_apply
+    except ImportError:
+        from torch.nn.parallel import parallel_apply
+        multi_apply = parallel_apply
+    try:
+        from mmengine.dist import reduce_mean
+    except ImportError:
+        def reduce_mean(tensor):
+            import torch.distributed as dist
+            if not dist.is_available() or not dist.is_initialized():
+                return tensor
+            tensor = tensor.clone()
+            dist.all_reduce(tensor.div_(dist.get_world_size()))
+            return tensor
+
+try:
+    from mmdet.models.utils.transformer import inverse_sigmoid
+except ImportError:
+    def inverse_sigmoid(x, eps=1e-5):
+        import torch
+        x = x.clamp(min=0, max=1)
+        x1 = x.clamp(min=eps)
+        x2 = (1 - x).clamp(min=eps)
+        return torch.log(x1 / x2)
+
+try:
+    from mmdet.models import HEADS
+except ImportError:
+    from mmdet3d.registry import MODELS as HEADS
+
+try:
+    from mmdet.models.dense_heads import DETRHead
+except ImportError:
+    try:
+        from mmdet.models.dense_heads.detr_head import DETRHead
+    except ImportError:
+        # Create a minimal base class if DETRHead is not available
+        from mmengine.model import BaseModule
+        DETRHead = BaseModule
+
+try:
+    from mmdet3d.core.bbox.coders import build_bbox_coder
+except ImportError:
+    # In newer versions, use MODELS registry
+    from mmdet3d.registry import MODELS
+    def build_bbox_coder(cfg):
+        return MODELS.build(cfg)
+
 from projects.BEVFormer.utils.bbox_util import normalize_bbox
-from mmcv.cnn.bricks.transformer import build_positional_encoding
-from mmcv.runner import force_fp32, auto_fp16
+
+try:
+    from mmcv.cnn.bricks.transformer import build_positional_encoding
+except ImportError:
+    try:
+        from mmdet.models.layers import build_positional_encoding
+    except ImportError:
+        from mmdet3d.registry import MODELS
+        def build_positional_encoding(cfg):
+            return MODELS.build(cfg)
+
+try:
+    from mmcv.runner import force_fp32, auto_fp16
+except ImportError:
+    # Create dummy decorators
+    def force_fp32(*args, **kwargs):
+        if args and callable(args[0]):
+            return args[0]
+        def decorator(func):
+            return func
+        return decorator
+    def auto_fp16(*args, **kwargs):
+        if args and callable(args[0]):
+            return args[0]
+        def decorator(func):
+            return func
+        return decorator
 from projects.BEVFormer.utils.bricks import run_time
 import numpy as np
 import mmcv
 import cv2 as cv
 from projects.BEVFormer.utils.visual import save_tensor
 from mmcv.cnn.bricks.transformer import build_positional_encoding
-from mmdet.models.utils import build_transformer
-from mmdet.models.builder import build_loss
-from mmcv.runner import BaseModule, force_fp32
+try:
+    from mmdet.models.utils import build_transformer
+except ImportError:
+    try:
+        from mmdet.models.layers import build_transformer
+    except ImportError:
+        from mmdet3d.registry import MODELS
+        def build_transformer(cfg):
+            return MODELS.build(cfg)
+try:
+    from mmdet.models.builder import build_loss
+except ImportError:
+    # In newer versions, use MODELS registry
+    from mmdet3d.registry import MODELS
+    def build_loss(cfg):
+        return MODELS.build(cfg)
+try:
+    from mmcv.runner import BaseModule
+except ImportError:
+    from mmengine.model import BaseModule
+# force_fp32 is already defined above
 
 @HEADS.register_module()
 class BEVFormerOccHead(BaseModule):
@@ -113,12 +222,22 @@ class BEVFormerOccHead(BaseModule):
         """
         bs, num_cam, _, _, _ = mlvl_feats[0].shape
         dtype = mlvl_feats[0].dtype
+        device = mlvl_feats[0].device
         object_query_embeds = None
-        bev_queries = self.bev_embedding.weight.to(dtype)
+        
+        # Ensure all modules are on the correct device
+        if hasattr(self, 'bev_embedding'):
+            self.bev_embedding = self.bev_embedding.to(device)
+        if hasattr(self, 'positional_encoding'):
+            self.positional_encoding = self.positional_encoding.to(device)
+        if hasattr(self, 'transformer'):
+            self.transformer = self.transformer.to(device)
+        
+        bev_queries = self.bev_embedding.weight.to(device=device, dtype=dtype)
 
         bev_mask = torch.zeros((bs, self.bev_h, self.bev_w),
-                               device=bev_queries.device).to(dtype)
-        bev_pos = self.positional_encoding(bev_mask).to(dtype)
+                               device=device, dtype=dtype)
+        bev_pos = self.positional_encoding(bev_mask).to(device=device, dtype=dtype)
 
         if only_bev:  # only use encoder to obtain BEV features, TODO: refine the workaround
             return self.transformer.get_bev_features(
@@ -168,12 +287,30 @@ class BEVFormerOccHead(BaseModule):
 
         loss_dict=dict()
         occ=preds_dicts['occ']
+        
+        # Convert voxel_semantics to tensor if it's a list
+        if isinstance(voxel_semantics, list):
+            voxel_semantics = voxel_semantics[0]
+        if isinstance(mask_camera, list):
+            mask_camera = mask_camera[0]
+        
         assert voxel_semantics.min()>=0 and voxel_semantics.max()<=17
         losses = self.loss_single(voxel_semantics,mask_camera,occ)
         loss_dict['loss_occ']=losses
         return loss_dict
 
     def loss_single(self,voxel_semantics,mask_camera,preds):
+        # Convert numpy arrays to torch tensors if needed
+        if isinstance(voxel_semantics, np.ndarray):
+            voxel_semantics = torch.from_numpy(voxel_semantics)
+        if isinstance(mask_camera, np.ndarray):
+            mask_camera = torch.from_numpy(mask_camera)
+        
+        # Move tensors to the same device as preds
+        device = preds.device
+        voxel_semantics = voxel_semantics.to(device)
+        mask_camera = mask_camera.to(device)
+        
         voxel_semantics=voxel_semantics.long()
         if self.use_mask:
             voxel_semantics=voxel_semantics.reshape(-1)

@@ -49,7 +49,10 @@ from nuscenes.eval.detection.data_classes import DetectionConfig, DetectionMetri
     DetectionMetricDataList
 from nuscenes.eval.detection.render import summary_plot, class_pr_curve, dist_pr_curve, visualize_sample
 from nuscenes.eval.common.utils import quaternion_yaw, Quaternion
-from mmdet3d.core.bbox.iou_calculators import BboxOverlaps3D
+try:
+    from mmdet3d.core.bbox.iou_calculators import BboxOverlaps3D
+except ImportError:
+    from mmdet3d.structures.ops import BboxOverlaps3D
 from IPython import embed
 import json
 from typing import Any

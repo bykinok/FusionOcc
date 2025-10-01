@@ -105,7 +105,10 @@ def worker_init_fn(worker_id, num_workers, rank, seed):
 import platform
 from mmcv.utils import Registry, build_from_cfg
 
-from mmdet.datasets import DATASETS
+try:
+    from mmdet.datasets import DATASETS
+except ImportError:
+    from mmdet3d.registry import DATASETS
 from mmdet.datasets.builder import _concat_dataset
 
 if platform.system() != 'Windows':

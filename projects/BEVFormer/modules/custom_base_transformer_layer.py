@@ -10,12 +10,37 @@ import warnings
 import torch
 import torch.nn as nn
 
-from mmcv import ConfigDict, deprecated_api_warning
+try:
+    from mmcv import ConfigDict, deprecated_api_warning
+except ImportError:
+    try:
+        from mmengine import ConfigDict
+    except ImportError:
+        ConfigDict = dict
+    # deprecated_api_warning is not needed in newer versions
+    def deprecated_api_warning(old_api, new_api=''):
+        import warnings
+        warnings.warn(f'{old_api} is deprecated, use {new_api} instead', DeprecationWarning)
+        def decorator(func):
+            return func
+        return decorator
 from mmcv.cnn import Linear, build_activation_layer, build_norm_layer
-from mmcv.runner.base_module import BaseModule, ModuleList, Sequential
+try:
+    from mmcv.runner.base_module import BaseModule, ModuleList, Sequential
+except ImportError:
+    from mmengine.model import BaseModule
+    from torch.nn import ModuleList, Sequential
 
-from mmcv.cnn.bricks.registry import (ATTENTION, FEEDFORWARD_NETWORK, POSITIONAL_ENCODING,
-                                      TRANSFORMER_LAYER, TRANSFORMER_LAYER_SEQUENCE)
+try:
+    from mmcv.cnn.bricks.registry import (ATTENTION, FEEDFORWARD_NETWORK, POSITIONAL_ENCODING,
+                                          TRANSFORMER_LAYER, TRANSFORMER_LAYER_SEQUENCE)
+except ImportError:
+    from mmdet3d.registry import MODELS
+    ATTENTION = MODELS
+    FEEDFORWARD_NETWORK = MODELS
+    POSITIONAL_ENCODING = MODELS
+    TRANSFORMER_LAYER = MODELS
+    TRANSFORMER_LAYER_SEQUENCE = MODELS
 
 # Avoid BC-breaking of importing MultiScaleDeformableAttention from this file
 try:

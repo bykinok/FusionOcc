@@ -2,17 +2,32 @@ import copy
 import os
 import numpy as np
 from tqdm import tqdm
-from mmdet.datasets import DATASETS
+try:
+    from mmdet.datasets import DATASETS
+except ImportError:
+    from mmdet3d.registry import DATASETS
 from mmdet3d.datasets import NuScenesDataset
 import mmcv
 from os import path as osp
-from mmdet.datasets import DATASETS
+try:
+    from mmdet.datasets import DATASETS
+except ImportError:
+    from mmdet3d.registry import DATASETS
 import torch
 import numpy as np
 from nuscenes.eval.common.utils import quaternion_yaw, Quaternion
 from .nuscnes_eval import NuScenesEval_custom
 from projects.BEVFormer.utils.visual import save_tensor
-from mmcv.parallel import DataContainer as DC
+try:
+    from mmcv.parallel import DataContainer as DC
+except ImportError:
+    # DataContainer is deprecated in newer versions, create a simple wrapper
+    class DC:
+        def __init__(self, data, **kwargs):
+            self.data = data
+            self._kwargs = kwargs
+        def __repr__(self):
+            return f'DC({self.data})'
 import random
 from nuscenes.utils.geometry_utils import transform_matrix
 from .occ_metrics import Metric_mIoU, Metric_FScore
@@ -25,31 +40,81 @@ class NuSceneOcc(NuScenesDataset):
     This datset only add camera intrinsics and extrinsics to the results.
     """
 
-    def __init__(self, queue_length=4, bev_size=(200, 200), overlap_test=False, eval_fscore=False, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, queue_length=4, bev_size=(200, 200), overlap_test=False, eval_fscore=False, load_interval=1, *args, **kwargs):
+        # Set attributes BEFORE calling parent __init__ (which calls full_init -> load_data_list)
         self.eval_fscore = eval_fscore
         self.queue_length = queue_length
         self.overlap_test = overlap_test
         self.bev_size = bev_size
-        self.data_infos = self.load_annotations(self.ann_file)
+        self.load_interval = load_interval
+        
+        # Extract deprecated parameters before calling parent __init__ (new mmengine doesn't accept them)
+        classes = kwargs.pop('classes', None)
+        kwargs.pop('samples_per_gpu', None)  # Remove old-style parameter
+        
+        # CRITICAL: Force serialize_data=False to use load_data_list() instead of pickle cache
+        kwargs['serialize_data'] = False
+        
+        super().__init__(*args, **kwargs)
+        if classes is not None:
+            self.CLASSES = classes
+        
+        # After parent init, data_list should be populated. Store it as data_infos for compatibility
+        self.data_infos = self.data_list
+    
+    def load_data_list(self):
+        """Load data list from annotation file for mmengine compatibility."""
+        # In mmengine, BaseDataset calls load_data_list() in full_init()
+        # which happens in __init__
+        try:
+            from mmengine.fileio import load
+            data = load(self.ann_file)
+        except ImportError:
+            import mmcv
+            data = mmcv.load(self.ann_file)
+        
+        # Sort and filter data
+        data_infos = list(sorted(data['infos'], key=lambda e: e['timestamp']))
+        data_infos = data_infos[::self.load_interval]
+        
+        # Store metadata
+        self.metadata = data.get('metadata', {})
+        self.version = self.metadata.get('version', 'v1.0')
+        
+        # IMPORTANT: Return the data_infos so BaseDataset can store it as self.data_list
+        return data_infos
 
     def load_annotations(self, ann_file):
         """Load annotations from ann_file.
+        
+        Note: This method is kept for compatibility but is deprecated in mmengine.
+        The actual data loading happens in load_data_list().
 
         Args:
             ann_file (str): Path of the annotation file.
 
         Returns:
-            list[dict]: List of annotations sorted by timestamps.
+            list[dict]: List of annotations (same as data_list).
         """
-        data = mmcv.load(ann_file)
-        # self.train_split=data['train_split']
-        # self.val_split=data['val_split']
-        data_infos = list(sorted(data['infos'], key=lambda e: e['timestamp']))
-        data_infos = data_infos[::self.load_interval]
-        self.metadata = data['metadata']
-        self.version = self.metadata['version']
-        return data_infos
+        # This should only be called after full_init, so data_list should exist
+        return getattr(self, 'data_list', [])
+    
+    def pre_pipeline(self, results):
+        """Prepare results dict for pipeline processing.
+        
+        Args:
+            results (dict): Result dict from get_data_info().
+        """
+        # Add required fields
+        results['img_prefix'] = self.data_root
+        results['seg_prefix'] = None
+        results['proposal_file'] = None
+        results['bbox3d_fields'] = []
+        results['pts_mask_fields'] = []
+        results['pts_seg_fields'] = []
+        results['bbox_fields'] = []
+        results['mask_fields'] = []
+        results['seg_fields'] = []
 
     def prepare_train_data(self, index):
         """
@@ -65,7 +130,8 @@ class NuSceneOcc(NuScenesDataset):
         index_list = sorted(index_list[1:])
         index_list.append(index)
         for i in index_list:
-            i = max(0, i)
+            # Clip index to valid range [0, len(data_list)-1]
+            i = max(0, min(i, len(self.data_list) - 1))
             input_dict = self.get_data_info(i)
             if input_dict is None:
                 return None
@@ -97,7 +163,26 @@ class NuSceneOcc(NuScenesDataset):
                 metas_map[i]['can_bus'][-1] -= prev_angle
                 prev_pos = copy.deepcopy(tmp_pos)
                 prev_angle = copy.deepcopy(tmp_angle)
-        queue[-1]['img'] = DC(torch.stack(imgs_list), cpu_only=False, stack=True)
+        # Stack images - handle both tensor and list cases
+        if isinstance(imgs_list[0], list):
+            # imgs_list is a list of lists (multi-view images)
+            # Convert each list of multi-view images to a stacked tensor
+            # imgs_list: [[img1_view1, img1_view2, ...], [img2_view1, img2_view2, ...], ...]
+            # Result: [num_queue, num_views, C, H, W]
+            stacked_imgs = []
+            for img_views in imgs_list:
+                if isinstance(img_views[0], torch.Tensor):
+                    stacked_imgs.append(torch.stack(img_views))
+                else:
+                    # Already stacked
+                    stacked_imgs.append(img_views)
+            # IMPORTANT: Keep on CPU (cpu_only=True) for DataContainer
+            # Model will move to GPU when needed
+            queue[-1]['img'] = DC(torch.stack(stacked_imgs), cpu_only=True, stack=True)
+        else:
+            # imgs_list is a list of tensors
+            queue[-1]['img'] = DC(torch.stack(imgs_list), cpu_only=True, stack=True)
+        
         queue[-1]['img_metas'] = DC(metas_map, cpu_only=True)
         queue = queue[-1]
         return queue
@@ -121,7 +206,8 @@ class NuSceneOcc(NuScenesDataset):
                     from lidar to different cameras.
                 - ann_info (dict): Annotation info.
         """
-        info = self.data_infos[index]
+        # Use data_list (mmengine) instead of data_infos (old mmdet3d)
+        info = self.data_list[index]
         # standard protocal modified from SECOND.Pytorch
         input_dict = dict(
             sample_idx=info['token'],
@@ -165,16 +251,46 @@ class NuSceneOcc(NuScenesDataset):
 
                 cam_intrinsics.append(viewpad)
                 lidar2cam_rts.append(lidar2cam_rt.T)
+            # Build images dict for mmdet3d compatibility
+            images_dict = {}
+            idx = 0
+            for cam_type, cam_info in info['cams'].items():
+                cam_dict = dict(
+                    img_path=cam_info['data_path'],
+                    cam2img=cam_intrinsics[idx],
+                    lidar2cam=lidar2cam_rts[idx]
+                )
+                images_dict[cam_type] = cam_dict
+                idx += 1
+            
             input_dict.update(
                 dict(
                     img_filename=image_paths,
+                    images=images_dict,
                     lidar2img=lidar2img_rts,
                     cam_intrinsic=cam_intrinsics,
                     lidar2cam=lidar2cam_rts,
                 ))
 
         if not self.test_mode:
-            annos = self.get_ann_info(index)
+            # CRITICAL: Don't call self.get_ann_info() to avoid infinite recursion with mmdet3d's base class
+            # Instead, directly construct annos from info dict
+            try:
+                from mmdet3d.structures.bbox_3d import LiDARInstance3DBoxes
+            except ImportError:
+                from mmdet3d.core.bbox import LiDARInstance3DBoxes
+            
+            gt_boxes = info.get('gt_boxes', np.zeros((0, 7), dtype=np.float32))
+            if len(gt_boxes) > 0:
+                gt_bboxes_3d = LiDARInstance3DBoxes(gt_boxes, box_dim=gt_boxes.shape[-1], origin=(0.5, 0.5, 0))
+            else:
+                gt_bboxes_3d = LiDARInstance3DBoxes(np.zeros((0, 7), dtype=np.float32), box_dim=7, origin=(0.5, 0.5, 0))
+            
+            annos = dict(
+                gt_bboxes_3d=gt_bboxes_3d,
+                gt_labels_3d=np.array([self.CLASSES.index(name) if name in self.CLASSES else -1 for name in info.get('gt_names', [])], dtype=np.int64),
+                gt_names=info.get('gt_names', [])
+            )
             input_dict['ann_info'] = annos
 
         rotation = Quaternion(input_dict['ego2global_rotation'])
@@ -229,7 +345,8 @@ class NuSceneOcc(NuScenesDataset):
             )
         print('\nStarting Evaluation...')
         for index, occ_pred in enumerate(tqdm(occ_results)):
-            info = self.data_infos[index]
+            # Use data_list (mmengine) instead of data_infos (old mmdet3d)
+            info = self.data_list[index]
 
             occ_gt = np.load(os.path.join(self.data_root, info['occ_gt_path']))
             if show_dir is not None:
@@ -261,7 +378,8 @@ class NuSceneOcc(NuScenesDataset):
             mmcv.mkdir_or_exist(submission_prefix)
 
         for index, occ_pred in enumerate(tqdm(occ_results)):
-            info = self.data_infos[index]
+            # Use data_list (mmengine) instead of data_infos (old mmdet3d)
+            info = self.data_list[index]
             sample_token = info['token']
             save_path=os.path.join(submission_prefix,'{}.npz'.format(sample_token))
             np.savez_compressed(save_path,occ_pred.astype(np.uint8))

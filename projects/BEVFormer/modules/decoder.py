@@ -14,14 +14,68 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mmcv.cnn import xavier_init, constant_init
-from mmcv.cnn.bricks.registry import (ATTENTION,
-                                      TRANSFORMER_LAYER_SEQUENCE)
-from mmcv.cnn.bricks.transformer import TransformerLayerSequence
+try:
+    from mmcv.cnn import xavier_init, constant_init
+except ImportError:
+    # In newer versions, these are in torch.nn.init or mmengine
+    try:
+        from mmengine.model.weight_init import xavier_init, constant_init
+    except ImportError:
+        from torch.nn.init import xavier_uniform_, constant_
+        def xavier_init(module, gain=1, bias=0, distribution='normal'):
+            if hasattr(module, 'weight') and module.weight is not None:
+                xavier_uniform_(module.weight, gain=gain)
+            if hasattr(module, 'bias') and module.bias is not None:
+                constant_(module.bias, bias)
+        def constant_init(module, val, bias=0):
+            if hasattr(module, 'weight') and module.weight is not None:
+                constant_(module.weight, val)
+            if hasattr(module, 'bias') and module.bias is not None:
+                constant_(module.bias, bias)
+try:
+    from mmcv.cnn.bricks.registry import (ATTENTION, TRANSFORMER_LAYER_SEQUENCE)
+except ImportError:
+    from mmdet3d.registry import MODELS
+    ATTENTION = MODELS
+    TRANSFORMER_LAYER_SEQUENCE = MODELS
+
+try:
+    from mmcv.cnn.bricks.transformer import TransformerLayerSequence
+except ImportError:
+    try:
+        from mmdet.models.layers import TransformerLayerSequence
+    except ImportError:
+        from torch.nn import Module as TransformerLayerSequence
+
 import math
-from mmcv.runner.base_module import BaseModule, ModuleList, Sequential
-from mmcv.utils import (ConfigDict, build_from_cfg, deprecated_api_warning,
-                        to_2tuple)
+
+try:
+    from mmcv.runner.base_module import BaseModule, ModuleList, Sequential
+except ImportError:
+    from mmengine.model import BaseModule
+    from torch.nn import ModuleList, Sequential
+
+try:
+    from mmcv.utils import (ConfigDict, build_from_cfg, deprecated_api_warning, to_2tuple)
+except ImportError:
+    try:
+        from mmengine import ConfigDict
+    except ImportError:
+        ConfigDict = dict
+    try:
+        from mmengine.registry import build_from_cfg
+    except ImportError:
+        def build_from_cfg(cfg, registry):
+            return registry.build(cfg)
+    def deprecated_api_warning(name_dict, out_str='', **kwargs):
+        """Decorator for deprecated API warning."""
+        def decorator(func):
+            return func
+        return decorator
+    def to_2tuple(x):
+        if isinstance(x, (tuple, list)):
+            return tuple(x)
+        return (x, x)
 
 from mmcv.utils import ext_loader
 from .multi_scale_deformable_attn_function import MultiScaleDeformableAttnFunction_fp32, \

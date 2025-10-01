@@ -2,7 +2,25 @@ import torch
 import torch.nn as nn
 import numpy as np
 from PIL import Image
-from mmcv.runner import force_fp32, auto_fp16
+try:
+    from mmcv.runner import force_fp32, auto_fp16
+except ImportError:
+    try:
+        from mmengine.runner import auto_fp16, force_fp32
+    except ImportError:
+        # Create dummy decorators if not available
+        def auto_fp16(*args, **kwargs):
+            if args and callable(args[0]):
+                return args[0]
+            def decorator(func):
+                return func
+            return decorator
+        def force_fp32(*args, **kwargs):
+            if args and callable(args[0]):
+                return args[0]
+            def decorator(func):
+                return func
+            return decorator
 
 class Grid(object):
     def __init__(self, use_h, use_w, rotate = 1, offset=False, ratio = 0.5, mode=0, prob = 1.):

@@ -1,18 +1,36 @@
 import copy
 
 import numpy as np
-from mmdet.datasets import DATASETS
+try:
+    from mmdet.datasets import DATASETS
+except ImportError:
+    from mmdet3d.registry import DATASETS
 from mmdet3d.datasets import NuScenesDataset
 import mmcv
 from os import path as osp
-from mmdet.datasets import DATASETS
+try:
+    from mmdet.datasets import DATASETS
+except ImportError:
+    from mmdet3d.registry import DATASETS
 import torch
 import numpy as np
 from nuscenes.eval.common.utils import quaternion_yaw, Quaternion
-from mmdet3d.core.bbox import Box3DMode, Coord3DMode, LiDARInstance3DBoxes
+try:
+    from mmdet3d.core.bbox import Box3DMode, Coord3DMode, LiDARInstance3DBoxes
+except ImportError:
+    from mmdet3d.structures.bbox_3d import Box3DMode, Coord3DMode, LiDARInstance3DBoxes
 from .nuscnes_eval import NuScenesEval_custom
 from projects.BEVFormer.utils.visual import save_tensor
-from mmcv.parallel import DataContainer as DC
+try:
+    from mmcv.parallel import DataContainer as DC
+except ImportError:
+    # DataContainer is deprecated in newer versions, create a simple wrapper
+    class DC:
+        def __init__(self, data, **kwargs):
+            self.data = data
+            self._kwargs = kwargs
+        def __repr__(self):
+            return f'DC({self.data})'
 import random
 
 

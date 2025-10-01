@@ -8,7 +8,7 @@ from .transformer import *  # noqa: F401, F403
 from .transformer_occ import *  # noqa: F401, F403
 
 __all__ = [
-    'BEVFormerEncoder', 'BEVFormerDecoder', 'BEVFormerLayer',
+    'BEVFormerEncoder', 'BEVFormerLayer',
     'SpatialCrossAttention', 'TemporalSelfAttention', 'PerceptionTransformer',
     'TransformerOcc'
 ]

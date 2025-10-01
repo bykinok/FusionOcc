@@ -1,13 +1,17 @@
-_base_ = [
-    '../../../mmdet3d/configs/_base_/datasets/nus_3d.py',
-    '../../../mmdet3d/configs/_base_/default_runtime.py'
-]
+# Removed _base_ to avoid lazy_import conflicts
+# _base_ = [
+#     '../../../mmdet3d/configs/_base_/datasets/nus_3d.py',
+#     '../../../mmdet3d/configs/_base_/default_runtime.py'
+# ]
 
 # Enable project imports
 custom_imports = dict(
     imports=['projects.BEVFormer'],
     allow_failed_imports=False
 )
+
+# Set default scope to mmdet3d for all modules
+default_scope = 'mmdet3d'
 
 # If point cloud range is changed, the models should also change their point
 # cloud range accordingly
@@ -39,11 +43,11 @@ bev_w_ = 200
 queue_length = 4 # each sequence contains `queue_length` frames.
 
 model = dict(
-    type='BEVFormerOcc',
+    type='mmdet3d.BEVFormerOcc',
     use_grid_mask=True,
     video_test_mode=True,
     img_backbone=dict(
-        type='ResNet',
+        type='mmdet.ResNet',
         depth=101,
         num_stages=4,
         out_indices=(1, 2, 3),
@@ -54,7 +58,7 @@ model = dict(
         dcn=dict(type='DCNv2', deform_groups=1, fallback_on_stride=False),
         stage_with_dcn=(False, False, True, True)),
     img_neck=dict(
-        type='FPN',
+        type='mmdet.FPN',
         in_channels=[512, 1024, 2048],
         out_channels=_dim_,
         start_level=0,
@@ -62,7 +66,7 @@ model = dict(
         num_outs=4,
         relu_before_extra_convs=True),
     pts_bbox_head=dict(
-        type='BEVFormerOccHead',
+        type='mmdet3d.BEVFormerOccHead',
         pc_range=point_cloud_range,
         bev_h=bev_h_,
         bev_w=bev_w_,
@@ -73,11 +77,11 @@ model = dict(
         as_two_stage=False,
         use_mask=False,
         loss_occ= dict(
-            type='CrossEntropyLoss',
+            type='mmdet.CrossEntropyLoss',
             use_sigmoid=False,
             loss_weight=1.0),
         transformer=dict(
-            type='TransformerOcc',
+                type='mmdet3d.TransformerOcc',
             pillar_h=16,
             num_classes=18,
             norm_cfg=dict(type='BN', ),
@@ -89,23 +93,23 @@ model = dict(
             use_can_bus=True,
             embed_dims=_dim_,
             encoder=dict(
-                type='BEVFormerEncoder',
+                type='mmdet3d.BEVFormerEncoder',
                 num_layers=4,
                 pc_range=point_cloud_range,
                 num_points_in_pillar=8,
                 return_intermediate=False,
                 transformerlayers=dict(
-                    type='BEVFormerLayer',
+                    type='mmdet3d.BEVFormerLayer',
                     attn_cfgs=[
                         dict(
-                            type='TemporalSelfAttention',
+                            type='mmdet3d.TemporalSelfAttention',
                             embed_dims=_dim_,
                             num_levels=1),
                         dict(
-                            type='SpatialCrossAttention',
+                            type='mmdet3d.SpatialCrossAttention',
                             pc_range=point_cloud_range,
                             deformable_attention=dict(
-                                type='MSDeformableAttention3D',
+                                type='mmdet3d.MSDeformableAttention3D',
                                 embed_dims=_dim_,
                                 num_points=8,
                                 num_levels=_num_levels_),
@@ -137,7 +141,7 @@ model = dict(
             iou_cost=dict(type='IoUCost', weight=0.0),
             pc_range=point_cloud_range))))
 
-dataset_type = 'NuSceneOcc'
+dataset_type = 'mmdet3d.NuSceneOcc'  # This matches the registered name in datasets/__init__.py
 data_root = 'data/occ3d-nus/'
 file_client_args = dict(backend='disk')
 occ_gt_data_root='data/occ3d-nus'
@@ -180,7 +184,7 @@ data = dict(
     train=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file=data_root + 'occ_infos_temporal_train.pkl',
+        ann_file='occ_infos_temporal_train.pkl',
         pipeline=train_pipeline,
         classes=class_names,
         modality=input_modality,
@@ -191,12 +195,12 @@ data = dict(
         box_type_3d='LiDAR'),
     val=dict(type=dataset_type,
              data_root=data_root,
-             ann_file=data_root + 'occ_infos_temporal_val.pkl',
+             ann_file='occ_infos_temporal_val.pkl',
              pipeline=test_pipeline,  bev_size=(bev_h_, bev_w_),
              classes=class_names, modality=input_modality, samples_per_gpu=1),
     test=dict(type=dataset_type,
               data_root=data_root,
-              ann_file=data_root + 'occ_infos_temporal_val.pkl',
+              ann_file='occ_infos_temporal_val.pkl',
               pipeline=test_pipeline, bev_size=(bev_h_, bev_w_),
               classes=class_names, modality=input_modality),
     shuffler_sampler=dict(type='DistributedGroupSampler'),
@@ -226,6 +230,63 @@ total_epochs = 24
 evaluation = dict(interval=1, pipeline=test_pipeline)
 
 runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
-load_from = 'ckpts/r101_dcn_fcos3d_pretrain.pth'
+
+# Convert old-style data config to new-style dataloader config for mmengine
+train_dataloader = dict(
+    batch_size=data['samples_per_gpu'],
+    num_workers=data['workers_per_gpu'],
+    persistent_workers=True,
+    sampler=dict(type='DefaultSampler', shuffle=True),
+    dataset=data['train']
+)
+
+# Disable validation and testing for now (OccMetric not registered yet)
+val_dataloader = None
+test_dataloader = None
+val_evaluator = None
+test_evaluator = None
+
+# Convert old-style optimizer config to new-style optim_wrapper
+optim_wrapper = dict(
+    type='OptimWrapper',
+    optimizer=dict(
+        type=optimizer['type'],
+        lr=optimizer['lr'],
+        weight_decay=optimizer.get('weight_decay', 0)
+    ),
+    paramwise_cfg=optimizer.get('paramwise_cfg', None),
+    clip_grad=optimizer_config.get('grad_clip', None)
+)
+
+# Add train_cfg for mmengine (without validation)
+train_cfg = dict(
+    by_epoch=True,
+    max_epochs=total_epochs
+)
+
+# Disable val_cfg and test_cfg
+val_cfg = None
+test_cfg = None
+
+# Add param_scheduler for mmengine (from lr_config)
+param_scheduler = [
+    dict(
+        type='LinearLR',
+        start_factor=lr_config.get('warmup_ratio', 0.001),
+        by_epoch=False,
+        begin=0,
+        end=lr_config.get('warmup_iters', 500)
+    ),
+    dict(
+        type='CosineAnnealingLR',
+        by_epoch=True,
+        begin=1,
+        end=total_epochs,
+        eta_min=lr_config['min_lr_ratio'] * optimizer['lr']
+    )
+]
+# Pretrained checkpoint - download if needed: https://github.com/open-mmlab/mmdetection3d/tree/master/configs/fcos3d
+# load_from = 'ckpts/r101_dcn_fcos3d_pretrain.pth'
+load_from = None  # Train from scratch for now
 
 checkpoint_config = dict(interval=1)

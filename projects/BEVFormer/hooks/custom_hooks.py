@@ -1,4 +1,11 @@
-from mmcv.runner.hooks.hook import HOOKS, Hook
+try:
+    from mmcv.runner.hooks.hook import HOOKS, Hook
+except ImportError:
+    try:
+        from mmengine.hooks import Hook, HOOKS
+    except ImportError:
+        from mmengine.hooks import Hook
+        from mmdet3d.registry import HOOKS
 from projects.BEVFormer.utils import run_time
 
 

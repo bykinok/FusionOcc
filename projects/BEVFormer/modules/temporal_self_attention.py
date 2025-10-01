@@ -10,14 +10,62 @@ from mmcv.ops.multi_scale_deform_attn import multi_scale_deformable_attn_pytorch
 import warnings
 import torch
 import torch.nn as nn
-from mmcv.cnn import xavier_init, constant_init
-from mmcv.cnn.bricks.registry import ATTENTION
-import math
-from mmcv.runner.base_module import BaseModule, ModuleList, Sequential
-from mmcv.utils import (ConfigDict, build_from_cfg, deprecated_api_warning,
-                        to_2tuple)
+try:
+    from mmcv.cnn import xavier_init, constant_init
+except ImportError:
+    try:
+        from mmengine.model.weight_init import xavier_init, constant_init
+    except ImportError:
+        from torch.nn.init import xavier_uniform_, constant_
+        def xavier_init(module, gain=1, bias=0, distribution='normal'):
+            if hasattr(module, 'weight') and module.weight is not None:
+                xavier_uniform_(module.weight, gain=gain)
+            if hasattr(module, 'bias') and module.bias is not None:
+                constant_(module.bias, bias)
+        def constant_init(module, val, bias=0):
+            if hasattr(module, 'weight') and module.weight is not None:
+                constant_(module.weight, val)
+            if hasattr(module, 'bias') and module.bias is not None:
+                constant_(module.bias, bias)
+try:
+    from mmcv.cnn.bricks.registry import ATTENTION
+except ImportError:
+    from mmdet3d.registry import MODELS
+    ATTENTION = MODELS
 
-from mmcv.utils import ext_loader
+import math
+
+try:
+    from mmcv.runner.base_module import BaseModule, ModuleList, Sequential
+except ImportError:
+    from mmengine.model import BaseModule
+    from torch.nn import ModuleList, Sequential
+
+try:
+    from mmcv.utils import (ConfigDict, build_from_cfg, deprecated_api_warning, to_2tuple)
+except ImportError:
+    try:
+        from mmengine import ConfigDict
+    except ImportError:
+        ConfigDict = dict
+    try:
+        from mmengine.registry import build_from_cfg
+    except ImportError:
+        def build_from_cfg(cfg, registry):
+            return registry.build(cfg)
+    def deprecated_api_warning(name_dict, out_str='', **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+    def to_2tuple(x):
+        if isinstance(x, (tuple, list)):
+            return tuple(x)
+        return (x, x)
+
+try:
+    from mmcv.utils import ext_loader
+except ImportError:
+    ext_loader = None
 ext_module = ext_loader.load_ext(
     '_ext', ['ms_deform_attn_backward', 'ms_deform_attn_forward'])
 

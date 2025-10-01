@@ -7,20 +7,57 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from mmcv.cnn import xavier_init
+try:
+    from mmcv.cnn import xavier_init
+except ImportError:
+    try:
+        from mmengine.model.weight_init import xavier_init
+    except ImportError:
+        from torch.nn.init import xavier_uniform_, constant_
+        def xavier_init(module, gain=1, bias=0, distribution='normal'):
+            if hasattr(module, 'weight') and module.weight is not None:
+                xavier_uniform_(module.weight, gain=gain)
+            if hasattr(module, 'bias') and module.bias is not None:
+                constant_(module.bias, bias)
 from mmcv.cnn.bricks.transformer import build_transformer_layer_sequence
-from mmcv.runner.base_module import BaseModule
+try:
+    from mmcv.runner.base_module import BaseModule
+except ImportError:
+    from mmengine.model import BaseModule
 
-from mmdet.models.utils.builder import TRANSFORMER
+try:
+    from mmdet.models.utils.builder import TRANSFORMER
+except ImportError:
+    try:
+        from mmdet.models.builder import MODELS as TRANSFORMER
+    except ImportError:
+        from mmdet3d.registry import MODELS as TRANSFORMER
 from torch.nn.init import normal_
 from projects.BEVFormer.utils.visual import save_tensor
-from mmcv.runner.base_module import BaseModule
+try:
+    from mmcv.runner.base_module import BaseModule
+except ImportError:
+    from mmengine.model import BaseModule
 from torchvision.transforms.functional import rotate
 from .temporal_self_attention import TemporalSelfAttention
 from .spatial_cross_attention import MSDeformableAttention3D
 from .decoder import CustomMSDeformableAttention
 from projects.BEVFormer.utils.bricks import run_time
-from mmcv.runner import force_fp32, auto_fp16
+try:
+    from mmcv.runner import force_fp32, auto_fp16
+except ImportError:
+    def force_fp32(*args, **kwargs):
+        if args and callable(args[0]):
+            return args[0]
+        def decorator(func):
+            return func
+        return decorator
+    def auto_fp16(*args, **kwargs):
+        if args and callable(args[0]):
+            return args[0]
+        def decorator(func):
+            return func
+        return decorator
 
 
 @TRANSFORMER.register_module()

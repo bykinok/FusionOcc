@@ -10,17 +10,67 @@ import warnings
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mmcv.cnn import xavier_init, constant_init
-from mmcv.cnn.bricks.registry import (ATTENTION,
-                                      TRANSFORMER_LAYER,
-                                      TRANSFORMER_LAYER_SEQUENCE)
-from mmcv.cnn.bricks.transformer import build_attention
+try:
+    from mmcv.cnn import xavier_init, constant_init
+except ImportError:
+    try:
+        from mmengine.model.weight_init import xavier_init, constant_init
+    except ImportError:
+        from torch.nn.init import xavier_uniform_, constant_
+        def xavier_init(module, gain=1, bias=0, distribution='normal'):
+            if hasattr(module, 'weight') and module.weight is not None:
+                xavier_uniform_(module.weight, gain=gain)
+            if hasattr(module, 'bias') and module.bias is not None:
+                constant_(module.bias, bias)
+        def constant_init(module, val, bias=0):
+            if hasattr(module, 'weight') and module.weight is not None:
+                constant_(module.weight, val)
+            if hasattr(module, 'bias') and module.bias is not None:
+                constant_(module.bias, bias)
+try:
+    from mmcv.cnn.bricks.registry import (ATTENTION, TRANSFORMER_LAYER, TRANSFORMER_LAYER_SEQUENCE)
+except ImportError:
+    from mmdet3d.registry import MODELS
+    ATTENTION = MODELS
+    TRANSFORMER_LAYER = MODELS
+    TRANSFORMER_LAYER_SEQUENCE = MODELS
+
+try:
+    from mmcv.cnn.bricks.transformer import build_attention
+except ImportError:
+    from mmdet3d.registry import MODELS
+    def build_attention(cfg):
+        return MODELS.build(cfg)
+
 import math
-from mmcv.runner import force_fp32, auto_fp16
 
-from mmcv.runner.base_module import BaseModule, ModuleList, Sequential
+try:
+    from mmcv.runner import force_fp32, auto_fp16
+except ImportError:
+    def force_fp32(*args, **kwargs):
+        if args and callable(args[0]):
+            return args[0]
+        def decorator(func):
+            return func
+        return decorator
+    def auto_fp16(*args, **kwargs):
+        if args and callable(args[0]):
+            return args[0]
+        def decorator(func):
+            return func
+        return decorator
 
-from mmcv.utils import ext_loader
+try:
+    from mmcv.runner.base_module import BaseModule, ModuleList, Sequential
+except ImportError:
+    from mmengine.model import BaseModule
+    from torch.nn import ModuleList, Sequential
+
+try:
+    from mmcv.utils import ext_loader
+except ImportError:
+    # ext_loader might not be available in newer versions
+    ext_loader = None
 from .multi_scale_deformable_attn_function import MultiScaleDeformableAttnFunction_fp32, \
     MultiScaleDeformableAttnFunction_fp16
 from projects.BEVFormer.utils.bricks import run_time

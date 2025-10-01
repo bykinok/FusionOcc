@@ -7,6 +7,6 @@ from .visual import *  # noqa: F401, F403
 
 __all__ = [
     'GridMask',
-    'SELayer', 
-    'LearnedPositionalEncoding'
+    'LearnedPositionalEncoding',
+    'LearnedPositionalEncoding3D'
 ]
