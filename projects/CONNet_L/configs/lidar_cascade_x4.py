@@ -5,7 +5,7 @@ _base_ = [
 
 # Plugin configuration
 custom_imports = dict(
-    imports=['projects.CONNet.mmdet3d_plugin'],
+    imports=['projects.CONNet_L.mmdet3d_plugin'],
     allow_failed_imports=False)
 
 # Runtime configuration

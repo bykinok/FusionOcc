@@ -6,7 +6,7 @@ _base_ = [
 
 # Plugin configuration
 custom_imports = dict(
-    imports=['projects.CONNet.mmdet3d_plugin'],
+    imports=['projects.CONNet_C.mmdet3d_plugin'],
     allow_failed_imports=False)
 
 # Input modality configuration
@@ -20,8 +20,8 @@ input_modality = dict(
 img_norm_cfg = None
 occ_path = "./data/nuScenes-Occupancy"
 depth_gt_path = './data/depth_gt'
-train_ann_file = "nuscenes_occ_infos_train_fixed_valid.pkl"
-val_ann_file = "nuscenes_occ_infos_val_fixed_valid.pkl"
+train_ann_file = "nuscenes_occ_infos_train.pkl"
+val_ann_file = "nuscenes_occ_infos_val.pkl"
 
 # For nuScenes we usually do 10-class detection
 class_names = [
