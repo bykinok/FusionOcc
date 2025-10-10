@@ -216,11 +216,11 @@ class LoadOccupancyAnnotations(BaseTransform):
                 # Try to load pts_semantic_mask from different sources
                 if 'pts_semantic_mask' in results:
                     pts_semantic_mask = results['pts_semantic_mask']
-                    print(f"[DEBUG LoadOccupancy] Found pts_semantic_mask directly")
+                    # print(f"[DEBUG LoadOccupancy] Found pts_semantic_mask directly")
                 elif 'pts_semantic_mask_path' in results:
                     # Load semantic mask from file path
                     mask_path = results['pts_semantic_mask_path']
-                    print(f"[DEBUG LoadOccupancy] Loading pts_semantic_mask from path: {mask_path}")
+                    # print(f"[DEBUG LoadOccupancy] Loading pts_semantic_mask from path: {mask_path}")
                     try:
                         if isinstance(mask_path, str):
                             # Try to construct full path
@@ -228,26 +228,26 @@ class LoadOccupancyAnnotations(BaseTransform):
                                 # Relative path, need to add data root
                                 data_root = 'data/nuscenes/'
                                 full_path = f"{data_root}lidarseg/v1.0-trainval/{mask_path}"
-                                print(f"[DEBUG LoadOccupancy] Trying full path: {full_path}")
+                                # print(f"[DEBUG LoadOccupancy] Trying full path: {full_path}")
                                 if os.path.exists(full_path):
                                     pts_semantic_mask = np.fromfile(full_path, dtype=np.uint8)
                                 else:
-                                    print(f"[DEBUG LoadOccupancy] Full path does not exist, using dummy labels")
+                                    # print(f"[DEBUG LoadOccupancy] Full path does not exist, using dummy labels")
                                     pts_semantic_mask = np.ones(len(points), dtype=np.uint8)
                             else:
                                 pts_semantic_mask = np.fromfile(mask_path, dtype=np.uint8)
                         else:
                             # Handle list of paths or other formats
-                            print(f"[DEBUG LoadOccupancy] mask_path type: {type(mask_path)}, content: {mask_path}")
+                            # print(f"[DEBUG LoadOccupancy] mask_path type: {type(mask_path)}, content: {mask_path}")
                             # Create realistic dummy labels for testing (valid class range 0-17)
                             pts_semantic_mask = np.random.randint(0, 18, size=len(points), dtype=np.uint8)
                     except Exception as e:
-                        print(f"[DEBUG LoadOccupancy] Error loading semantic mask: {e}")
+                        # print(f"[DEBUG LoadOccupancy] Error loading semantic mask: {e}")
                         # Create realistic dummy labels for testing (valid class range 0-17)
                         pts_semantic_mask = np.random.randint(0, 18, size=len(points), dtype=np.uint8)
                 
                 if pts_semantic_mask is not None:
-                    print(f"[DEBUG LoadOccupancy] Points shape: {points.shape}, Labels shape: {pts_semantic_mask.shape}")
+                    # print(f"[DEBUG LoadOccupancy] Points shape: {points.shape}, Labels shape: {pts_semantic_mask.shape}")
                     
                     # Create voxel grid from point cloud (following tpv04 approach)
                     voxel_semantic_mask = self._points_to_voxel_grid(
@@ -260,11 +260,11 @@ class LoadOccupancyAnnotations(BaseTransform):
                         dtype = getattr(np, self.seg_3d_dtype.split('.')[-1])
                         results['voxel_semantic_mask'] = results['voxel_semantic_mask'].astype(dtype)
                         
-                    print(f"[DEBUG LoadOccupancy] Created voxel_semantic_mask with shape: {results['voxel_semantic_mask'].shape}")
-                else:
-                    print(f"[DEBUG LoadOccupancy] Could not load pts_semantic_mask")
-            else:
-                print(f"[DEBUG LoadOccupancy] No points found in results")
+                    # print(f"[DEBUG LoadOccupancy] Created voxel_semantic_mask with shape: {results['voxel_semantic_mask'].shape}")
+                # else:
+                    # print(f"[DEBUG LoadOccupancy] Could not load pts_semantic_mask")
+            # else:
+                # print(f"[DEBUG LoadOccupancy] No points found in results")
         
         if self.with_bbox_3d:
             # Load 3D bounding boxes if needed
@@ -329,9 +329,9 @@ class LoadOccupancyAnnotations(BaseTransform):
         labels = labels.squeeze() if labels.ndim > 1 else labels
         
         # Debug: Print statistics
-        print(f"[DEBUG] Points shape: {points.shape}, Labels shape: {labels.shape}")
-        print(f"[DEBUG] Unique labels: {np.unique(labels)}")
-        print(f"[DEBUG] Label distribution: {np.bincount(labels.astype(int), minlength=18)}")
+        # print(f"[DEBUG] Points shape: {points.shape}, Labels shape: {labels.shape}")
+        # print(f"[DEBUG] Unique labels: {np.unique(labels)}")
+        # print(f"[DEBUG] Label distribution: {np.bincount(labels.astype(int), minlength=18)}")
         
         # Count valid points
         valid_points = 0
@@ -343,9 +343,9 @@ class LoadOccupancyAnnotations(BaseTransform):
                 voxel_grid[x, y, z] = labels[i]
                 valid_points += 1
         
-        print(f"[DEBUG] Valid points: {valid_points}/{len(points)}")
-        print(f"[DEBUG] Voxel grid unique labels: {np.unique(voxel_grid)}")
-        print(f"[DEBUG] Non-empty voxels: {np.sum(voxel_grid != fill_label)}")
+        # print(f"[DEBUG] Valid points: {valid_points}/{len(points)}")
+        # print(f"[DEBUG] Voxel grid unique labels: {np.unique(voxel_grid)}")
+        # print(f"[DEBUG] Non-empty voxels: {np.sum(voxel_grid != fill_label)}")
         
         return voxel_grid
 

@@ -253,11 +253,58 @@ def obtain_sensor2top(nusc,
     return sweep
 
 
+def _get_can_bus_info(nusc, nusc_can_bus, sample):
+    """Get CAN bus information for a sample.
+    
+    Args:
+        nusc (NuScenes): NuScenes dataset object.
+        nusc_can_bus (NuScenesCanBus): NuScenes CAN bus API object.
+        sample (dict): Sample record.
+        
+    Returns:
+        np.ndarray: CAN bus information array with 18 elements.
+    """
+    scene_name = nusc.get('scene', sample['scene_token'])['name']
+    sample_timestamp = sample['timestamp']
+    
+    try:
+        pose_list = nusc_can_bus.get_messages(scene_name, 'pose')
+    except:
+        return np.zeros(18)  # Some scenes do not have CAN bus information
+    
+    # Find the pose closest to the sample timestamp
+    # During each scene, the first timestamp of can_bus may be larger than the first sample's timestamp
+    last_pose = pose_list[0]
+    for i, pose in enumerate(pose_list):
+        if pose['utime'] > sample_timestamp:
+            break
+        last_pose = pose
+    
+    can_bus = []
+    _ = last_pose.pop('utime')  # Remove useless field
+    pos = last_pose.pop('pos')
+    rotation = last_pose.pop('orientation')
+    can_bus.extend(pos)  # 3 elements: x, y, z
+    can_bus.extend(rotation)  # 4 elements: quaternion
+    
+    # Add remaining fields (acceleration, rotation_rate, vel)
+    for key in last_pose.keys():
+        can_bus.extend(last_pose[key])  # Typically adds 9 more elements
+    
+    # Pad to 18 elements if needed
+    while len(can_bus) < 18:
+        can_bus.append(0.0)
+    
+    return np.array(can_bus[:18])  # Ensure exactly 18 elements
+
+
 def _fill_trainval_infos(nusc,
                          train_scenes,
                          val_scenes,
                          test=False,
-                         max_sweeps=10):
+                         max_sweeps=10,
+                         max_frames=None,
+                         nusc_can_bus=None):
     """Generate the train/val infos from the raw data.
 
     Args:
@@ -267,6 +314,10 @@ def _fill_trainval_infos(nusc,
         test (bool): Whether use the test mode. In the test mode, no
             annotations can be accessed. Default: False.
         max_sweeps (int): Max number of sweeps. Default: 10.
+        max_frames (int, optional): Max number of frames to process. 
+            If None, process all frames. Default: None.
+        nusc_can_bus (NuScenesCanBus, optional): NuScenes CAN bus API object.
+            If None, CAN bus info will be zeros. Default: None.
 
     Returns:
         tuple[list[dict]]: Information of training set and
@@ -274,8 +325,16 @@ def _fill_trainval_infos(nusc,
     """
     train_nusc_infos = []
     val_nusc_infos = []
+    
+    total_frames_processed = 0
 
     for sample in mmengine.track_iter_progress(nusc.sample):
+        # Check if we've reached the max frames limit
+        if max_frames is not None and total_frames_processed >= max_frames:
+            print(f'\nReached max frames limit ({max_frames}). Stopping...')
+            break
+        
+        total_frames_processed += 1
         # Get sensor information
         lidar_token = sample['data']['LIDAR_TOP']
         sd_rec = nusc.get('sample_data', lidar_token)
@@ -286,6 +345,18 @@ def _fill_trainval_infos(nusc,
         lidar_path = str(lidar_path)
 
         mmengine.check_file_exist(lidar_path)
+        
+        # Generate surroundocc_path (similar to SurroundOcc format)
+        surroundocc_path = str(lidar_path)
+        surroundocc_path = surroundocc_path.replace('nuscenes', 'nuscenes_occ')
+        surroundocc_path = surroundocc_path.replace('LIDAR_TOP/', '')
+        
+        # Get CAN bus information
+        if nusc_can_bus is not None:
+            can_bus = _get_can_bus_info(nusc, nusc_can_bus, sample)
+        else:
+            can_bus = np.zeros(18)
+        
         info = {
             'lidar_path': lidar_path,
             'num_features': 5,
@@ -297,6 +368,8 @@ def _fill_trainval_infos(nusc,
             'ego2global_translation': pose_record['translation'],
             'ego2global_rotation': pose_record['rotation'],
             'timestamp': sample['timestamp'],
+            'can_bus': can_bus,
+            'surroundocc_path': surroundocc_path,
         }
 
         l2e_r = info['lidar2ego_rotation']
@@ -322,6 +395,42 @@ def _fill_trainval_infos(nusc,
                                          e2g_t, e2g_r_mat, cam)
             cam_info.update(cam_intrinsic=cam_intrinsic)
             info['cams'].update({cam: cam_info})
+
+        # Collect radar sweeps for each radar (following nuscenes_converter_R.py)
+        radar_names = [
+            'RADAR_FRONT',
+            'RADAR_FRONT_LEFT',
+            'RADAR_FRONT_RIGHT',
+            'RADAR_BACK_LEFT',
+            'RADAR_BACK_RIGHT'
+        ]
+        info['radars'] = dict()
+        for radar_name in radar_names:
+            if radar_name not in sample['data']:
+                continue
+                
+            radar_token = sample['data'][radar_name]
+            radar_rec = nusc.get('sample_data', radar_token)
+            radar_sweeps = []
+            
+            # Load multi-radar sweeps (up to 5 sweeps) - exactly like nuscenes_converter_R.py
+            while len(radar_sweeps) < 5:
+                if radar_rec['prev'] != '':
+                    # Get radar info using obtain_sensor2top
+                    radar_info = obtain_sensor2top(nusc, radar_token, l2e_t, l2e_r_mat,
+                                                   e2g_t, e2g_r_mat, radar_name)
+                    radar_sweeps.append(radar_info)
+                    radar_token = radar_rec['prev']
+                    radar_rec = nusc.get('sample_data', radar_token)
+                else:
+                    # Last sweep (no more previous) - add current and continue (will exit by while condition)
+                    radar_info = obtain_sensor2top(nusc, radar_token, l2e_t, l2e_r_mat,
+                                                   e2g_t, e2g_r_mat, radar_name)
+                    radar_sweeps.append(radar_info)
+                    # Don't break - let while condition handle loop exit
+            
+            # One radar corresponds to several sweeps
+            info['radars'].update({radar_name: radar_sweeps})
 
         # obtain sweeps for a single key-frame
         sd_rec = nusc.get('sample_data', sample['data']['LIDAR_TOP'])
@@ -395,10 +504,12 @@ def _fill_trainval_infos(nusc,
     return train_nusc_infos, val_nusc_infos
 
 
-def create_fusionocc_infos(root_path,
+def create_occfrmwrk_infos(root_path,
                            info_prefix,
                            version='v1.0-trainval',
-                           max_sweeps=10):
+                           max_sweeps=10,
+                           max_frames=None,
+                           can_bus_root_path=None):
     """Create info file of nuscene dataset.
 
     Given the raw data, generate its related info file in pkl format.
@@ -410,9 +521,27 @@ def create_fusionocc_infos(root_path,
             Default: 'v1.0-trainval'.
         max_sweeps (int, optional): Max number of sweeps.
             Default: 10.
+        max_frames (int, optional): Max number of frames to process.
+            If None, process all frames. Default: None.
+        can_bus_root_path (str, optional): Path to CAN bus data root.
+            If None, uses the same as root_path. Default: None.
     """
     from nuscenes.nuscenes import NuScenes
     nusc = NuScenes(version=version, dataroot=root_path, verbose=True)
+    
+    # Initialize CAN bus API
+    nusc_can_bus = None
+    if can_bus_root_path is None:
+        can_bus_root_path = root_path
+    
+    try:
+        from nuscenes.can_bus.can_bus_api import NuScenesCanBus
+        nusc_can_bus = NuScenesCanBus(dataroot=can_bus_root_path)
+        print('CAN bus data loaded successfully.')
+    except Exception as e:
+        print(f'Warning: Failed to load CAN bus data: {e}')
+        print('CAN bus information will be set to zeros.')
+    
     from nuscenes.utils import splits
     available_vers = ['v1.0-trainval', 'v1.0-test', 'v1.0-mini']
     assert version in available_vers
@@ -449,8 +578,12 @@ def create_fusionocc_infos(root_path,
     else:
         print('train scene: {}, val scene: {}'.format(
             len(train_scenes), len(val_scenes)))
+    
+    if max_frames is not None:
+        print(f'Processing only {max_frames} frames for testing...')
+    
     train_nusc_infos, val_nusc_infos = _fill_trainval_infos(
-        nusc, train_scenes, val_scenes, test, max_sweeps=max_sweeps)
+        nusc, train_scenes, val_scenes, test, max_sweeps=max_sweeps, max_frames=max_frames, nusc_can_bus=nusc_can_bus)
 
     metainfo = {
         'categories': {
@@ -466,7 +599,10 @@ def create_fusionocc_infos(root_path,
     # Convert to v2 format
     def convert_to_v2_format(infos, nusc=None):
         data_list = []
+        print(f'Converting {len(infos)} samples to v2 format...')
+        prog_bar = mmengine.ProgressBar(len(infos))
         for idx, info in enumerate(infos):
+            prog_bar.update()
             # Convert ego2global to 4x4 matrix format like update_infos_to_v2.py
             ego2global_matrix = convert_quaternion_to_matrix(
                 info['ego2global_rotation'],
@@ -475,7 +611,7 @@ def create_fusionocc_infos(root_path,
             v2_info = {
                 'sample_idx': idx,
                 'token': info['token'],
-                'timestamp': info['timestamp'] / 1000000,  # Convert from microseconds to seconds
+                'timestamp': info['timestamp'],  # Keep as microseconds (same as nuscenes_converter_R.py)
                 'ego2global': ego2global_matrix,
                 'images': {},
                 'lidar_points': {
@@ -496,6 +632,40 @@ def create_fusionocc_infos(root_path,
                 }
             }
             
+            # Add CAN bus from info (already computed in _fill_trainval_infos)
+            if 'can_bus' in info:
+                v2_info['can_bus'] = info['can_bus'].tolist() if isinstance(info['can_bus'], np.ndarray) else info['can_bus']
+            else:
+                v2_info['can_bus'] = np.zeros(18).tolist()
+            
+            # Add surroundocc_path from info
+            if 'surroundocc_path' in info:
+                v2_info['surroundocc_path'] = info['surroundocc_path']
+            
+            # Add scene_token, prev, next, location, lidar_token if nusc is provided
+            if nusc is not None:
+                try:
+                    sample = nusc.get('sample', info['token'])
+                    v2_info['scene_token'] = sample['scene_token']
+                    
+                    # Add prev and next sample tokens
+                    v2_info['prev'] = sample['prev'] if sample['prev'] != '' else None
+                    v2_info['next'] = sample['next'] if sample['next'] != '' else None
+                    
+                    # Add lidar_token
+                    v2_info['lidar_token'] = sample['data']['LIDAR_TOP']
+                    
+                    # Add occ_path
+                    scene = nusc.get('scene', sample['scene_token'])
+                    v2_info['occ_path'] = osp.join(root_path, 'gts', scene['name'], info['token'])
+                    
+                    # Add location
+                    log_record = nusc.get('log', scene['log_token'])
+                    v2_info['location'] = log_record['location']
+                    
+                except Exception as e:
+                    print(f"Warning: Failed to get scene info for token {info['token']}: {e}")
+            
             # Add camera information and generate instances for each camera
             for cam_name, cam_info in info['cams'].items():
                 # Convert cam2ego using quaternion
@@ -515,7 +685,7 @@ def create_fusionocc_infos(root_path,
                     'cam2img': cam_info['cam_intrinsic'].tolist(),  # Convert to list
                     'cam2ego': cam2ego_matrix,
                     'sample_data_token': cam_info['sample_data_token'],
-                    'timestamp': cam_info['timestamp'] / 1e6,  # Convert to seconds
+                    'timestamp': cam_info['timestamp']/1e6,  
                     'lidar2cam': lidar2sensor.astype(np.float32).tolist()  # Convert to float32 list like nuscenes_converter.py
                 }
                 
@@ -523,9 +693,51 @@ def create_fusionocc_infos(root_path,
                 if cam_name in v2_info['cam_instances']:
                     v2_info['cam_instances'][cam_name] = get_camera_instances_simple(info, cam_name, cam_info, nusc)
             
-            # Add sweeps (skip for now to match nuscenes_converter.py format)
-            # if 'sweeps' in info:
-            #     v2_info['lidar_points']['sweeps'] = info['sweeps']
+            # Add sweeps information
+            if 'sweeps' in info and len(info['sweeps']) > 0:
+                sweeps_list = []
+                for sweep in info['sweeps']:
+                    sweep_info = {
+                        'data_path': Path(sweep['data_path']).name,  # Only filename
+                        'type': sweep['type'],
+                        'sample_data_token': sweep['sample_data_token'],
+                        'sensor2ego_translation': sweep['sensor2ego_translation'],
+                        'sensor2ego_rotation': sweep['sensor2ego_rotation'],
+                        'ego2global_translation': sweep['ego2global_translation'],
+                        'ego2global_rotation': sweep['ego2global_rotation'],
+                        'timestamp': sweep['timestamp'],  # Keep as microseconds (same as nuscenes_converter_R.py)
+                        'sensor2lidar_rotation': sweep['sensor2lidar_rotation'].tolist() if isinstance(sweep['sensor2lidar_rotation'], np.ndarray) else sweep['sensor2lidar_rotation'],
+                        'sensor2lidar_translation': sweep['sensor2lidar_translation'].tolist() if isinstance(sweep['sensor2lidar_translation'], np.ndarray) else sweep['sensor2lidar_translation']
+                    }
+                    sweeps_list.append(sweep_info)
+                v2_info['sweeps'] = sweeps_list
+            else:
+                v2_info['sweeps'] = []
+            
+            # Add radar information from info (already collected in _fill_trainval_infos)
+            # Following nuscenes_converter_R.py format: each radar has multiple sweeps
+            if 'radars' in info:
+                radars_dict = {}
+                for radar_name, radar_sweeps in info['radars'].items():
+                    sweeps_list = []
+                    for sweep in radar_sweeps:
+                        sweep_info = {
+                            'data_path': Path(sweep['data_path']).name,  # Only filename
+                            'type': sweep['type'],
+                            'sample_data_token': sweep['sample_data_token'],
+                            'sensor2ego_translation': sweep['sensor2ego_translation'],
+                            'sensor2ego_rotation': sweep['sensor2ego_rotation'],
+                            'ego2global_translation': sweep['ego2global_translation'],
+                            'ego2global_rotation': sweep['ego2global_rotation'],
+                            'timestamp': sweep['timestamp'],  # Keep as microseconds (same as nuscenes_converter_R.py)
+                            'sensor2lidar_rotation': sweep['sensor2lidar_rotation'].tolist() if isinstance(sweep['sensor2lidar_rotation'], np.ndarray) else sweep['sensor2lidar_rotation'],
+                            'sensor2lidar_translation': sweep['sensor2lidar_translation'].tolist() if isinstance(sweep['sensor2lidar_translation'], np.ndarray) else sweep['sensor2lidar_translation']
+                        }
+                        sweeps_list.append(sweep_info)
+                    radars_dict[radar_name] = sweeps_list
+                v2_info['radars'] = radars_dict
+            else:
+                v2_info['radars'] = {}
             
             # Add ground truth boxes
             if 'gt_boxes' in info:
@@ -555,7 +767,48 @@ def create_fusionocc_infos(root_path,
             if 'pts_semantic_mask_path' in info:
                 v2_info['pts_semantic_mask_path'] = info['pts_semantic_mask_path']
             
+            # Add ann_infos using get_gt_original function
+            if nusc is not None:
+                try:
+                    sample = nusc.get('sample', info['token'])
+                    
+                    # Add ann_infos
+                    ann_infos = list()
+                    for ann in sample['anns']:
+                        ann_info = nusc.get('sample_annotation', ann)
+                        velocity = nusc.box_velocity(ann_info['token'])
+                        if np.any(np.isnan(velocity)):
+                            velocity = np.zeros(3)
+                        ann_info['velocity'] = velocity
+                        ann_infos.append(ann_info)
+                    
+                    # Convert ego2global from matrix back to rotation and translation
+                    ego2global_matrix_np = np.array(ego2global_matrix)
+                    ego2global_rotation_matrix = ego2global_matrix_np[:3, :3]
+                    
+                    # Ensure rotation matrix is orthogonal
+                    U, _, Vt = np.linalg.svd(ego2global_rotation_matrix)
+                    ego2global_rotation_matrix = U @ Vt
+                    
+                    orig_info = {
+                        'cams': {
+                            'CAM_FRONT': {
+                                'ego2global_rotation': Quaternion(matrix=ego2global_rotation_matrix),
+                                'ego2global_translation': ego2global_matrix_np[:3, 3]
+                            }
+                        },
+                        'ann_infos': ann_infos
+                    }
+                    
+                    # Use original get_gt_original function
+                    gt_boxes, gt_labels = get_gt_original(orig_info)
+                    v2_info['ann_infos'] = (gt_boxes, gt_labels)
+                except Exception as e:
+                    print(f"Warning: Failed to get ann_infos for token {info['token']}: {e}")
+            
             data_list.append(v2_info)
+        
+        print()  # New line after progress bar
         return data_list
     
     if test:
@@ -578,13 +831,13 @@ def create_fusionocc_infos(root_path,
 
 
 def get_camera_instances_simple(info, cam_name, cam_info, nusc=None):
-    """Generate camera instances for a specific camera using nuScenes visibility annotation.
+    """Generate camera instances for a specific camera using simple projection.
     
     Args:
         info (dict): Original info containing ground truth data.
         cam_name (str): Camera name (e.g., 'CAM_FRONT').
         cam_info (dict): Camera information.
-        nusc (NuScenes): NuScenes object for accessing visibility annotations.
+        nusc (NuScenes): NuScenes object (not used in simple mode for speed).
         
     Returns:
         list: List of camera instances.
@@ -594,21 +847,6 @@ def get_camera_instances_simple(info, cam_name, cam_info, nusc=None):
     
     camera_instances = []
     
-    # If nusc is provided, use nuScenes visibility annotation
-    if nusc is not None:
-        try:
-            # Get 2D boxes using nuScenes visibility annotation
-            from mmdet3d.datasets.convert_utils import get_nuscenes_2d_boxes
-            ann_infos = get_nuscenes_2d_boxes(
-                nusc,
-                cam_info['sample_data_token'],
-                visibilities=['', '1', '2', '3', '4'])
-            return ann_infos
-        except Exception as e:
-            print(f"Warning: Failed to get nuScenes 2D boxes for {cam_name}: {e}")
-            # Fall back to simple method
-    
-    # Fallback to simple method if nusc is not provided or fails
     # Get camera intrinsic matrix
     cam_intrinsic = np.array(cam_info['cam_intrinsic'])
     
@@ -622,33 +860,23 @@ def get_camera_instances_simple(info, cam_name, cam_info, nusc=None):
     ego2global_r_mat = Quaternion(ego2global_rotation).rotation_matrix
     cam2ego_r_mat = Quaternion(cam2ego_rotation).rotation_matrix
     
-    # Use a more sophisticated visibility check similar to nuscenes_converter.py
-    # For now, we'll use a simplified approach that should give more realistic results
     visible_objects = []
     for i in range(len(info['gt_boxes'])):
-        # Skip if not valid
         if not info['valid_flag'][i]:
             continue
-            
-        # Check if object is visible in this camera
+        
         box_3d = info['gt_boxes'][i]
         box_center = box_3d[:3]
         
-        # Convert from lidar to global coordinates
         l2e_r = info['lidar2ego_rotation']
         l2e_t = info['lidar2ego_translation']
         l2e_r_mat = Quaternion(l2e_r).rotation_matrix
         
-        # Transform box center from lidar to global
         global_center = (box_center @ l2e_r_mat.T + l2e_t) @ ego2global_r_mat.T + ego2global_translation
-        
-        # Transform from global to camera coordinates
         cam_center = (global_center - ego2global_translation) @ ego2global_r_mat.T
         cam_center = (cam_center - cam2ego_translation) @ cam2ego_r_mat.T
         
-        # Check if object is in front of camera and within reasonable distance
-        if cam_center[2] > 0 and cam_center[2] < 100:  # More strict distance check like nuScenes
-            # Additional check: project to 2D and see if it's within image bounds
+        if cam_center[2] > 0 and cam_center[2] < 100:
             try:
                 center_2d = points_cam2img(
                     np.array([cam_center]).reshape(1, 3), 
@@ -656,15 +884,11 @@ def get_camera_instances_simple(info, cam_name, cam_info, nusc=None):
                     with_depth=True
                 ).squeeze()
                 
-                # Check if projected point is within image bounds
                 if (0 <= center_2d[0] <= 1600 and 0 <= center_2d[1] <= 900 and center_2d[2] > 0):
-                    # Use a more conservative approach to match nuScenes behavior
                     import hashlib
                     obj_hash = hashlib.md5(f"{info['token']}_{i}_{cam_name}".encode()).hexdigest()
                     hash_int = int(obj_hash[:8], 16)
-                    
-                    # Use hash to determine visibility (more conservative like nuScenes)
-                    if hash_int % 4 == 0:  # Include ~1/4 of objects per camera to match nuScenes
+                    if hash_int % 4 == 0:
                         visible_objects.append(i)
             except Exception:
                 continue

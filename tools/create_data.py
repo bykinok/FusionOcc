@@ -7,7 +7,7 @@ from tools.dataset_converters import kitti_converter as kitti
 from tools.dataset_converters import lyft_converter as lyft_converter
 from tools.dataset_converters import nuscenes_converter as nuscenes_converter
 from tools.dataset_converters import semantickitti_converter
-from tools.dataset_converters import fusionocc_converter
+from tools.dataset_converters import occfrmwrk_nuscenes_converter
 from tools.dataset_converters.create_gt_database import (
     GTDatabaseCreater, create_groundtruth_database)
 from tools.dataset_converters.update_infos_to_v2 import update_pkl_infos
@@ -229,13 +229,16 @@ def waymo_data_prep(root_path,
         num_worker=workers).create()
 
 
-def fusionocc_data_prep(root_path,
+def occfrmwrk_data_prep(root_path,
                         info_prefix,
                         version,
-                        max_sweeps=10):
-    """Prepare data related to FusionOcc dataset.
+                        max_sweeps=10,
+                        max_frames=None,
+                        can_bus_root_path=None):
+    """Prepare data related to occfrmwrk dataset.
 
-    Related data consists of '.pkl' files recording basic infos.
+    Related data consists of '.pkl' files recording basic infos,
+    including ann_infos, scene_token, occ_path, and CAN bus data.
 
     Args:
         root_path (str): Path of dataset root.
@@ -243,12 +246,14 @@ def fusionocc_data_prep(root_path,
         version (str): Dataset version.
         max_sweeps (int, optional): Number of input consecutive frames.
             Default: 10.
+        max_frames (int, optional): Max number of frames to process.
+            If None, process all frames. Default: None.
+        can_bus_root_path (str, optional): Path to CAN bus data root.
+            If None, uses the same as root_path. Default: None.
     """
-    fusionocc_converter.create_fusionocc_infos(
-        root_path, info_prefix, version=version, max_sweeps=max_sweeps)
-    
-    # Add annotation information for FusionOcc
-    fusionocc_converter.add_ann_adj_info(info_prefix, root_path)
+    occfrmwrk_nuscenes_converter.create_occfrmwrk_infos(
+        root_path, info_prefix, version=version, max_sweeps=max_sweeps, 
+        max_frames=max_frames, can_bus_root_path=can_bus_root_path)
 
 
 def semantickitti_data_prep(info_prefix, out_dir):
@@ -281,6 +286,18 @@ parser.add_argument(
     default=10,
     required=False,
     help='specify sweeps of lidar per example')
+parser.add_argument(
+    '--max-frames',
+    type=int,
+    default=None,
+    required=False,
+    help='specify max number of frames to process (for testing)')
+parser.add_argument(
+    '--can-bus-root-path',
+    type=str,
+    default=None,
+    required=False,
+    help='specify the root path of CAN bus data (for occfrmwrk dataset)')
 parser.add_argument(
     '--with-plane',
     action='store_true',
@@ -396,12 +413,14 @@ if __name__ == '__main__':
             info_prefix=args.extra_tag,
             out_dir=args.out_dir,
             workers=args.workers)
-    elif args.dataset == 'fusionocc':
-        fusionocc_data_prep(
+    elif args.dataset == 'occfrmwrk':
+        occfrmwrk_data_prep(
             root_path=args.root_path,
             info_prefix=args.extra_tag,
             version=args.version,
-            max_sweeps=args.max_sweeps)
+            max_sweeps=args.max_sweeps,
+            max_frames=args.max_frames,
+            can_bus_root_path=args.can_bus_root_path)
     elif args.dataset == 'semantickitti':
         semantickitti_data_prep(
             info_prefix=args.extra_tag, out_dir=args.out_dir)
