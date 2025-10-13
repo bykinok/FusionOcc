@@ -357,7 +357,7 @@ class TPVFormerHead(BaseModule):
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
-        for m in self.modules():
+        for m in self.children():
             if hasattr(m, 'init_weights'):
                 m.init_weights()
         normal_(self.level_embeds)

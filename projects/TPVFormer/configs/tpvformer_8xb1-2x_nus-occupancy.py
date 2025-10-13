@@ -164,7 +164,7 @@ optim_wrapper = dict(
     type='OptimWrapper',
     optimizer=dict(type='AdamW', lr=2e-4, weight_decay=0.01),
     paramwise_cfg=dict(custom_keys={
-        'backbone': dict(lr_mult=0.1),
+        'img_backbone': dict(lr_mult=0.1),  # 원본과 동일하게 img_backbone으로 변경
     }),
     clip_grad=dict(max_norm=35, norm_type=2),
 )
@@ -185,6 +185,11 @@ val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
 default_hooks = dict(checkpoint=dict(type='CheckpointHook', interval=1))
+
+# Load pretrained backbone weights (following original TPVFormer)
+# Only load img_backbone weights, ignore other keys
+load_from = './projects/TPVFormer/pretrain/r101_dcn_fcos3d_pretrain.pth'
+resume = False  # Don't resume training, just load backbone weights
 
 point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
 _dim_ = 256
@@ -224,6 +229,10 @@ model = dict(
             max_voxels=-1,
         )),
     use_grid_mask=True,
+    # Loss configuration (following original TPVFormer)
+    ignore_label=0,
+    lovasz_input=lovasz_input,  # 'voxel' or 'points'
+    ce_input=ce_input,  # 'voxel' or 'points'
     tpv_aggregator = dict(
         type='TPVAggregator',
         tpv_h=tpv_h_,

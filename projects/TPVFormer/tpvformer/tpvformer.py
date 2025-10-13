@@ -2,10 +2,12 @@ from typing import Optional, Union
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from mmdet3d.models import Base3DSegmentor
 from mmdet3d.registry import MODELS
 from mmdet3d.structures.det3d_data_sample import SampleList
+from .lovasz_losses import lovasz_softmax
 
 
 @MODELS.register_module()
@@ -18,6 +20,9 @@ class TPVFormer(Base3DSegmentor):
                  tpv_head=None,
                  tpv_aggregator=None,
                  use_grid_mask=False,
+                 ignore_label=0,
+                 lovasz_input='voxel',
+                 ce_input='voxel',
                  init_cfg=None):
 
         super().__init__(data_preprocessor=data_preprocessor, init_cfg=init_cfg)
@@ -30,6 +35,12 @@ class TPVFormer(Base3DSegmentor):
         if tpv_aggregator is not None:
             self.tpv_aggregator = MODELS.build(tpv_aggregator)
         self.use_grid_mask = use_grid_mask
+        
+        # Loss configuration (following original TPVFormer)
+        self.ignore_label = ignore_label
+        self.lovasz_input = lovasz_input  # 'voxel' or 'points'
+        self.ce_input = ce_input  # 'voxel' or 'points'
+        self.ce_loss_func = nn.CrossEntropyLoss(ignore_index=ignore_label)
 
     def extract_feat(self, img):
         """Extract features of images."""
@@ -109,34 +120,234 @@ class TPVFormer(Base3DSegmentor):
 
     def loss(self, batch_inputs: dict,
              batch_data_samples: SampleList) -> dict:
-        """Compute loss for training.
+        """Compute loss for training (following original TPVFormer implementation).
         
-        Note: For evaluation with pretrained checkpoint, this may not be called.
-        The original TPVFormer eval.py computes loss externally.
+        Original TPVFormer uses Lovasz Softmax + Cross Entropy loss.
         """
-        img_feats = self.extract_feat(batch_inputs['img'])
+        # Handle different batch_inputs keys (same as predict function)
+        if isinstance(batch_inputs, dict):
+            if 'img' in batch_inputs:
+                img = batch_inputs['img']
+            elif 'inputs' in batch_inputs:
+                img = batch_inputs['inputs']
+            else:
+                # Check for any tensor-like key
+                for key, value in batch_inputs.items():
+                    if isinstance(value, torch.Tensor):
+                        img = value
+                        break
+                else:
+                    raise KeyError(f"Cannot find image tensor in batch_inputs keys: {batch_inputs.keys()}")
+        else:
+            img = batch_inputs
+        
+        # Extract features
+        img_feats = self.extract_feat(img)
         tpv_queries = self.tpv_head(img_feats, batch_data_samples)
         
         if hasattr(self, 'tpv_aggregator'):
-            # Get points for point-wise prediction
-            points = None
-            if 'points' in batch_inputs:
-                points_data = batch_inputs['points']
-                # Extract coordinates from PointData structure
-                if hasattr(points_data, 'coord'):
-                    points = points_data.coord
-                elif isinstance(points_data, torch.Tensor):
-                    points = points_data
+            # Get voxel coordinates and labels from data samples
+            # Following original train.py structure
+            voxel_coords = None
+            voxel_labels = None
+            point_labels = None
             
-            # Forward through aggregator
-            outputs = self.tpv_aggregator(tpv_queries, points)
+            # Extract ground truth from batch_data_samples
+            if len(batch_data_samples) > 0:
+                data_sample = batch_data_samples[0]
+                
+                # Get voxel coordinates (for point-wise prediction)
+                if hasattr(data_sample, 'point_coors'):
+                    voxel_coords = data_sample.point_coors.float()
+                elif hasattr(data_sample, 'gt_pts_seg') and hasattr(data_sample.gt_pts_seg, 'point_coors'):
+                    voxel_coords = data_sample.gt_pts_seg.point_coors.float()
+                
+                # Get ground truth labels
+                if hasattr(data_sample, 'gt_pts_seg'):
+                    gt_pts_seg = data_sample.gt_pts_seg
+                    # Voxel-level labels
+                    if hasattr(gt_pts_seg, 'voxel_semantic_mask'):
+                        voxel_labels = gt_pts_seg.voxel_semantic_mask
+                        if not isinstance(voxel_labels, torch.Tensor):
+                            voxel_labels = torch.from_numpy(voxel_labels)
+                        voxel_labels = voxel_labels.long().to(img_feats[0].device)
+                        # Ensure correct shape: (W, H, Z) or (B, W, H, Z)
+                        if voxel_labels.dim() == 3:
+                            voxel_labels = voxel_labels.unsqueeze(0)  # Add batch dimension
+                    
+                    # Point-level labels
+                    if hasattr(gt_pts_seg, 'pts_semantic_mask'):
+                        point_labels = gt_pts_seg.pts_semantic_mask
+                        if not isinstance(point_labels, torch.Tensor):
+                            point_labels = torch.from_numpy(point_labels)
+                        point_labels = point_labels.long().to(img_feats[0].device)
+                        if point_labels.dim() == 1:
+                            point_labels = point_labels.unsqueeze(0)  # Add batch dimension
+                
+                # Move voxel_coords to device and add batch dimension if needed
+                if voxel_coords is not None:
+                    if not isinstance(voxel_coords, torch.Tensor):
+                        voxel_coords = torch.from_numpy(voxel_coords)
+                    voxel_coords = voxel_coords.float().to(img_feats[0].device)
+                    if voxel_coords.dim() == 2:
+                        voxel_coords = voxel_coords.unsqueeze(0)
             
-            # Simple CE loss implementation (can be extended)
+            # Forward through aggregator (returns voxel and point predictions)
+            outputs = self.tpv_aggregator(tpv_queries, voxel_coords)
+            
+            if isinstance(outputs, tuple):
+                outputs_vox, outputs_pts = outputs
+            else:
+                outputs_vox = outputs
+                outputs_pts = None
+            
+            # Compute loss following original TPVFormer
             losses = {}
-            losses['loss_dummy'] = torch.tensor(0.0, device=img_feats[0].device, requires_grad=True)
+            total_loss = 0.0
+            
+            # Debug: print shapes (first iteration only)
+            if not hasattr(self, '_debug_printed'):
+                print(f"[DEBUG LOSS] outputs_vox shape: {outputs_vox.shape if outputs_vox is not None else None}")
+                print(f"[DEBUG LOSS] outputs_pts shape: {outputs_pts.shape if outputs_pts is not None else None}")
+                print(f"[DEBUG LOSS] voxel_labels shape: {voxel_labels.shape if voxel_labels is not None else None}")
+                print(f"[DEBUG LOSS] point_labels shape: {point_labels.shape if point_labels is not None else None}")
+                if point_labels is not None:
+                    print(f"[DEBUG LOSS] point_labels unique: {torch.unique(point_labels)}")
+                    print(f"[DEBUG LOSS] point_labels min/max: {point_labels.min()}/{point_labels.max()}")
+                print(f"[DEBUG LOSS] voxel_coords shape: {voxel_coords.shape if voxel_coords is not None else None}")
+                print(f"[DEBUG LOSS] lovasz_input: {self.lovasz_input}, ce_input: {self.ce_input}")
+                print(f"[DEBUG LOSS] ignore_label: {self.ignore_label}")
+                self._debug_printed = True
+            
+            # Determine which predictions and labels to use
+            # For voxel-based loss: sample from voxel grid at point locations, use point labels
+            # For point-based loss: use point predictions directly
+            if self.lovasz_input == 'voxel':
+                lovasz_input_tensor = outputs_vox
+                lovasz_label_tensor = point_labels  # Use point labels (voxel_labels not available)
+            else:  # 'points'
+                lovasz_input_tensor = outputs_pts
+                lovasz_label_tensor = point_labels
+            
+            if self.ce_input == 'voxel':
+                ce_input_tensor = outputs_vox
+                ce_label_tensor = point_labels  # Use point labels (voxel_labels not available)
+            else:  # 'points'
+                ce_input_tensor = outputs_pts
+                ce_label_tensor = point_labels
+            
+            # Compute Lovasz loss
+            if lovasz_input_tensor is not None and lovasz_label_tensor is not None:
+                if self.lovasz_input == 'voxel' and voxel_coords is not None:
+                    # Voxel-based: sample voxel predictions at point locations
+                    # Similar to CE loss
+                    B, C, W, H, Z = lovasz_input_tensor.shape
+                    voxel_coords_int = voxel_coords.long()
+                    
+                    # Sample predictions at point locations
+                    lovasz_input_list = []
+                    for b in range(B):
+                        coords = voxel_coords_int[b]  # (N, 3)
+                        x_idx = coords[:, 0].clamp(0, W-1)
+                        y_idx = coords[:, 1].clamp(0, H-1)
+                        z_idx = coords[:, 2].clamp(0, Z-1)
+                        
+                        # Extract predictions: (C, N)
+                        sampled_preds = lovasz_input_tensor[b, :, x_idx, y_idx, z_idx]
+                        lovasz_input_list.append(sampled_preds)
+                    
+                    # Stack for lovasz: (B, C, N)
+                    lovasz_input_sampled = torch.stack(lovasz_input_list, dim=0)  # (B, C, N)
+                    
+                    # Handle label shape
+                    if lovasz_label_tensor.dim() == 1:
+                        # If 1D, assume it's for first batch, expand to (B, N)
+                        lovasz_label_sampled = lovasz_label_tensor.unsqueeze(0)  # (1, N)
+                    else:
+                        lovasz_label_sampled = lovasz_label_tensor  # (B, N)
+                    
+                    lovasz_probas = F.softmax(lovasz_input_sampled, dim=1)
+                    
+                    # Reshape to 4D for lovasz_softmax: (B, C, N) -> (B, C, N, 1)
+                    # This prevents flatten_probas from treating it as sigmoid output
+                    lovasz_probas_4d = lovasz_probas.unsqueeze(-1)  # (B, C, N, 1)
+                    lovasz_label_2d = lovasz_label_sampled  # (B, N)
+                    
+                    # Debug output
+                    if not hasattr(self, '_debug_lovasz'):
+                        print(f"[DEBUG LOVASZ] lovasz_probas_4d shape: {lovasz_probas_4d.shape}")
+                        print(f"[DEBUG LOVASZ] lovasz_label_2d shape: {lovasz_label_2d.shape}")
+                        print(f"[DEBUG LOVASZ] Unique labels in sample: {torch.unique(lovasz_label_2d)}")
+                        print(f"[DEBUG LOVASZ] Label counts: {[(i, (lovasz_label_2d==i).sum().item()) for i in torch.unique(lovasz_label_2d)[:10]]}")
+                        print(f"[DEBUG LOVASZ] ignore_label: {self.ignore_label}")
+                        self._debug_lovasz = True
+                    
+                    lovasz_loss = lovasz_softmax(lovasz_probas_4d, lovasz_label_2d, ignore=self.ignore_label)
+                    
+                    if not hasattr(self, '_debug_lovasz_loss'):
+                        print(f"[DEBUG LOVASZ] lovasz_loss: {lovasz_loss.item() if hasattr(lovasz_loss, 'item') else lovasz_loss}")
+                        self._debug_lovasz_loss = True
+                else:
+                    # Point-based: (B, C, N, 1, 1) -> (B, C, N)
+                    lovasz_input_flat = lovasz_input_tensor.squeeze(-1).squeeze(-1)
+                    lovasz_probas = F.softmax(lovasz_input_flat, dim=1)
+                    lovasz_loss = lovasz_softmax(lovasz_probas, lovasz_label_tensor, ignore=self.ignore_label)
+                
+                losses['loss_lovasz'] = lovasz_loss
+                total_loss += lovasz_loss
+            
+            # Compute CE loss
+            if ce_input_tensor is not None and ce_label_tensor is not None:
+                if self.ce_input == 'voxel' and voxel_coords is not None:
+                    # Voxel-based: sample voxel predictions at point locations
+                    # Following original train.py approach
+                    B, C, W, H, Z = ce_input_tensor.shape
+                    
+                    # voxel_coords: (B, N, 3) with values in [0, grid_size-1]
+                    # ce_input_tensor: (B, C, W, H, Z)
+                    # Extract predictions at point locations
+                    voxel_coords_int = voxel_coords.long()  # (B, N, 3)
+                    
+                    # Index into voxel grid: for each batch, extract predictions at point locations
+                    # ce_input_tensor[b, :, x, y, z] for each point (x,y,z)
+                    ce_input_list = []
+                    for b in range(B):
+                        # Get coordinates for this batch
+                        coords = voxel_coords_int[b]  # (N, 3)
+                        x_idx = coords[:, 0].clamp(0, W-1)
+                        y_idx = coords[:, 1].clamp(0, H-1)
+                        z_idx = coords[:, 2].clamp(0, Z-1)
+                        
+                        # Extract predictions at these locations: (C, N)
+                        sampled_preds = ce_input_tensor[b, :, x_idx, y_idx, z_idx]  # (C, N)
+                        ce_input_list.append(sampled_preds.permute(1, 0))  # (N, C)
+                    
+                    ce_input_flat = torch.cat(ce_input_list, dim=0)  # (B*N, C)
+                    
+                    # Handle label shape
+                    if ce_label_tensor.dim() == 1:
+                        # If 1D, use as-is (assume it's already flattened for all batches)
+                        ce_label_flat = ce_label_tensor
+                    elif ce_label_tensor.dim() == 2:
+                        # If 2D (B, N), flatten
+                        ce_label_flat = ce_label_tensor.view(-1)
+                    else:
+                        ce_label_flat = ce_label_tensor.view(-1)
+                else:
+                    # Point-based: (B, C, N, 1, 1) -> (B*N, C) and (B*N,)
+                    ce_input_flat = ce_input_tensor.squeeze(-1).squeeze(-1)  # (B, C, N)
+                    ce_input_flat = ce_input_flat.permute(0, 2, 1).contiguous().view(-1, ce_input_flat.size(1))
+                    ce_label_flat = ce_label_tensor.view(-1)
+                
+                ce_loss = self.ce_loss_func(ce_input_flat, ce_label_flat)
+                losses['loss_ce'] = ce_loss
+                total_loss += ce_loss
+            
+            losses['loss'] = total_loss
             return losses
         else:
-            losses = {'loss_dummy': torch.tensor(0.0, device=img_feats[0].device)}
+            # No aggregator, return dummy loss
+            losses = {'loss': torch.tensor(0.0, device=img_feats[0].device, requires_grad=True)}
             return losses
 
     def predict(self, batch_inputs: dict,
