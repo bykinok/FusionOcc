@@ -179,13 +179,17 @@ class TPVCrossViewHybridAttention(BaseModule):
         # tpv04_occupancy.py 방식으로 정확히 구현
         # reference_points를 sampling_offsets와 호환되는 형태로 변환
         
-        # reference_points 차원 정리
+        # reference_points 차원 정리 (원본과 동일)
         if len(reference_points.shape) == 7:
             # [bs, num_query, 1, num_levels, 1, num_points, coord] -> [num_query, bs, num_levels, num_points, coord]
             reference_points = reference_points[:, :, 0, :, 0, :, :].permute(1, 0, 2, 3, 4)
         elif len(reference_points.shape) == 5:
             if reference_points.shape[0] != num_query:
                 reference_points = reference_points.permute(1, 0, 2, 3, 4)
+        elif len(reference_points.shape) == 4:
+            # [bs, num_query, num_levels, coord] -> [num_query, bs, num_levels, 1, coord]
+            # 원본에서 self attention에 사용되는 케이스
+            reference_points = reference_points.permute(1, 0, 2, 3).unsqueeze(3)
         else:
             raise ValueError(f"Unexpected reference_points shape: {reference_points.shape}")
         
@@ -254,13 +258,21 @@ class TPVCrossViewHybridAttention(BaseModule):
                 [spatial_shapes[..., 1], spatial_shapes[..., 0]], -1)
                 
             # 메모리 효율적인 처리: reference_points를 sampling_offsets 형태로 변환
-            # reference_points: [11600, 1, 1, 4, 2] -> [2, 11600, 8, 1, 4, 2]
-            bs_tpv = sampling_offsets.shape[0]  # 2
-            num_query = sampling_offsets.shape[1]  # 11600
-            num_heads = sampling_offsets.shape[2]  # 8
+            # reference_points: [num_query, bs, num_levels, num_points, 2] -> [bs*num_tpv_queue, num_query, num_heads, num_levels, num_points, 2]
+            bs_tpv = sampling_offsets.shape[0]  # bs*num_tpv_queue
+            num_query_shape = sampling_offsets.shape[1]  # num_query
+            num_heads = sampling_offsets.shape[2]  # num_heads
             
             # reference_points를 적절한 형태로 변환
-            reference_points_expanded = reference_points.expand(bs_tpv, num_query, num_heads, self.num_levels, self.num_points, 2)
+            # [num_query, bs, num_levels, num_points, 2] -> [bs, num_query, num_levels, num_points, 2]
+            reference_points = reference_points.permute(1, 0, 2, 3, 4)
+            # -> [bs, num_query, 1, num_levels, num_points, 2]
+            reference_points = reference_points.unsqueeze(2)
+            # -> [bs, num_query, num_heads, num_levels, num_points, 2]
+            reference_points_expanded = reference_points.expand(-1, -1, num_heads, -1, -1, -1)
+            # -> [bs*num_tpv_queue, num_query, num_heads, num_levels, num_points, 2]
+            if bs_tpv != reference_points_expanded.shape[0]:
+                reference_points_expanded = reference_points_expanded.repeat(self.num_tpv_queue, 1, 1, 1, 1, 1)
             
 # Memory efficient processing completed
             

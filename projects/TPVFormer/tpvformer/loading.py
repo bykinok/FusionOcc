@@ -20,6 +20,7 @@ class SegLabelMapping(BaseTransform):
     """Map semantic segmentation labels according to learning map.
     
     This is equivalent to the label mapping functionality in the original TPVFormer.
+    Maps NuScenes lidarseg labels (0-31) to 16 occupancy classes (0-16).
     """
     
     def __init__(self, label_mapping_file: Optional[str] = None):
@@ -30,7 +31,6 @@ class SegLabelMapping(BaseTransform):
         """
         super().__init__()
         self.label_mapping_file = label_mapping_file
-        self.learning_map = None
         
         if label_mapping_file is not None:
             try:
@@ -39,12 +39,40 @@ class SegLabelMapping(BaseTransform):
                     nuscenesyaml = yaml.safe_load(stream)
                     self.learning_map = nuscenesyaml['learning_map']
             except FileNotFoundError:
-                print(f"Warning: Label mapping file {label_mapping_file} not found. Using default mapping.")
-                # Default mapping for NuScenes (0-17 classes)
-                self.learning_map = {i: i for i in range(18)}
+                print(f"Warning: Label mapping file {label_mapping_file} not found. Using default NuScenes mapping.")
+                self.learning_map = self._get_default_nuscenes_mapping()
             except Exception as e:
-                print(f"Warning: Error loading label mapping file: {e}. Using default mapping.")
-                self.learning_map = {i: i for i in range(18)}
+                print(f"Warning: Error loading label mapping file: {e}. Using default NuScenes mapping.")
+                self.learning_map = self._get_default_nuscenes_mapping()
+        else:
+            # Use default NuScenes occupancy mapping (32 classes -> 17 classes)
+            self.learning_map = self._get_default_nuscenes_mapping()
+    
+    def _get_default_nuscenes_mapping(self):
+        """Get default NuScenes lidarseg to occupancy mapping.
+        
+        Maps NuScenes lidarseg labels (0-31) to 16 occupancy classes (0-16).
+        Based on TPVFormer_ori/config/label_mapping/nuscenes.yaml
+        """
+        return {
+            1: 0, 5: 0, 7: 0, 8: 0, 10: 0, 11: 0, 13: 0, 19: 0, 20: 0, 0: 0, 29: 0, 31: 0,  # noise/ignore -> 0
+            9: 1,      # barrier -> 1
+            14: 2,     # bicycle -> 2
+            15: 3, 16: 3,  # bus -> 3
+            17: 4,     # car -> 4
+            18: 5,     # construction_vehicle -> 5
+            21: 6,     # motorcycle -> 6
+            2: 7, 3: 7, 4: 7, 6: 7,  # pedestrian -> 7
+            12: 8,     # traffic_cone -> 8
+            22: 9,     # trailer -> 9
+            23: 10,    # truck -> 10
+            24: 11,    # driveable_surface -> 11
+            25: 12,    # other_flat -> 12
+            26: 13,    # sidewalk -> 13
+            27: 14,    # terrain -> 14
+            28: 15,    # manmade -> 15
+            30: 16,    # vegetation -> 16
+        }
     
     def transform(self, results: dict) -> dict:
         """Transform function to map labels.
@@ -55,12 +83,13 @@ class SegLabelMapping(BaseTransform):
         Returns:
             dict: Result dict with mapped labels.
         """
-        if 'pts_semantic_mask' in results and self.learning_map is not None:
+        if 'pts_semantic_mask' in results:
             # Apply label mapping similar to original TPVFormer
             pts_semantic_mask = results['pts_semantic_mask']
             if isinstance(pts_semantic_mask, np.ndarray):
-                # Vectorize the mapping function
-                mapped_mask = np.vectorize(self.learning_map.__getitem__)(pts_semantic_mask)
+                # Vectorize the mapping function to map each label
+                # For labels not in the mapping, default to 0 (ignore)
+                mapped_mask = np.vectorize(lambda x: self.learning_map.get(x, 0))(pts_semantic_mask)
                 results['pts_semantic_mask'] = mapped_mask.astype(np.uint8)
         
         return results
@@ -206,6 +235,7 @@ class LoadOccupancyAnnotations(BaseTransform):
         Returns:
             dict: Result dict with loaded annotations.
         """
+        # print(f"[DEBUG LoadOccupancy] Transform called, with_seg_3d: {self.with_seg_3d}, has points: {'points' in results}")
         if self.with_seg_3d:
             
             # Load 3D segmentation labels for occupancy
@@ -225,12 +255,18 @@ class LoadOccupancyAnnotations(BaseTransform):
                         if isinstance(mask_path, str):
                             # Try to construct full path
                             if not mask_path.startswith('/'):
-                                # Relative path, need to add data root
-                                data_root = 'data/nuscenes/'
-                                full_path = f"{data_root}lidarseg/v1.0-trainval/{mask_path}"
+                                # Relative path, convert to absolute
+                                # mask_path might be like "./data/nuscenes/lidarseg/..."
+                                if mask_path.startswith('./'):
+                                    mask_path = mask_path[2:]  # Remove "./"
+                                
+                                # Construct absolute path from workspace root
+                                workspace_root = '/home/h00323/Projects/occfrmwrk/'
+                                full_path = f"{workspace_root}{mask_path}"
                                 # print(f"[DEBUG LoadOccupancy] Trying full path: {full_path}")
                                 if os.path.exists(full_path):
                                     pts_semantic_mask = np.fromfile(full_path, dtype=np.uint8)
+                                    # print(f"[DEBUG LoadOccupancy] Successfully loaded {len(pts_semantic_mask)} labels")
                                 else:
                                     # print(f"[DEBUG LoadOccupancy] Full path does not exist, using dummy labels")
                                     pts_semantic_mask = np.ones(len(points), dtype=np.uint8)
@@ -250,10 +286,14 @@ class LoadOccupancyAnnotations(BaseTransform):
                     # print(f"[DEBUG LoadOccupancy] Points shape: {points.shape}, Labels shape: {pts_semantic_mask.shape}")
                     
                     # Create voxel grid from point cloud (following tpv04 approach)
-                    voxel_semantic_mask = self._points_to_voxel_grid(
+                    voxel_semantic_mask, voxel_coords = self._points_to_voxel_grid(
                         points, pts_semantic_mask, results)
                     
                     results['voxel_semantic_mask'] = voxel_semantic_mask
+                    results['voxel_coords'] = voxel_coords  # Store voxel coordinates for evaluation
+                    # Store original point-level labels as well
+                    results['pts_semantic_mask'] = pts_semantic_mask
+                    # print(f"[DEBUG LoadOccupancy] Stored voxel_coords with shape: {voxel_coords.shape}")
                     
                     # Ensure the data type is correct
                     if hasattr(np, self.seg_3d_dtype.split('.')[-1]):
@@ -300,22 +340,25 @@ class LoadOccupancyAnnotations(BaseTransform):
         """Convert point cloud to voxel grid following tpv04 implementation.
         
         Args:
-            points: Point cloud coordinates [N, 3]
+            points: Point cloud coordinates [N, 3] in (x, y, z) order
             labels: Point-wise semantic labels [N,]
             results: Results dict containing metadata
             
         Returns:
-            np.ndarray: Voxel grid with semantic labels [H, W, Z]
+            tuple: (voxel_grid [W, H, Z], voxel_coords [N, 3])
+                - voxel_grid: Voxel grid with semantic labels in (W, H, Z) order
+                - voxel_coords: Voxel coordinates for each point in (w, h, z) order (for evaluation)
         """
         # Use tpv04 compatible parameters
-        min_bound = np.array([-51.2, -51.2, -5.0])
-        max_bound = np.array([51.2, 51.2, 3.0])
-        grid_size = np.array([100, 100, 8])  # H, W, Z
-        fill_label = 17  # Empty voxel label
+        # point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0] (x, y, z)
+        min_bound = np.array([-51.2, -51.2, -5.0])  # (x_min, y_min, z_min)
+        max_bound = np.array([51.2, 51.2, 3.0])      # (x_max, y_max, z_max)
+        grid_size = np.array([100, 100, 8])           # (W, H, Z) corresponding to (x, y, z)
+        fill_label = 17  # Empty voxel label (class 17)
         
         # Calculate voxel indices
-        crop_range = max_bound - min_bound
-        intervals = crop_range / (grid_size - 1)
+        crop_range = max_bound - min_bound  # (x_range, y_range, z_range)
+        intervals = crop_range / (grid_size - 1)  # intervals for (x, y, z)
         
         # Clip points to valid range and convert to grid indices
         points_clipped = np.clip(points[:, :3], min_bound, max_bound)
@@ -347,7 +390,64 @@ class LoadOccupancyAnnotations(BaseTransform):
         # print(f"[DEBUG] Voxel grid unique labels: {np.unique(voxel_grid)}")
         # print(f"[DEBUG] Non-empty voxels: {np.sum(voxel_grid != fill_label)}")
         
-        return voxel_grid
+        return voxel_grid, grid_ind
+
+
+@TRANSFORMS.register_module()
+class PadMultiViewImage(BaseTransform):
+    """Pad the multi-view image.
+    
+    There are two padding modes: (1) pad to a fixed size and (2) pad to the
+    minimum size that is divisible by some number.
+    
+    Args:
+        size (tuple, optional): Fixed padding size.
+        size_divisor (int, optional): The divisor of padded size.
+        pad_val (float, optional): Padding value, 0 by default.
+    """
+
+    def __init__(self, size=None, size_divisor=None, pad_val=0):
+        self.size = size
+        self.size_divisor = size_divisor
+        self.pad_val = pad_val
+        # only one of size and size_divisor should be valid
+        assert size is not None or size_divisor is not None
+        assert size is None or size_divisor is None
+
+    def _pad_img(self, results):
+        """Pad images according to ``self.size``."""
+        if self.size is not None:
+            padded_img = [mmcv.impad(
+                img, shape=self.size, pad_val=self.pad_val) for img in results['img']]
+        elif self.size_divisor is not None:
+            padded_img = [mmcv.impad_to_multiple(
+                img, self.size_divisor, pad_val=self.pad_val) for img in results['img']]
+        
+        results['ori_shape'] = [img.shape for img in results['img']]
+        results['img'] = padded_img
+        results['img_shape'] = [img.shape for img in padded_img]
+        results['pad_shape'] = [img.shape for img in padded_img]
+        results['pad_fixed_size'] = self.size
+        results['pad_size_divisor'] = self.size_divisor
+
+    def transform(self, results):
+        """Call function to pad images.
+        
+        Args:
+            results (dict): Result dict from loading pipeline.
+            
+        Returns:
+            dict: Updated result dict.
+        """
+        self._pad_img(results)
+        return results
+
+    def __repr__(self):
+        repr_str = self.__class__.__name__
+        repr_str += f'(size={self.size}, '
+        repr_str += f'size_divisor={self.size_divisor}, '
+        repr_str += f'pad_val={self.pad_val})'
+        return repr_str
 
 
 @TRANSFORMS.register_module()

@@ -35,7 +35,7 @@ backend_args = None
 train_pipeline = [
     dict(
         type='BEVLoadMultiViewImageFromFiles',
-        to_float32=False,
+        to_float32=True,  # 원본과 동일하게 float32로 변환
         color_type='unchanged',
         num_views=6,
         backend_args=backend_args),
@@ -52,18 +52,25 @@ train_pipeline = [
         with_seg_3d=True,
         with_attr_label=False,
         seg_3d_dtype='np.uint8'),
-
+    # 원본과 동일한 정규화 값 적용
+    dict(
+        type='MultiViewImageNormalize',
+        mean=[103.530, 116.280, 123.675],
+        std=[1.0, 1.0, 1.0],
+        to_rgb=False),
+    # 원본과 동일하게 32로 나누어떨어지도록 패딩
+    dict(type='PadMultiViewImage', size_divisor=32),
     dict(type='SegLabelMapping'),
     dict(
         type='Pack3DDetInputs',
-        keys=['img', 'points', 'pts_semantic_mask', 'voxel_semantic_mask'],
+        keys=['img', 'points', 'pts_semantic_mask', 'voxel_semantic_mask', 'voxel_coords'],
         meta_keys=['lidar2img'])
 ]
 
 val_pipeline = [
     dict(
         type='BEVLoadMultiViewImageFromFiles',
-        to_float32=False,
+        to_float32=True,  # 원본과 동일하게 float32로 변환
         color_type='unchanged',
         num_views=6,
         backend_args=backend_args),
@@ -80,10 +87,18 @@ val_pipeline = [
         with_seg_3d=True,
         with_attr_label=False,
         seg_3d_dtype='np.uint8'),
+    # 원본과 동일한 정규화 값 적용
+    dict(
+        type='MultiViewImageNormalize',
+        mean=[103.530, 116.280, 123.675],
+        std=[1.0, 1.0, 1.0],
+        to_rgb=False),
+    # 원본과 동일하게 32로 나누어떨어지도록 패딩
+    dict(type='PadMultiViewImage', size_divisor=32),
     dict(type='SegLabelMapping'),
     dict(
         type='Pack3DDetInputs',
-        keys=['img', 'points', 'pts_semantic_mask', 'voxel_semantic_mask'],
+        keys=['img', 'points', 'pts_semantic_mask', 'voxel_semantic_mask', 'voxel_coords'],
         meta_keys=['lidar2img'])
 ]
 
@@ -117,7 +132,22 @@ val_dataloader = dict(
         pipeline=val_pipeline,
         test_mode=True))
 
-test_dataloader = val_dataloader
+# TEST: 200 samples only for quick testing
+test_dataloader = dict(
+    batch_size=1,
+    num_workers=4,
+    persistent_workers=True,
+    drop_last=False,
+    sampler=dict(type='DefaultSampler', shuffle=False),
+    dataset=dict(
+        type=dataset_type,
+        data_root=data_root,
+        data_prefix=data_prefix,
+        ann_file='occfrmwrk-nuscenes_infos_val.pkl',
+        pipeline=val_pipeline,
+        test_mode=True,
+        # Limit to 200 samples for quick testing
+        indices=list(range(200))))
 
 val_evaluator = dict(
     type='OccupancyMetric', 
@@ -177,6 +207,22 @@ num_points = [8, 64, 64]
 
 model = dict(
     type='TPVFormer',
+    # 원본과 동일한 전처리: data pipeline에서 정규화 수행, preprocessor에서는 수행하지 않음
+    data_preprocessor=dict(
+        type='TPVFormerDataPreprocessor',
+        mean=None,  # 정규화 비활성화 (pipeline에서 이미 수행됨)
+        std=None,
+        bgr_to_rgb=False,  # BGR 유지
+        pad_size_divisor=1,
+        # Voxel layer 설정 (원본과 동일한 voxel 크기 사용)
+        voxel=True,
+        voxel_type='cylindrical',
+        voxel_layer=dict(
+            grid_shape=grid_size,  # [100, 100, 8]
+            point_cloud_range=point_cloud_range,  # [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
+            max_num_points=-1,
+            max_voxels=-1,
+        )),
     use_grid_mask=True,
     tpv_aggregator = dict(
         type='TPVAggregator',
@@ -190,12 +236,7 @@ model = dict(
         scale_h=scale_h,
         scale_w=scale_w,
         scale_z=scale_z,
-        loss_ce=dict(
-            type='mmdet.CrossEntropyLoss',
-            use_sigmoid=False,
-            loss_weight=2.0,  # tpv04에서 CE + Lovasz를 합친 효과를 위해 가중치 증가
-            class_weight=None
-        )
+        use_checkpoint=True  # 원본과 동일
     ),
     img_backbone=dict(
         type='mmdet.ResNet',
@@ -226,7 +267,7 @@ model = dict(
         num_cams=_num_cams_,
         embed_dims=_dim_,
         positional_encoding=dict(
-            type='LearnedPositionalEncoding',
+            type='mmdet.LearnedPositionalEncoding',  # mmdet의 LearnedPositionalEncoding 사용 (원본과 동일)
             num_feats=_pos_dim_,
             row_num_embed=tpv_h_,
             col_num_embed=tpv_w_),

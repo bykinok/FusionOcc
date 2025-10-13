@@ -58,7 +58,7 @@ class Pack3DDetInputs(BaseTransform):
 
     SEG_KEYS = [
         'gt_seg_map', 'pts_instance_mask', 'pts_semantic_mask',
-        'gt_semantic_seg', 'voxel_semantic_mask'
+        'gt_semantic_seg', 'voxel_semantic_mask', 'voxel_coords'
     ]
 
     def __init__(

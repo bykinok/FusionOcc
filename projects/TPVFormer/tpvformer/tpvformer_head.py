@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.init import normal_
 from mmengine.model import BaseModule
 
 from mmdet3d.registry import MODELS
@@ -324,55 +325,111 @@ class TPVFormerHead(BaseModule):
         self.num_feature_levels = num_feature_levels
         self.num_cams = num_cams
         self.embed_dims = embed_dims
+        self.real_w = pc_range[3] - pc_range[0]
+        self.real_h = pc_range[4] - pc_range[1]
+        self.real_z = pc_range[5] - pc_range[2]
         
-        # Build positional encoding
+        # Build positional encoding (원본과 동일 - mmdet의 LearnedPositionalEncoding 사용)
+        from mmcv.cnn.bricks.transformer import build_positional_encoding
         if positional_encoding is not None:
-            self.positional_encoding = MODELS.build(positional_encoding)
+            self.positional_encoding = build_positional_encoding(positional_encoding)
+            # 원본처럼 tpv_mask_hw 등록
+            tpv_mask_hw = torch.zeros(1, tpv_h, tpv_w)
+            self.register_buffer('tpv_mask_hw', tpv_mask_hw)
         else:
-            self.encoder = None
+            self.positional_encoding = None
+            
+        # 원본과 동일하게 TPVHead에 임베딩 정의 (체크포인트 호환성)
+        self.level_embeds = nn.Parameter(torch.Tensor(num_feature_levels, embed_dims))
+        self.cams_embeds = nn.Parameter(torch.Tensor(num_cams, embed_dims))
+        self.tpv_embedding_hw = nn.Embedding(tpv_h * tpv_w, embed_dims)
+        self.tpv_embedding_zh = nn.Embedding(tpv_z * tpv_h, embed_dims)
+        self.tpv_embedding_wz = nn.Embedding(tpv_w * tpv_z, embed_dims)
             
         # Build encoder
         if encoder is not None:
             self.encoder = MODELS.build(encoder)
         else:
             self.encoder = None
+            
+    def init_weights(self):
+        """Initialize the transformer weights."""
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+        for m in self.modules():
+            if hasattr(m, 'init_weights'):
+                m.init_weights()
+        normal_(self.level_embeds)
+        normal_(self.cams_embeds)
 
     def forward(self, img_feats, batch_data_samples):
-        """Forward function.
+        """Forward function (원본 tpv04와 동일).
         
         Args:
-            img_feats: Image features from backbone and neck
-            batch_data_samples: Batch data samples
+            img_feats (tuple[Tensor]): Features from the upstream network, 
+                each is a 5D-tensor with shape (B, N, C, H, W).
+            batch_data_samples: Batch data samples (img_metas in original)
             
         Returns:
-            TPV queries from encoder
+            TPV embeddings from encoder
         """
-        if self.encoder is not None:
-            # Forward through encoder
-            tpv_queries = self.encoder(img_feats, batch_data_samples)
-            
-            # Add positional encoding if available
-            if self.positional_encoding is not None:
-                batch_size = img_feats[0].shape[0] if img_feats else 1
-                device = img_feats[0].device if img_feats else 'cpu'
-                pos_encodings = self.positional_encoding(batch_size, device)
-                
-                # Add positional encoding to TPV queries
-                if len(tpv_queries) == 3 and len(pos_encodings) == 3:
-                    for i in range(3):
-                        if tpv_queries[i].shape == pos_encodings[i].shape:
-                            tpv_queries[i] = tpv_queries[i] + pos_encodings[i]
-            
-            return tpv_queries
-        else:
-            # Return dummy queries if no encoder
-            batch_size = img_feats[0].shape[0] if img_feats else 1
-            device = img_feats[0].device if img_feats else 'cpu'
-            
-            # Create dummy TPV queries with correct dimensions
-            dummy_queries = [
-                torch.randn(batch_size, self.tpv_h * self.tpv_w, self.embed_dims, device=device),
-                torch.randn(batch_size, self.tpv_z * self.tpv_h, self.embed_dims, device=device),
-                torch.randn(batch_size, self.tpv_w * self.tpv_z, self.embed_dims, device=device)
-            ]
-            return dummy_queries
+        bs = img_feats[0].shape[0]
+        dtype = img_feats[0].dtype
+        device = img_feats[0].device
+        
+        # tpv queries and pos embeds (원본과 동일)
+        tpv_queries_hw = self.tpv_embedding_hw.weight.to(dtype)
+        tpv_queries_zh = self.tpv_embedding_zh.weight.to(dtype)
+        tpv_queries_wz = self.tpv_embedding_wz.weight.to(dtype)
+        tpv_queries_hw = tpv_queries_hw.unsqueeze(0).repeat(bs, 1, 1)
+        tpv_queries_zh = tpv_queries_zh.unsqueeze(0).repeat(bs, 1, 1)
+        tpv_queries_wz = tpv_queries_wz.unsqueeze(0).repeat(bs, 1, 1)
+        
+        # Positional encoding (원본과 동일)
+        tpv_mask_hw = self.tpv_mask_hw.expand(bs, -1, -1)
+        tpv_pos_hw = self.positional_encoding(tpv_mask_hw).to(dtype)
+        tpv_pos_hw = tpv_pos_hw.flatten(2).transpose(1, 2)
+        
+        # flatten image features of different scales (원본과 동일)
+        feat_flatten = []
+        spatial_shapes = []
+        for lvl, feat in enumerate(img_feats):
+            bs_check, num_cam, c, h, w = feat.shape
+            spatial_shape = (h, w)
+            feat = feat.flatten(3).permute(1, 0, 3, 2)  # num_cam, bs, hw, c
+            feat = feat + self.cams_embeds[:, None, None, :].to(dtype)
+            feat = feat + self.level_embeds[None, None, lvl:lvl+1, :].to(dtype)
+            spatial_shapes.append(spatial_shape)
+            feat_flatten.append(feat)
+        
+        feat_flatten = torch.cat(feat_flatten, 2)  # num_cam, bs, hw++, c
+        spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=device)
+        level_start_index = torch.cat((spatial_shapes.new_zeros((1,)), 
+                                      spatial_shapes.prod(1).cumsum(0)[:-1]))
+        feat_flatten = feat_flatten.permute(0, 2, 1, 3)  # (num_cam, H*W, bs, embed_dims)
+        
+        # img_metas 추출 (batch_data_samples에서)
+        img_metas = []
+        if batch_data_samples is not None:
+            for data_sample in batch_data_samples:
+                if hasattr(data_sample, 'metainfo'):
+                    img_metas.append(data_sample.metainfo)
+                else:
+                    img_metas.append({})
+        
+        # Encoder forward (원본과 동일)
+        tpv_embed = self.encoder(
+            [tpv_queries_hw, tpv_queries_zh, tpv_queries_wz],
+            feat_flatten,
+            feat_flatten,
+            tpv_h=self.tpv_h,
+            tpv_w=self.tpv_w,
+            tpv_z=self.tpv_z,
+            tpv_pos=[tpv_pos_hw, None, None],
+            spatial_shapes=spatial_shapes,
+            level_start_index=level_start_index,
+            img_metas=img_metas,
+        )
+        
+        return tpv_embed

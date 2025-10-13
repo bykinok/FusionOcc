@@ -26,10 +26,7 @@ class TPVAggregator(BaseModule):
                  scale_h=1,
                  scale_w=1,
                  scale_z=1,
-                 loss_ce=None,
-                 lovasz_input='voxel',
-                 ce_input='voxel',
-                 ignore_index=0):
+                 use_checkpoint=True):
         super().__init__()
         self.tpv_h = tpv_h
         self.tpv_w = tpv_w
@@ -38,9 +35,7 @@ class TPVAggregator(BaseModule):
         self.scale_h = scale_h
         self.scale_w = scale_w
         self.scale_z = scale_z
-        self.lovasz_input = lovasz_input
-        self.ce_input = ce_input
-        self.ignore_index = ignore_index
+        self.use_checkpoint = use_checkpoint
 
         # Feature decoder
         self.decoder = nn.Sequential(
@@ -51,10 +46,7 @@ class TPVAggregator(BaseModule):
 
         # Final classifier for occupancy prediction
         self.classifier = nn.Linear(out_dims, nbr_classes)
-
-        # Loss functions
-        if loss_ce is not None:
-            self.loss_ce = MODELS.build(loss_ce)
+        self.classes = nbr_classes
 
     def forward(self, tpv_list, points=None):
         """Forward function for occupancy prediction.
@@ -65,9 +57,15 @@ class TPVAggregator(BaseModule):
                 - tpv_zh: (B, Z*H, C) - Depth-Height view  
                 - tpv_wz: (B, W*Z, C) - Width-Depth view
             points: Optional point cloud coordinates for point-wise prediction
+                    (B, N, 3) in grid coordinates
         
         Returns:
-            torch.Tensor: Occupancy logits (B, C, H, W, Z)
+            If points is not None:
+                tuple: (logits_vox, logits_pts)
+                    - logits_vox: (B, C, W, H, Z) voxel occupancy logits
+                    - logits_pts: (B, C, N, 1, 1) point occupancy logits
+            Else:
+                torch.Tensor: logits of shape (B, C, W, H, Z)
         """
         tpv_hw, tpv_zh, tpv_wz = tpv_list[0], tpv_list[1], tpv_list[2]
         bs, _, c = tpv_hw.shape
@@ -76,7 +74,7 @@ class TPVAggregator(BaseModule):
         tpv_hw = tpv_hw.permute(0, 2, 1).reshape(bs, c, self.tpv_h, self.tpv_w)
         tpv_zh = tpv_zh.permute(0, 2, 1).reshape(bs, c, self.tpv_z, self.tpv_h)
         tpv_wz = tpv_wz.permute(0, 2, 1).reshape(bs, c, self.tpv_w, self.tpv_z)
-
+        
         # Scale features if needed
         if self.scale_h != 1 or self.scale_w != 1:
             tpv_hw = F.interpolate(
@@ -93,128 +91,63 @@ class TPVAggregator(BaseModule):
                 tpv_wz,
                 size=(self.tpv_w * self.scale_w, self.tpv_z * self.scale_z),
                 mode='bilinear')
-
-        # Expand TPV features to 3D volume
-        tpv_hw_vol = tpv_hw.unsqueeze(-1).expand(
-            -1, -1, -1, -1, self.scale_z * self.tpv_z)
-        tpv_zh_vol = tpv_zh.unsqueeze(-1).permute(0, 1, 4, 3, 2).expand(
-            -1, -1, self.scale_w * self.tpv_w, -1, -1)
-        tpv_wz_vol = tpv_wz.unsqueeze(-1).permute(0, 1, 2, 4, 3).expand(
-            -1, -1, -1, self.scale_h * self.tpv_h, -1)
-
-        # Fuse three orthogonal views
-        fused_volume = tpv_hw_vol + tpv_zh_vol + tpv_wz_vol
         
-        # Reshape to (B, C, H*W*Z) for processing
-        fused_volume = fused_volume.permute(0, 2, 3, 4, 1).reshape(
-            bs, -1, c)
-        
-        # Decode features
-        decoded_features = self.decoder(fused_volume)
-        
-        # Classify occupancy
-        occupancy_logits = self.classifier(decoded_features)
-        
-        # Reshape back to 3D volume (B, C, H, W, Z)
-        occupancy_logits = occupancy_logits.reshape(
-            bs, self.nbr_classes, 
-            self.tpv_h * self.scale_h,
-            self.tpv_w * self.scale_w,
-            self.tpv_z * self.scale_z)
-
-        return occupancy_logits
-
-    def loss(self, tpv_list, batch_data_samples):
-        """Compute loss for occupancy prediction.
-        
-        Args:
-            tpv_list: List of TPV features
-            batch_data_samples: Batch data samples with ground truth
+        if points is not None:
+            # Process both voxel and point predictions (following tpv04 implementation)
+            _, n, _ = points.shape
             
-        Returns:
-            dict: Loss dictionary
-        """
-        occupancy_logits = self.forward(tpv_list)
-        
-        # Prepare ground truth labels
-        batch_labels = []
-        for i, data_sample in enumerate(batch_data_samples):
-            # Try to get voxel-wise mask, else use zeros
-            if hasattr(data_sample, 'gt_pts_seg') and hasattr(data_sample.gt_pts_seg, 'voxel_semantic_mask'):
-                mask = data_sample.gt_pts_seg.voxel_semantic_mask
-                
-                # Convert to tensor if it's numpy array
-                if isinstance(mask, np.ndarray):
-                    mask = torch.from_numpy(mask).to(occupancy_logits.device)
-                elif not isinstance(mask, torch.Tensor):
-                    mask = torch.tensor(mask, device=occupancy_logits.device)
-                # Ensure correct device and dtype
-                mask = mask.to(device=occupancy_logits.device, dtype=torch.long)
+            points = points.reshape(bs, 1, n, 3)
+            
+            # Normalize points to [-1, 1] for grid_sample
+            points[..., 0] = points[..., 0] / (self.tpv_w * self.scale_w) * 2 - 1
+            points[..., 1] = points[..., 1] / (self.tpv_h * self.scale_h) * 2 - 1
+            points[..., 2] = points[..., 2] / (self.tpv_z * self.scale_z) * 2 - 1
+            
+            # Sample features at point locations
+            # Original checkpoint was trained with PyTorch < 1.3.0 where align_corners=True was default
+            sample_loc = points[:, :, :, [0, 1]]
+            tpv_hw_pts = F.grid_sample(tpv_hw, sample_loc, align_corners=True).squeeze(2)  # bs, c, n
+            sample_loc = points[:, :, :, [1, 2]]
+            tpv_zh_pts = F.grid_sample(tpv_zh, sample_loc, align_corners=True).squeeze(2)
+            sample_loc = points[:, :, :, [2, 0]]
+            tpv_wz_pts = F.grid_sample(tpv_wz, sample_loc, align_corners=True).squeeze(2)
+            
+            # Expand TPV features to 3D volume
+            tpv_hw_vox = tpv_hw.unsqueeze(-1).permute(0, 1, 3, 2, 4).expand(-1, -1, -1, -1, self.scale_z * self.tpv_z)
+            tpv_zh_vox = tpv_zh.unsqueeze(-1).permute(0, 1, 4, 3, 2).expand(-1, -1, self.scale_w * self.tpv_w, -1, -1)
+            tpv_wz_vox = tpv_wz.unsqueeze(-1).permute(0, 1, 2, 4, 3).expand(-1, -1, -1, self.scale_h * self.tpv_h, -1)
+            
+            # Fuse features
+            fused_vox = (tpv_hw_vox + tpv_zh_vox + tpv_wz_vox).flatten(2)
+            fused_pts = tpv_hw_pts + tpv_zh_pts + tpv_wz_pts
+            fused = torch.cat([fused_vox, fused_pts], dim=-1)  # bs, c, whz+n
+            
+            fused = fused.permute(0, 2, 1)
+            if self.use_checkpoint:
+                fused = torch.utils.checkpoint.checkpoint(self.decoder, fused)
+                logits = torch.utils.checkpoint.checkpoint(self.classifier, fused)
             else:
-                # Fallback: create zero mask of shape [H, W, Z]
-                mask = torch.zeros(
-                    self.tpv_h * self.scale_h,
-                    self.tpv_w * self.scale_w,
-                    self.tpv_z * self.scale_z,
-                    dtype=torch.long,
-                    device=occupancy_logits.device)
-            batch_labels.append(mask)
-        
-        # Stack labels
-        if batch_labels:
-            gt_labels = torch.stack(batch_labels, dim=0)
+                fused = self.decoder(fused)
+                logits = self.classifier(fused)
+            logits = logits.permute(0, 2, 1)
+            logits_vox = logits[:, :, :(-n)].reshape(bs, self.classes, self.scale_w * self.tpv_w, self.scale_h * self.tpv_h, self.scale_z * self.tpv_z)
+            logits_pts = logits[:, :, (-n):].reshape(bs, self.classes, n, 1, 1)
+            return logits_vox, logits_pts
+            
         else:
-            # Create dummy labels if none available
-            gt_labels = torch.zeros(occupancy_logits.shape[0], 
-                                  occupancy_logits.shape[2],
-                                  occupancy_logits.shape[3],
-                                  occupancy_logits.shape[4],
-                                  dtype=torch.long,
-                                  device=occupancy_logits.device)
-
-        # Reshape logits and labels for loss computation
-        bs, num_classes, h, w, z = occupancy_logits.shape
-        occupancy_logits = occupancy_logits.permute(0, 2, 3, 4, 1).reshape(-1, num_classes)
-        gt_labels = gt_labels.reshape(-1)
-
-        # Compute losses (simplified version with CE only)
-        loss = dict()
-        
-        # Cross Entropy Loss (weighted to compensate for removed Lovasz loss)
-        if hasattr(self, 'loss_ce'):
-            # Clamp labels to valid range to avoid CUDA assert
-            gt_labels_clamped = torch.clamp(gt_labels, 0, num_classes - 1)
+            # Voxel-only prediction
+            tpv_hw = tpv_hw.unsqueeze(-1).permute(0, 1, 3, 2, 4).expand(-1, -1, -1, -1, self.scale_z * self.tpv_z)
+            tpv_zh = tpv_zh.unsqueeze(-1).permute(0, 1, 4, 3, 2).expand(-1, -1, self.scale_w * self.tpv_w, -1, -1)
+            tpv_wz = tpv_wz.unsqueeze(-1).permute(0, 1, 2, 4, 3).expand(-1, -1, -1, self.scale_h * self.tpv_h, -1)
             
-            loss_ce = self.loss_ce(
-                occupancy_logits, gt_labels_clamped, ignore_index=self.ignore_index)
-            loss['loss_ce'] = loss_ce
-        
-        # Ensure at least one loss is computed
-        if not loss:
-            # Fallback: create a dummy loss tensor
-            loss['loss_dummy'] = torch.tensor(0.0, device=occupancy_logits.device, requires_grad=True)
-
-        return loss
-
-    def predict(self, tpv_list, batch_data_samples):
-        """Predict occupancy for inference.
-        
-        Args:
-            tpv_list: List of TPV features
-            batch_data_samples: Batch data samples
+            fused = tpv_hw + tpv_zh + tpv_wz
+            fused = fused.permute(0, 2, 3, 4, 1)
+            if self.use_checkpoint:
+                fused = torch.utils.checkpoint.checkpoint(self.decoder, fused)
+                logits = torch.utils.checkpoint.checkpoint(self.classifier, fused)
+            else:
+                fused = self.decoder(fused)
+                logits = self.classifier(fused)
+            logits = logits.permute(0, 4, 1, 2, 3)
             
-        Returns:
-            list: List of occupancy predictions
-        """
-        occupancy_logits = self.forward(tpv_list)
-        
-        # Convert logits to predictions
-        occupancy_preds = occupancy_logits.argmax(dim=1)  # (B, H, W, Z)
-        
-        # Split predictions for each sample
-        predictions = []
-        for i in range(occupancy_preds.shape[0]):
-            pred = occupancy_preds[i]  # (H, W, Z)
-            predictions.append(pred)
-        
-        return predictions
+            return logits

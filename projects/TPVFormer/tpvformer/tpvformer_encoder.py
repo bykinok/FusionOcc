@@ -36,12 +36,8 @@ class TPVFormerEncoder(TransformerLayerSequence):
         self.real_h = pc_range[4] - pc_range[1]
         self.real_z = pc_range[5] - pc_range[2]
 
-        self.level_embeds = nn.Parameter(
-            torch.Tensor(num_feature_levels, embed_dims))
-        self.cams_embeds = nn.Parameter(torch.Tensor(num_cams, embed_dims))
-        self.tpv_embedding_hw = nn.Embedding(tpv_h * tpv_w, embed_dims)
-        self.tpv_embedding_zh = nn.Embedding(tpv_z * tpv_h, embed_dims)
-        self.tpv_embedding_wz = nn.Embedding(tpv_w * tpv_z, embed_dims)
+        # 임베딩은 TPVHead에서 관리 (원본과 동일, 체크포인트 호환성)
+        # self.level_embeds, self.cams_embeds, self.tpv_embedding_* 제거
 
         ref_3d_hw = self.get_reference_points(tpv_h, tpv_w, self.real_z,
                                               num_points_in_pillar[0])
@@ -57,9 +53,13 @@ class TPVFormerEncoder(TransformerLayerSequence):
         self.register_buffer('ref_3d_zh', ref_3d_zh)
         self.register_buffer('ref_3d_wz', ref_3d_wz)
 
-        cross_view_ref_points = self.get_cross_view_ref_points(
-            tpv_h, tpv_w, tpv_z, num_points_in_pillar_cross_view)
-        self.register_buffer('cross_view_ref_points', cross_view_ref_points)
+        # 원본과 동일하게 ref_2d_* 사용 (체크포인트 호환성)
+        ref_2d_hw = self.get_reference_points(tpv_h, tpv_w, dim='2d', bs=1, device='cpu')
+        ref_2d_zh = self.get_reference_points(tpv_z, tpv_h, dim='2d', bs=1, device='cpu')
+        ref_2d_wz = self.get_reference_points(tpv_w, tpv_z, dim='2d', bs=1, device='cpu')
+        self.register_buffer('ref_2d_hw', ref_2d_hw)
+        self.register_buffer('ref_2d_zh', ref_2d_zh)
+        self.register_buffer('ref_2d_wz', ref_2d_wz)
 
         # positional encoding
         if positional_encoding is not None:
@@ -77,8 +77,7 @@ class TPVFormerEncoder(TransformerLayerSequence):
             if isinstance(m, TPVMSDeformableAttention3D) or isinstance(
                     m, TPVCrossViewHybridAttention):
                 m.init_weights()
-        normal_(self.level_embeds)
-        normal_(self.cams_embeds)
+        # level_embeds, cams_embeds는 TPVHead에서 초기화
 
     @staticmethod
     def get_cross_view_ref_points(tpv_h, tpv_w, tpv_z, num_points_in_pillar):
@@ -189,20 +188,35 @@ class TPVFormerEncoder(TransformerLayerSequence):
         """
 
         # reference points in 3D space, used in spatial cross-attention (SCA)
-        zs = torch.linspace(
-            0.5, Z - 0.5, num_points_in_pillar,
-            dtype=dtype, device=device).view(-1, 1, 1).expand(
-                num_points_in_pillar, H, W) / Z
-        xs = torch.linspace(
-            0.5, W - 0.5, W, dtype=dtype, device=device).view(1, 1, -1).expand(
-                num_points_in_pillar, H, W) / W
-        ys = torch.linspace(
-            0.5, H - 0.5, H, dtype=dtype, device=device).view(1, -1, 1).expand(
-                num_points_in_pillar, H, W) / H
-        ref_3d = torch.stack((xs, ys, zs), -1)
-        ref_3d = ref_3d.permute(0, 3, 1, 2).flatten(2).permute(0, 2, 1)
-        ref_3d = ref_3d[None].repeat(bs, 1, 1, 1)
-        return ref_3d
+        if dim == '3d':
+            zs = torch.linspace(
+                0.5, Z - 0.5, num_points_in_pillar,
+                dtype=dtype, device=device).view(-1, 1, 1).expand(
+                    num_points_in_pillar, H, W) / Z
+            xs = torch.linspace(
+                0.5, W - 0.5, W, dtype=dtype, device=device).view(1, 1, -1).expand(
+                    num_points_in_pillar, H, W) / W
+            ys = torch.linspace(
+                0.5, H - 0.5, H, dtype=dtype, device=device).view(1, -1, 1).expand(
+                    num_points_in_pillar, H, W) / H
+            ref_3d = torch.stack((xs, ys, zs), -1)
+            ref_3d = ref_3d.permute(0, 3, 1, 2).flatten(2).permute(0, 2, 1)
+            ref_3d = ref_3d[None].repeat(bs, 1, 1, 1)
+            return ref_3d
+        
+        # reference points on 2D plane, used in temporal self-attention (TSA) (원본과 동일)
+        elif dim == '2d':
+            ref_y, ref_x = torch.meshgrid(
+                torch.linspace(
+                    0.5, H - 0.5, H, dtype=dtype, device=device),
+                torch.linspace(
+                    0.5, W - 0.5, W, dtype=dtype, device=device)
+            )
+            ref_y = ref_y.reshape(-1)[None] / H
+            ref_x = ref_x.reshape(-1)[None] / W
+            ref_2d = torch.stack((ref_x, ref_y), -1)
+            ref_2d = ref_2d.repeat(bs, 1, 1).unsqueeze(2)
+            return ref_2d
 
     def point_sampling(self, reference_points, pc_range, batch_data_smaples):
 
@@ -263,110 +277,82 @@ class TPVFormerEncoder(TransformerLayerSequence):
 
         return reference_points_cam, tpv_mask
 
-    def forward(self, mlvl_feats, batch_data_samples):
-        """Forward function.
-
+    def forward(self,
+                tpv_query,  # list
+                key,
+                value,
+                *args,
+                tpv_h=None,
+                tpv_w=None,
+                tpv_z=None,
+                tpv_pos=None,  # list
+                spatial_shapes=None,
+                level_start_index=None,
+                img_metas=None,
+                **kwargs):
+        """Forward function (원본과 동일).
+        
         Args:
-            mlvl_feats (tuple[Tensor]): Features from the upstream
-                network, each is a 5D-tensor with shape
-                (B, N, C, H, W).
+            tpv_query (List[Tensor]): Input tpv query with shape
+                `[(bs, num_query, embed_dims)` * 3].
+            key & value (Tensor): Input multi-camera features with shape
+                (num_cam, num_value, bs, embed_dims)
+            tpv_h, tpv_w, tpv_z (int): TPV dimensions
+            tpv_pos (List[Tensor]): Positional encodings for TPV queries
+            spatial_shapes (Tensor): Spatial shapes of multi-scale features
+            level_start_index (Tensor): Level start indices
+            img_metas (list[dict]): Meta information of each image
         """
-        bs = mlvl_feats[0].shape[0]
-        dtype = mlvl_feats[0].dtype
-        device = mlvl_feats[0].device
+        output = tpv_query
+        intermediate = []
 
-        # tpv queries and pos embeds
-        tpv_queries_hw = self.tpv_embedding_hw.weight.to(dtype)
-        tpv_queries_zh = self.tpv_embedding_zh.weight.to(dtype)
-        tpv_queries_wz = self.tpv_embedding_wz.weight.to(dtype)
-        tpv_queries_hw = tpv_queries_hw.unsqueeze(0).repeat(bs, 1, 1)
-        tpv_queries_zh = tpv_queries_zh.unsqueeze(0).repeat(bs, 1, 1)
-        tpv_queries_wz = tpv_queries_wz.unsqueeze(0).repeat(bs, 1, 1)
-        tpv_query = [tpv_queries_hw, tpv_queries_zh, tpv_queries_wz]
-
-        if self.positional_encoding is not None:
-            tpv_pos_hw = self.positional_encoding(bs, device, 'z')
-            tpv_pos_zh = self.positional_encoding(bs, device, 'w')
-            tpv_pos_wz = self.positional_encoding(bs, device, 'h')
-            tpv_pos = [tpv_pos_hw, tpv_pos_zh, tpv_pos_wz]
-        else:
-            # positional encoding이 없으면 0으로 설정
-            tpv_pos_hw = torch.zeros_like(tpv_queries_hw)
-            tpv_pos_zh = torch.zeros_like(tpv_queries_zh)
-            tpv_pos_wz = torch.zeros_like(tpv_queries_wz)
-            tpv_pos = [tpv_pos_hw, tpv_pos_zh, tpv_pos_wz]
-
-        # flatten image features of different scales
-        feat_flatten = []
-        spatial_shapes = []
-        for lvl, feat in enumerate(mlvl_feats):
-            bs, num_cam, c, h, w = feat.shape
-            spatial_shape = (h, w)
-            feat = feat.flatten(3).permute(1, 0, 3, 2)  # num_cam, bs, hw, c
-            feat = feat + self.cams_embeds[:, None, None, :].to(dtype)
-            feat = feat + self.level_embeds[None, None,
-                                            lvl:lvl + 1, :].to(dtype)
-            spatial_shapes.append(spatial_shape)
-            feat_flatten.append(feat)
-
-        feat_flatten = torch.cat(feat_flatten, 2)  # num_cam, bs, hw++, c
-        spatial_shapes = torch.as_tensor(
-            spatial_shapes, dtype=torch.long, device=device)
-        level_start_index = torch.cat((spatial_shapes.new_zeros(
-            (1, )), spatial_shapes.prod(1).cumsum(0)[:-1]))
-        feat_flatten = feat_flatten.permute(
-            0, 2, 1, 3)  # (num_cam, H*W, bs, embed_dims)
+        bs = tpv_query[0].shape[0]
+        
+        # batch_data_samples 구성 (img_metas에서)
+        batch_data_samples = []
+        if img_metas is not None:
+            for img_meta in img_metas:
+                # img_meta를 data_sample처럼 사용
+                class DataSample:
+                    def __init__(self, meta):
+                        self.metainfo = meta
+                        # point_sampling에서 필요한 lidar2img 직접 제공
+                        self.lidar2img = meta.get('lidar2img', None)
+                batch_data_samples.append(DataSample(img_meta))
 
         reference_points_cams, tpv_masks = [], []
         ref_3ds = [self.ref_3d_hw, self.ref_3d_zh, self.ref_3d_wz]
         for ref_3d in ref_3ds:
             reference_points_cam, tpv_mask = self.point_sampling(
-                ref_3d, self.pc_range,
-                batch_data_samples)  # num_cam, bs, hw++, #p, 2
+                ref_3d, self.pc_range, batch_data_samples)
             reference_points_cams.append(reference_points_cam)
             tpv_masks.append(tpv_mask)
 
-        ref_cross_view = self.cross_view_ref_points.clone().unsqueeze(
-            0).expand(bs, -1, -1, -1, -1)
+        # 원본과 동일하게 ref_2d_hw 사용
+        ref_2d_hw = self.ref_2d_hw.clone().expand(bs, -1, -1, -1)
+        hybird_ref_2d = torch.cat([ref_2d_hw, ref_2d_hw], 0)
 
-        # 원본 구현과 호환되도록 tpv_query를 단일 텐서로 변환
-        tpv_query_concat = torch.cat(tpv_query, dim=1)  # bs, (hw+zh+wz), embed_dims
-        tpv_pos_concat = torch.cat(tpv_pos, dim=1) if tpv_pos[0] is not None else None
-
-        intermediate = []
-        for layer in self.layers:
+        # TPV layers (원본과 동일)
+        for lid, layer in enumerate(self.layers):
             output = layer(
-                tpv_query_concat,
-                feat_flatten,
-                feat_flatten,
-                tpv_pos=tpv_pos_concat,
-                ref_2d=ref_cross_view,
-                tpv_h=self.tpv_h,
-                tpv_w=self.tpv_w,
-                tpv_z=self.tpv_z,
+                output,
+                key,
+                value,
+                tpv_pos=tpv_pos,
+                ref_2d=hybird_ref_2d,
+                tpv_h=tpv_h,
+                tpv_w=tpv_w,
+                tpv_z=tpv_z,
                 spatial_shapes=spatial_shapes,
                 level_start_index=level_start_index,
                 reference_points_cams=reference_points_cams,
-                tpv_masks=tpv_masks)
-            tpv_query_concat = output
+                tpv_masks=tpv_masks,
+                **kwargs)
+
             if self.return_intermediate:
                 intermediate.append(output)
 
         if self.return_intermediate:
             return torch.stack(intermediate)
 
-        # output을 3개의 TPV 뷰로 분할
-        # output shape: [bs, total_queries, embed_dims]
-        # total_queries = tpv_h*tpv_w + tpv_z*tpv_h + tpv_w*tpv_z
-        bs, total_queries, embed_dims = output.shape
-        
-        hw_queries = self.tpv_h * self.tpv_w
-        zh_queries = self.tpv_z * self.tpv_h
-        wz_queries = self.tpv_w * self.tpv_z
-        
-        # Split the concatenated output back to individual TPV views
-        tpv_hw = output[:, :hw_queries, :]  # [bs, h*w, embed_dims]
-        tpv_zh = output[:, hw_queries:hw_queries+zh_queries, :]  # [bs, z*h, embed_dims]
-        tpv_wz = output[:, hw_queries+zh_queries:, :]  # [bs, w*z, embed_dims]
-        
-        return [tpv_hw, tpv_zh, tpv_wz]
+        return output

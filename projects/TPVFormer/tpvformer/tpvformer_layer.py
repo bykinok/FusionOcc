@@ -164,31 +164,46 @@ class TPVFormerLayer(BaseModule):
         norm_index = 0
         attn_index = 0
         ffn_index = 0
-        if self.operation_order[0] == 'cross_attn':
-            query = torch.cat(query, dim=1)
+        
+        # 원본과 동일하게 query를 list로 유지
         identity = query
 
         for layer in self.operation_order:
-            # cross view hybrid-attention
+            # cross view hybrid-attention (원본과 동일)
             if layer == 'self_attn':
-                ss = torch.tensor(
-                    [[tpv_h, tpv_w], [tpv_z, tpv_h], [tpv_w, tpv_z]],
-                    device=query.device)
-                lsi = torch.tensor(
-                    [0, tpv_h * tpv_w, tpv_h * tpv_w + tpv_z * tpv_h],
-                    device=query.device)
-
-                # 원본 구현과 호환되도록 단일 텐서로 전달
-                query = self.attentions[attn_index](
-                    query,
-                    identity if self.pre_norm else None,
-                    query_pos=tpv_pos,
-                    reference_points=ref_2d,
-                    spatial_shapes=ss,
-                    level_start_index=lsi,
-                    **kwargs)
-                attn_index += 1
-                identity = query
+                # query가 list나 tuple일 때만 self_attn 수행 (원본과 동일)
+                if isinstance(query, (list, tuple)):
+                    query_0 = self.attentions[attn_index](
+                        query[0],
+                        None,
+                        None,
+                        identity if self.pre_norm else None,
+                        query_pos=tpv_pos[0] if tpv_pos is not None and isinstance(tpv_pos, list) else None,
+                        reference_points=ref_2d,
+                        spatial_shapes=torch.tensor([[tpv_h, tpv_w]], device=query[0].device),
+                        level_start_index=torch.tensor([0], device=query[0].device),
+                        **kwargs)
+                    attn_index += 1
+                    query = torch.cat([query_0, query[1], query[2]], dim=1)
+                    identity = query
+                else:
+                    # query가 이미 concat된 경우 (원본에는 없지만 안전장치)
+                    ss = torch.tensor(
+                        [[tpv_h, tpv_w], [tpv_z, tpv_h], [tpv_w, tpv_z]],
+                        device=query.device)
+                    lsi = torch.tensor(
+                        [0, tpv_h * tpv_w, tpv_h * tpv_w + tpv_z * tpv_h],
+                        device=query.device)
+                    query = self.attentions[attn_index](
+                        query,
+                        identity if self.pre_norm else None,
+                        query_pos=tpv_pos,
+                        reference_points=ref_2d,
+                        spatial_shapes=ss,
+                        level_start_index=lsi,
+                        **kwargs)
+                    attn_index += 1
+                    identity = query
 
             elif layer == 'norm':
                 query = self.norms[norm_index](query)
@@ -214,5 +229,7 @@ class TPVFormerLayer(BaseModule):
                     query, identity if self.pre_norm else None)
                 ffn_index += 1
         
-        # 원본 구현과 호환되도록 단일 텐서 반환
-        return query
+        # Return 3 separate TPV planes (원본과 동일 - list로 반환)
+        query = torch.split(query, [tpv_h * tpv_w, tpv_z * tpv_h, tpv_w * tpv_z],
+                            dim=1)
+        return list(query)  # tuple을 list로 변환

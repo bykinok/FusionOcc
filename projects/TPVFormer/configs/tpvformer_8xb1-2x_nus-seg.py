@@ -86,7 +86,7 @@ train_dataloader = dict(
         type=dataset_type,
         data_root=data_root,
         data_prefix=data_prefix,
-        ann_file='nuscenes_infos_train.pkl',
+        ann_file='occfrmwrk-nuscenes_infos_train.pkl',
         pipeline=train_pipeline,
         test_mode=False))
 
@@ -100,7 +100,7 @@ val_dataloader = dict(
         type=dataset_type,
         data_root=data_root,
         data_prefix=data_prefix,
-        ann_file='nuscenes_infos_val.pkl',
+        ann_file='occfrmwrk-nuscenes_infos_val.pkl',
         pipeline=val_pipeline,
         test_mode=True))
 

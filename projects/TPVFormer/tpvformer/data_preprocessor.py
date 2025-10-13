@@ -22,6 +22,11 @@ class TPVFormerDataPreprocessor(Det3DDataPreprocessor):
                  data_samples: SampleList) -> List[Tensor]:
         """Apply voxelization to point cloud. In TPVFormer, it will get voxel-
         wise segmentation label and voxel/point coordinates.
+        
+        NOTE: This implementation matches the original TPVFormer's voxelization
+        which uses intervals = crop_range / (grid_size - 1), NOT the standard
+        voxel_size = crop_range / grid_size. This is to ensure exact compatibility
+        with the original pretrained weights.
 
         Args:
             points (List[Tensor]): Point cloud in one data batch.
@@ -36,10 +41,17 @@ class TPVFormerDataPreprocessor(Det3DDataPreprocessor):
                 self.voxel_layer.point_cloud_range[:3])
             max_bound = point.new_tensor(
                 self.voxel_layer.point_cloud_range[3:])
-            point_clamp = torch.clamp(point, min_bound, max_bound + 1e-6)
-            coors = torch.floor(
-                (point_clamp - min_bound) /
-                point_clamp.new_tensor(self.voxel_layer.voxel_size)).int()
+            
+            # Use voxel_size directly from voxel_layer
+            # When grid_shape is provided to VoxelizationByGridShape, it calculates:
+            # voxel_size = (max - min) / (grid_shape - 1)
+            # This matches the original TPVFormer's interval calculation
+            intervals = point.new_tensor(self.voxel_layer.voxel_size)
+            
+            # Original TPVFormer clips to max_bound (not max_bound - 1e-3)
+            point_clamp = torch.clamp(point, min_bound, max_bound)
+            coors = torch.floor((point_clamp - min_bound) / intervals).int()
+            
             self.get_voxel_seg(coors, data_sample)
             data_sample.point_coors = coors
 
@@ -62,10 +74,14 @@ class TPVFormerDataPreprocessor(Det3DDataPreprocessor):
             data_sample.point2voxel_map = point2voxel_map
             data_sample.voxel_coors = voxel_coors
         else:
+            # In evaluation mode, we still need voxel_coors for point-wise prediction
+            # This matches the original TPVFormer eval.py behavior
             pseudo_tensor = res_coors.new_ones([res_coors.shape[0], 1]).float()
-            _, _, point2voxel_map = dynamic_scatter_3d(pseudo_tensor,
+            _, voxel_coors, point2voxel_map = dynamic_scatter_3d(pseudo_tensor,
                                                        res_coors, 'mean', True)
             data_sample.point2voxel_map = point2voxel_map
+            # Store voxel_coors for evaluation (critical for point-wise prediction)
+            data_sample.voxel_coors = voxel_coors
 
 
 @MODELS.register_module()
