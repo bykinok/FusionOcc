@@ -1,0 +1,36 @@
+Collections:
+  - Name: TEOcc
+    Metadata:
+      Training Data: nuScenes
+      Training Techniques:
+        - RadarOcc
+        - BEVStereo
+        - 4D Occupancy Prediction
+      Training Resources: 8x A100 GPUs
+      Architecture:
+        - BEVStereo4DOCCRC
+        - Radar-Camera Fusion
+        - 3D Occupancy Prediction
+    Paper:
+      URL: https://arxiv.org/abs/2309.08693
+      Title: 'TEOcc: Temporal-Efficient Occupancy Prediction via Radar-Camera Fusion'
+    README: projects/TEOcc/README.md
+    Code:
+      URL: https://github.com/VDIGPKU/TEOcc
+      Version: v1.0.0
+
+Models:
+  - Name: teocc_rc
+    In Collection: TEOcc
+    Config: projects/TEOcc/configs/teocc_rc.py
+    Metadata:
+      Training Data: nuScenes
+      Training Memory (GB): 32
+      epochs: 12
+      batch_size: 8
+    Results:
+      - Task: 3D Object Detection
+        Dataset: nuScenes
+        Metrics:
+          mIoU: 17.5
+    Weights: https://huggingface.co/example/teocc_weights.pth

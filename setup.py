@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 import os
 import platform
 import shutil
@@ -6,15 +7,20 @@ import warnings
 from os import path as osp
 from setuptools import find_packages, setup
 
-import torch
-from torch.utils.cpp_extension import (BuildExtension, CppExtension,
-                                       CUDAExtension)
+try:
+    import torch
+    from torch.utils.cpp_extension import (BuildExtension, CppExtension,
+                                           CUDAExtension)
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    print("Warning: PyTorch not available, skipping CUDA extensions")
 
 
-# def readme():
-#     with open('README.md', encoding='utf-8') as f:
-#         content = f.read()
-#     return content
+def readme():
+    with open('README.md', encoding='utf-8') as f:
+        content = f.read()
+    return content
 
 
 version_file = 'mmdet3d/version.py'
@@ -23,13 +29,7 @@ version_file = 'mmdet3d/version.py'
 def get_version():
     with open(version_file, 'r') as f:
         exec(compile(f.read(), version_file, 'exec'))
-    import sys
-
-    # return short version for sdist
-    if 'sdist' in sys.argv or 'bdist_wheel' in sys.argv:
-        return locals()['short_version']
-    else:
-        return locals()['__version__']
+    return locals()['__version__']
 
 
 def make_cuda_ext(name,
@@ -38,6 +38,10 @@ def make_cuda_ext(name,
                   sources_cuda=[],
                   extra_args=[],
                   extra_include_path=[]):
+
+    if not TORCH_AVAILABLE:
+        print('PyTorch not available, skipping CUDA extension: {}'.format(name))
+        return None
 
     define_macros = []
     extra_compile_args = {'cxx': [] + extra_args}
@@ -140,7 +144,7 @@ def parse_requirements(fname='requirements.txt', with_version=True):
     return packages
 
 
-def add_mim_extension():
+def add_mim_extention():
     """Add extra files that are required to support MIM into the package.
 
     These files will be added by creating a symlink to the originals if the
@@ -163,7 +167,9 @@ def add_mim_extension():
     else:
         return
 
-    filenames = ['tools', 'configs', 'model-index.yml']
+    filenames = [
+        'tools', 'configs', 'demo', 'model-index.yml', 'dataset-index.yml'
+    ]
     repo_path = osp.dirname(__file__)
     mim_path = osp.join(repo_path, 'mmdet3d', '.mim')
     os.makedirs(mim_path, exist_ok=True)
@@ -193,28 +199,28 @@ def add_mim_extension():
 
 
 if __name__ == '__main__':
-    add_mim_extension()
+    add_mim_extention()
     setup(
         name='mmdet3d',
         version=get_version(),
         description=("OpenMMLab's next-generation platform"
                      'for general 3D object detection.'),
-        # long_description=readme(),
+        long_description=readme(),
         long_description_content_type='text/markdown',
         author='MMDetection3D Contributors',
         author_email='zwwdev@gmail.com',
         keywords='computer vision, 3D object detection',
         url='https://github.com/open-mmlab/mmdetection3d',
-        packages=find_packages(),
+        packages=find_packages(exclude=('configs', 'tools', 'demo')),
         include_package_data=True,
-        package_data={'mmdet3d.ops': ['*/*.so']},
         classifiers=[
-            'Development Status :: 4 - Beta',
+            'Development Status :: 5 - Production/Stable',
             'License :: OSI Approved :: Apache Software License',
             'Operating System :: OS Independent',
             'Programming Language :: Python :: 3',
-            'Programming Language :: Python :: 3.6',
             'Programming Language :: Python :: 3.7',
+            'Programming Language :: Python :: 3.8',
+            'Programming Language :: Python :: 3.9',
         ],
         license='Apache License 2.0',
         install_requires=parse_requirements('requirements/runtime.txt'),
@@ -225,15 +231,6 @@ if __name__ == '__main__':
             'optional': parse_requirements('requirements/optional.txt'),
             'mim': parse_requirements('requirements/mminstall.txt'),
         },
-        ext_modules=[
-            make_cuda_ext(
-                name='bev_pool_v2_ext',
-                module='mmdet3d.ops.bev_pool_v2',
-                sources=[
-                    'src/bev_pool.cpp',
-                    'src/bev_pool_cuda.cu',
-                ],
-            ),
-        ],
-        cmdclass={'build_ext': BuildExtension},
+        ext_modules=[],
+        cmdclass={'build_ext': BuildExtension} if TORCH_AVAILABLE else {},
         zip_safe=False)

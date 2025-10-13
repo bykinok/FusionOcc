@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  fusionocc:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: fusionocc-dev
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - ..:/workspace/FusionOcc
+      - ~/.cache/pip:/root/.cache/pip
+      - ~/.cache/torch:/root/.cache/torch
+    ports:
+      - "8888:8888"  # Jupyter notebook
+      - "6006:6006"  # TensorBoard
+    working_dir: /workspace/FusionOcc
+    tty: true
+    stdin_open: true
+    command: /bin/bash 

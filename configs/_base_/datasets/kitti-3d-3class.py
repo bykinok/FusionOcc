@@ -4,19 +4,22 @@ data_root = 'data/kitti/'
 class_names = ['Pedestrian', 'Cyclist', 'Car']
 point_cloud_range = [0, -40, -3, 70.4, 40, 1]
 input_modality = dict(use_lidar=True, use_camera=False)
+metainfo = dict(classes=class_names)
 
-file_client_args = dict(backend='disk')
-# Uncomment the following if use ceph or other file clients.
-# See https://mmcv.readthedocs.io/en/latest/api.html#mmcv.fileio.FileClient
-# for more details.
-# file_client_args = dict(
+# Example to use different file client
+# Method 1: simply set the data root and let the file I/O module
+# automatically infer from prefix (not support LMDB and Memcache yet)
+
+# data_root = 's3://openmmlab/datasets/detection3d/kitti/'
+
+# Method 2: Use backend_args, file_client_args in versions before 1.1.0
+# backend_args = dict(
 #     backend='petrel',
 #     path_mapping=dict({
-#         './data/kitti/':
-#         's3://openmmlab/datasets/detection3d/kitti/',
-#         'data/kitti/':
-#         's3://openmmlab/datasets/detection3d/kitti/'
-#     }))
+#         './data/': 's3://openmmlab/datasets/detection3d/',
+#          'data/': 's3://openmmlab/datasets/detection3d/'
+#      }))
+backend_args = None
 
 db_sampler = dict(
     data_root=data_root,
@@ -32,21 +35,17 @@ db_sampler = dict(
         coord_type='LIDAR',
         load_dim=4,
         use_dim=4,
-        file_client_args=file_client_args),
-    file_client_args=file_client_args)
+        backend_args=backend_args),
+    backend_args=backend_args)
 
 train_pipeline = [
     dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',
-        load_dim=4,
+        load_dim=4,  # x, y, z, intensity
         use_dim=4,
-        file_client_args=file_client_args),
-    dict(
-        type='LoadAnnotations3D',
-        with_bbox_3d=True,
-        with_label_3d=True,
-        file_client_args=file_client_args),
+        backend_args=backend_args),
+    dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True),
     dict(type='ObjectSample', db_sampler=db_sampler),
     dict(
         type='ObjectNoise',
@@ -62,8 +61,9 @@ train_pipeline = [
     dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='PointShuffle'),
-    dict(type='DefaultFormatBundle3D', class_names=class_names),
-    dict(type='Collect3D', keys=['points', 'gt_bboxes_3d', 'gt_labels_3d'])
+    dict(
+        type='Pack3DDetInputs',
+        keys=['points', 'gt_bboxes_3d', 'gt_labels_3d'])
 ]
 test_pipeline = [
     dict(
@@ -71,7 +71,7 @@ test_pipeline = [
         coord_type='LIDAR',
         load_dim=4,
         use_dim=4,
-        file_client_args=file_client_args),
+        backend_args=backend_args),
     dict(
         type='MultiScaleFlipAug3D',
         img_scale=(1333, 800),
@@ -85,13 +85,9 @@ test_pipeline = [
                 translation_std=[0, 0, 0]),
             dict(type='RandomFlip3D'),
             dict(
-                type='PointsRangeFilter', point_cloud_range=point_cloud_range),
-            dict(
-                type='DefaultFormatBundle3D',
-                class_names=class_names,
-                with_label=False),
-            dict(type='Collect3D', keys=['points'])
-        ])
+                type='PointsRangeFilter', point_cloud_range=point_cloud_range)
+        ]),
+    dict(type='Pack3DDetInputs', keys=['points'])
 ]
 # construct a pipeline for data and gt loading in show function
 # please keep its loading function consistent with test_pipeline (e.g. client)
@@ -101,57 +97,71 @@ eval_pipeline = [
         coord_type='LIDAR',
         load_dim=4,
         use_dim=4,
-        file_client_args=file_client_args),
-    dict(
-        type='DefaultFormatBundle3D',
-        class_names=class_names,
-        with_label=False),
-    dict(type='Collect3D', keys=['points'])
+        backend_args=backend_args),
+    dict(type='Pack3DDetInputs', keys=['points'])
 ]
-
-data = dict(
-    samples_per_gpu=6,
-    workers_per_gpu=4,
-    train=dict(
+train_dataloader = dict(
+    batch_size=6,
+    num_workers=4,
+    persistent_workers=True,
+    sampler=dict(type='DefaultSampler', shuffle=True),
+    dataset=dict(
         type='RepeatDataset',
         times=2,
         dataset=dict(
             type=dataset_type,
             data_root=data_root,
-            ann_file=data_root + 'kitti_infos_train.pkl',
-            split='training',
-            pts_prefix='velodyne_reduced',
+            ann_file='kitti_infos_train.pkl',
+            data_prefix=dict(pts='training/velodyne_reduced'),
             pipeline=train_pipeline,
             modality=input_modality,
-            classes=class_names,
             test_mode=False,
+            metainfo=metainfo,
             # we use box_type_3d='LiDAR' in kitti and nuscenes dataset
             # and box_type_3d='Depth' in sunrgbd and scannet dataset.
             box_type_3d='LiDAR',
-            file_client_args=file_client_args)),
-    val=dict(
+            backend_args=backend_args)))
+val_dataloader = dict(
+    batch_size=1,
+    num_workers=1,
+    persistent_workers=True,
+    drop_last=False,
+    sampler=dict(type='DefaultSampler', shuffle=False),
+    dataset=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file=data_root + 'kitti_infos_val.pkl',
-        split='training',
-        pts_prefix='velodyne_reduced',
+        data_prefix=dict(pts='training/velodyne_reduced'),
+        ann_file='kitti_infos_val.pkl',
         pipeline=test_pipeline,
         modality=input_modality,
-        classes=class_names,
         test_mode=True,
+        metainfo=metainfo,
         box_type_3d='LiDAR',
-        file_client_args=file_client_args),
-    test=dict(
+        backend_args=backend_args))
+test_dataloader = dict(
+    batch_size=1,
+    num_workers=1,
+    persistent_workers=True,
+    drop_last=False,
+    sampler=dict(type='DefaultSampler', shuffle=False),
+    dataset=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file=data_root + 'kitti_infos_val.pkl',
-        split='training',
-        pts_prefix='velodyne_reduced',
+        data_prefix=dict(pts='training/velodyne_reduced'),
+        ann_file='kitti_infos_val.pkl',
         pipeline=test_pipeline,
         modality=input_modality,
-        classes=class_names,
         test_mode=True,
+        metainfo=metainfo,
         box_type_3d='LiDAR',
-        file_client_args=file_client_args))
+        backend_args=backend_args))
+val_evaluator = dict(
+    type='KittiMetric',
+    ann_file=data_root + 'kitti_infos_val.pkl',
+    metric='bbox',
+    backend_args=backend_args)
+test_evaluator = val_evaluator
 
-evaluation = dict(interval=1, pipeline=eval_pipeline)
+vis_backends = [dict(type='LocalVisBackend')]
+visualizer = dict(
+    type='Det3DLocalVisualizer', vis_backends=vis_backends, name='visualizer')

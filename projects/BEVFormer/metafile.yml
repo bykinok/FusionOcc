@@ -1,0 +1,29 @@
+Collections:
+  - Name: BEVFormer
+    Metadata:
+      Training Data: nuScenes
+      Training Techniques:
+        - AdamW
+      Training Resources: 8x V100 GPUs
+      Architecture:
+        - Transformer
+        - BEV
+        - Multi-Camera
+    Paper:
+      URL: https://arxiv.org/abs/2203.17270
+      Title: 'BEVFormer: Learning Bird''s-Eye-View Representation from Multi-Camera Images via Spatiotemporal Transformers'
+    README: projects/BEVFormer/README.md
+
+Models:
+  - Name: bevformer_base_occ
+    In Collection: BEVFormer
+    Config: projects/BEVFormer/configs/bevformer_base_occ.py
+    Metadata:
+      Training Memory (GB): 24.0
+      Training Data: nuScenes
+    Results:
+      - Task: 3D Occupancy Prediction
+        Dataset: nuScenes Occupancy
+        Metrics:
+          mIoU: 41.8
+    Weights: https://download.openmmlab.com/mmdetection3d/v1.0.0_models/bevformer/bevformer_r101_dcn_24ep.pth
