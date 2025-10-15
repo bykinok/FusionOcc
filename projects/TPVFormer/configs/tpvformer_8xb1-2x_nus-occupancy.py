@@ -10,7 +10,7 @@ ce_input = 'voxel'
 
 dataset_params = dict(
     version = "v1.0-trainval",
-    ignore_label = 0,
+    ignore_label = 17,  # 17 classes (0-16), so ignore_label should be 17
     fill_label = 17,
     fixed_volume_space = True,
     label_mapping = "./config/label_mapping/nuscenes-noIgnore.yaml",
@@ -105,7 +105,7 @@ val_pipeline = [
 test_pipeline = val_pipeline
 
 train_dataloader = dict(
-    batch_size=1,
+    batch_size=2,  # DDP 환경: 총 batch_size 4 = 2 GPU x 2
     num_workers=4,
     persistent_workers=True,
     drop_last=True,
@@ -230,7 +230,7 @@ model = dict(
         )),
     use_grid_mask=True,
     # Loss configuration (following original TPVFormer)
-    ignore_label=0,
+    ignore_label=17,  # 17 classes (0-16), ignore label is 17
     lovasz_input=lovasz_input,  # 'voxel' or 'points'
     ce_input=ce_input,  # 'voxel' or 'points'
     tpv_aggregator = dict(

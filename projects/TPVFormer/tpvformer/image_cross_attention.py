@@ -130,18 +130,23 @@ class TPVImageCrossAttention(BaseModule):
 
             reference_points_cam = reference_points_cams[tpv_idx]
             D = reference_points_cam.size(3)
+            
+            # 두 배치 크기 중 최소값 사용 (안전성 보장)
+            bs_ref = reference_points_cam.size(1)
+            bs_query = queries[tpv_idx].size(0)
+            bs_actual = min(bs_ref, bs_query)
 
             queries_rebatch = queries[tpv_idx].new_zeros(
-                [bs * self.num_cams, max_len, self.embed_dims])
+                [bs_actual * self.num_cams, max_len, self.embed_dims])
             reference_points_rebatch = reference_points_cam.new_zeros(
-                [bs * self.num_cams, max_len, D, 2])
+                [bs_actual * self.num_cams, max_len, D, 2])
 
             for i, reference_points_per_img in enumerate(reference_points_cam):
-                for j in range(bs):
+                for j in range(bs_actual):
                     index_query_per_img = indexes[i]
                     queries_rebatch[j * self.num_cams +
-                                    i, :len(index_query_per_img)] = queries[
-                                        tpv_idx][j, index_query_per_img]
+                                    i, :len(index_query_per_img)] = queries[tpv_idx][
+                                        j, index_query_per_img]
                     reference_points_rebatch[j * self.num_cams + i, :len(
                         index_query_per_img)] = reference_points_per_img[
                             j, index_query_per_img]
@@ -149,11 +154,20 @@ class TPVImageCrossAttention(BaseModule):
             queries_rebatches.append(queries_rebatch)
             reference_points_rebatches.append(reference_points_rebatch)
 
-        num_cams, l, bs, embed_dims = key.shape
-
-        key = key.permute(0, 2, 1, 3).view(self.num_cams * bs, l,
+        num_cams, l, bs_key, embed_dims = key.shape
+        
+        # 모든 배치 크기가 일치하는지 확인
+        # queries_rebatches의 실제 배치 크기 확인
+        bs_from_queries = queries_rebatches[0].size(0) // self.num_cams if queries_rebatches else bs_key
+        bs_actual = min(bs_key, bs_from_queries)
+        
+        # key와 value를 실제 배치 크기로 슬라이싱
+        key = key[:, :, :bs_actual, :]
+        value = value[:, :, :bs_actual, :]
+        
+        key = key.permute(0, 2, 1, 3).view(self.num_cams * bs_actual, l,
                                            self.embed_dims)
-        value = value.permute(0, 2, 1, 3).view(self.num_cams * bs, l,
+        value = value.permute(0, 2, 1, 3).view(self.num_cams * bs_actual, l,
                                                self.embed_dims)
 
         queries = self.deformable_attention(
@@ -166,15 +180,23 @@ class TPVImageCrossAttention(BaseModule):
         )
 
         for tpv_idx, indexes in enumerate(indexeses):
+            # DDP 환경: 실제 처리된 배치 크기 사용
+            bs_actual = queries[tpv_idx].size(0) // self.num_cams
+            
             for i, index_query_per_img in enumerate(indexes):
-                for j in range(bs):
-                    slots[tpv_idx][j, index_query_per_img] += queries[tpv_idx][
-                        j * self.num_cams + i, :len(index_query_per_img)]
+                for j in range(bs_actual):
+                    # slots의 실제 배치 크기 확인하여 안전하게 접근
+                    if j < slots[tpv_idx].size(0):
+                        slots[tpv_idx][j, index_query_per_img] += queries[tpv_idx][
+                            j * self.num_cams + i, :len(index_query_per_img)]
 
             count = tpv_masks[tpv_idx].sum(-1) > 0
             count = count.permute(1, 2, 0).sum(-1)
+            # count의 실제 크기 확인
+            count = count[:slots[tpv_idx].size(0)]
             count = torch.clamp(count, min=1.0)
             slots[tpv_idx] = slots[tpv_idx] / count[..., None]
+        
         slots = torch.cat(slots, dim=1)
         slots = self.output_proj(slots)
 

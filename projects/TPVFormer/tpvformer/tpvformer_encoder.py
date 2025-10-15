@@ -240,6 +240,11 @@ class TPVFormerEncoder(TransformerLayerSequence):
         reference_points = reference_points.permute(1, 0, 2, 3)
         D, B, num_query = reference_points.size()[:3]
         num_cam = lidar2img.size(1)
+        
+        # lidar2img의 배치 크기를 reference_points에 맞춤 (DDP 환경 대응)
+        # lidar2img: [B_lidar, num_cam, 4, 4] -> [B, num_cam, 4, 4]로 슬라이스
+        if lidar2img.size(0) != B:
+            lidar2img = lidar2img[:B]
 
         reference_points = reference_points.view(D, B, 1, num_query, 4).repeat(
             1, 1, num_cam, 1, 1).unsqueeze(-1)

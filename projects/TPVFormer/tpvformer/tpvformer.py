@@ -193,13 +193,25 @@ class TPVFormer(Base3DSegmentor):
                     sample_voxel_coords = sample_voxel_coords.float().to(img_feats[0].device)
                     voxel_coords_list.append(sample_voxel_coords)
             
-            # Stack all samples into batch tensors
-            voxel_coords = torch.stack(voxel_coords_list, dim=0) if voxel_coords_list else None  # (B, N, 3)
-            voxel_labels = torch.stack(voxel_labels_list, dim=0) if voxel_labels_list else None  # (B, W, H, Z)
-            point_labels = torch.stack(point_labels_list, dim=0) if point_labels_list else None  # (B, N)
+            # Keep as lists since each sample has different number of voxels (sparse)
+            voxel_coords = voxel_coords_list if voxel_coords_list else None  # List of (N_i, 3)
+            voxel_labels = voxel_labels_list if voxel_labels_list else None  # List of (N_i,) or (W, H, Z)
+            point_labels = point_labels_list if point_labels_list else None  # List of (N_i,)
+            
+            # Pad voxel_coords to tensor for tpv_aggregator
+            # tpv_aggregator expects (B, N, 3) tensor
+            voxel_coords_padded = None
+            if voxel_coords is not None and len(voxel_coords) > 0:
+                max_points = max(coords.size(0) for coords in voxel_coords)
+                B = len(voxel_coords)
+                voxel_coords_padded = torch.zeros(B, max_points, 3, 
+                                                   device=voxel_coords[0].device,
+                                                   dtype=voxel_coords[0].dtype)
+                for i, coords in enumerate(voxel_coords):
+                    voxel_coords_padded[i, :coords.size(0)] = coords
             
             # Forward through aggregator (returns voxel and point predictions)
-            outputs = self.tpv_aggregator(tpv_queries, voxel_coords)
+            outputs = self.tpv_aggregator(tpv_queries, voxel_coords_padded)
             
             if isinstance(outputs, tuple):
                 outputs_vox, outputs_pts = outputs
@@ -212,18 +224,18 @@ class TPVFormer(Base3DSegmentor):
             total_loss = 0.0
             
             # Debug: print shapes (first iteration only)
-            if not hasattr(self, '_debug_printed'):
-                print(f"[DEBUG LOSS] outputs_vox shape: {outputs_vox.shape if outputs_vox is not None else None}")
-                print(f"[DEBUG LOSS] outputs_pts shape: {outputs_pts.shape if outputs_pts is not None else None}")
-                print(f"[DEBUG LOSS] voxel_labels shape: {voxel_labels.shape if voxel_labels is not None else None}")
-                print(f"[DEBUG LOSS] point_labels shape: {point_labels.shape if point_labels is not None else None}")
-                if point_labels is not None:
-                    print(f"[DEBUG LOSS] point_labels unique: {torch.unique(point_labels)}")
-                    print(f"[DEBUG LOSS] point_labels min/max: {point_labels.min()}/{point_labels.max()}")
-                print(f"[DEBUG LOSS] voxel_coords shape: {voxel_coords.shape if voxel_coords is not None else None}")
-                print(f"[DEBUG LOSS] lovasz_input: {self.lovasz_input}, ce_input: {self.ce_input}")
-                print(f"[DEBUG LOSS] ignore_label: {self.ignore_label}")
-                self._debug_printed = True
+            # if not hasattr(self, '_debug_printed'):
+            #     print(f"[DEBUG LOSS] outputs_vox shape: {outputs_vox.shape if outputs_vox is not None else None}")
+            #     print(f"[DEBUG LOSS] outputs_pts shape: {outputs_pts.shape if outputs_pts is not None else None}")
+            #     print(f"[DEBUG LOSS] voxel_labels: {type(voxel_labels)}, len: {len(voxel_labels) if isinstance(voxel_labels, list) else 'N/A'}")
+            #     print(f"[DEBUG LOSS] point_labels: {type(point_labels)}, len: {len(point_labels) if isinstance(point_labels, list) else 'N/A'}")
+            #     if point_labels is not None and isinstance(point_labels, list) and len(point_labels) > 0:
+            #         print(f"[DEBUG LOSS] point_labels[0] shape: {point_labels[0].shape}")
+            #         print(f"[DEBUG LOSS] point_labels[0] unique: {torch.unique(point_labels[0])}")
+            #     print(f"[DEBUG LOSS] voxel_coords: {type(voxel_coords)}, len: {len(voxel_coords) if isinstance(voxel_coords, list) else 'N/A'}")
+            #     print(f"[DEBUG LOSS] lovasz_input: {self.lovasz_input}, ce_input: {self.ce_input}")
+            #     print(f"[DEBUG LOSS] ignore_label: {self.ignore_label}")
+            #     self._debug_printed = True
             
             # Determine which predictions and labels to use
             # For voxel-based loss: sample from voxel grid at point locations, use point labels
@@ -246,43 +258,33 @@ class TPVFormer(Base3DSegmentor):
             if lovasz_input_tensor is not None and lovasz_label_tensor is not None:
                 if self.lovasz_input == 'voxel' and voxel_coords is not None:
                     # Voxel-based: sample voxel predictions at point locations
-                    # Similar to CE loss
+                    # voxel_coords and lovasz_label_tensor are now lists
                     B, C, W, H, Z = lovasz_input_tensor.shape
-                    voxel_coords_int = voxel_coords.long()
                     
                     # Sample predictions at point locations
                     lovasz_input_list = []
                     for b in range(B):
-                        coords = voxel_coords_int[b]  # (N, 3)
+                        coords = voxel_coords[b].long()  # List indexing: (N_b, 3)
                         x_idx = coords[:, 0].clamp(0, W-1)
                         y_idx = coords[:, 1].clamp(0, H-1)
                         z_idx = coords[:, 2].clamp(0, Z-1)
                         
-                        # Extract predictions: (C, N)
+                        # Extract predictions: (C, N_b)
                         sampled_preds = lovasz_input_tensor[b, :, x_idx, y_idx, z_idx]
                         lovasz_input_list.append(sampled_preds)
                     
-                    # Stack for lovasz: (B, C, N)
-                    lovasz_input_sampled = torch.stack(lovasz_input_list, dim=0)  # (B, C, N)
+                    # Concatenate all samples: [(C, N_0), (C, N_1), ...] -> (C, N_total)
+                    lovasz_input_concat = torch.cat(lovasz_input_list, dim=1)  # (C, N_total)
                     
-                    # Label should be (B, N) after batch processing fix
-                    lovasz_label_sampled = lovasz_label_tensor  # (B, N)
+                    # Concatenate labels: [(N_0,), (N_1,), ...] -> (N_total,)
+                    lovasz_label_concat = torch.cat(lovasz_label_tensor, dim=0)  # (N_total,)
                     
-                    lovasz_probas = F.softmax(lovasz_input_sampled, dim=1)
+                    # Reshape to 4D for lovasz_softmax: (C, N_total) -> (1, C, N_total, 1)
+                    lovasz_input_4d = lovasz_input_concat.unsqueeze(0).unsqueeze(-1)  # (1, C, N_total, 1)
+                    lovasz_label_2d = lovasz_label_concat.unsqueeze(0)  # (1, N_total)
                     
-                    # Reshape to 4D for lovasz_softmax: (B, C, N) -> (B, C, N, 1)
-                    # This prevents flatten_probas from treating it as sigmoid output
-                    lovasz_probas_4d = lovasz_probas.unsqueeze(-1)  # (B, C, N, 1)
-                    lovasz_label_2d = lovasz_label_sampled  # (B, N)
-                    
-                    # Debug output
-                    # if not hasattr(self, '_debug_lovasz'):
-                    #     print(f"[DEBUG LOVASZ] lovasz_probas_4d shape: {lovasz_probas_4d.shape}")
-                    #     print(f"[DEBUG LOVASZ] lovasz_label_2d shape: {lovasz_label_2d.shape}")
-                    #     print(f"[DEBUG LOVASZ] Unique labels in sample: {torch.unique(lovasz_label_2d)}")
-                    #     print(f"[DEBUG LOVASZ] Label counts: {[(i, (lovasz_label_2d==i).sum().item()) for i in torch.unique(lovasz_label_2d)[:10]]}")
-                    #     print(f"[DEBUG LOVASZ] ignore_label: {self.ignore_label}")
-                    #     self._debug_lovasz = True
+                    # Apply softmax before lovasz_softmax
+                    lovasz_probas_4d = F.softmax(lovasz_input_4d, dim=1)  # (1, C, N_total, 1)
                     
                     lovasz_loss = lovasz_softmax(lovasz_probas_4d, lovasz_label_2d, ignore=self.ignore_label)
                     
@@ -291,9 +293,21 @@ class TPVFormer(Base3DSegmentor):
                     #     self._debug_lovasz_loss = True
                 else:
                     # Point-based: (B, C, N, 1, 1) -> (B, C, N)
-                    lovasz_input_flat = lovasz_input_tensor.squeeze(-1).squeeze(-1)
-                    lovasz_probas = F.softmax(lovasz_input_flat, dim=1)
-                    lovasz_loss = lovasz_softmax(lovasz_probas, lovasz_label_tensor, ignore=self.ignore_label)
+                    # lovasz_label_tensor is a list, concatenate it
+                    lovasz_input_flat = lovasz_input_tensor.squeeze(-1).squeeze(-1)  # (B, C, N)
+                    B, C, N = lovasz_input_flat.shape
+                    
+                    # Concatenate labels across batch
+                    lovasz_label_concat = torch.cat(lovasz_label_tensor, dim=0)  # (B*N,)
+                    
+                    # Reshape input: (B, C, N) -> (1, C, B*N, 1) for lovasz_softmax
+                    lovasz_input_4d = lovasz_input_flat.reshape(1, C, -1, 1)  # (1, C, B*N, 1)
+                    lovasz_label_2d = lovasz_label_concat.unsqueeze(0)  # (1, B*N)
+                    
+                    # Apply softmax before lovasz_softmax
+                    lovasz_probas_4d = F.softmax(lovasz_input_4d, dim=1)  # (1, C, B*N, 1)
+                    
+                    lovasz_loss = lovasz_softmax(lovasz_probas_4d, lovasz_label_2d, ignore=self.ignore_label)
                 
                 losses['loss_lovasz'] = lovasz_loss
                 total_loss += lovasz_loss
@@ -302,37 +316,32 @@ class TPVFormer(Base3DSegmentor):
             if ce_input_tensor is not None and ce_label_tensor is not None:
                 if self.ce_input == 'voxel' and voxel_coords is not None:
                     # Voxel-based: sample voxel predictions at point locations
-                    # Following original train.py approach
+                    # voxel_coords and ce_label_tensor are now lists
                     B, C, W, H, Z = ce_input_tensor.shape
                     
-                    # voxel_coords: (B, N, 3) with values in [0, grid_size-1]
-                    # ce_input_tensor: (B, C, W, H, Z)
-                    # Extract predictions at point locations
-                    voxel_coords_int = voxel_coords.long()  # (B, N, 3)
-                    
                     # Index into voxel grid: for each batch, extract predictions at point locations
-                    # ce_input_tensor[b, :, x, y, z] for each point (x,y,z)
                     ce_input_list = []
                     for b in range(B):
-                        # Get coordinates for this batch
-                        coords = voxel_coords_int[b]  # (N, 3)
+                        # Get coordinates for this batch (list indexing)
+                        coords = voxel_coords[b].long()  # (N_b, 3)
                         x_idx = coords[:, 0].clamp(0, W-1)
                         y_idx = coords[:, 1].clamp(0, H-1)
                         z_idx = coords[:, 2].clamp(0, Z-1)
                         
-                        # Extract predictions at these locations: (C, N)
-                        sampled_preds = ce_input_tensor[b, :, x_idx, y_idx, z_idx]  # (C, N)
-                        ce_input_list.append(sampled_preds.permute(1, 0))  # (N, C)
+                        # Extract predictions at these locations: (C, N_b)
+                        sampled_preds = ce_input_tensor[b, :, x_idx, y_idx, z_idx]  # (C, N_b)
+                        ce_input_list.append(sampled_preds.permute(1, 0))  # (N_b, C)
                     
-                    ce_input_flat = torch.cat(ce_input_list, dim=0)  # (B*N, C)
+                    ce_input_flat = torch.cat(ce_input_list, dim=0)  # (N_total, C)
                     
-                    # Label should be (B, N) after batch processing fix, flatten to (B*N)
-                    ce_label_flat = ce_label_tensor.view(-1)
+                    # Concatenate labels: [(N_0,), (N_1,), ...] -> (N_total,)
+                    ce_label_flat = torch.cat(ce_label_tensor, dim=0)
                 else:
-                    # Point-based: (B, C, N, 1, 1) -> (B*N, C) and (B*N,)
+                    # Point-based: (B, C, N, 1, 1) -> (N_total, C) and (N_total,)
+                    # ce_label_tensor is a list, concatenate it
                     ce_input_flat = ce_input_tensor.squeeze(-1).squeeze(-1)  # (B, C, N)
-                    ce_input_flat = ce_input_flat.permute(0, 2, 1).contiguous().view(-1, ce_input_flat.size(1))
-                    ce_label_flat = ce_label_tensor.view(-1)
+                    ce_input_flat = ce_input_flat.permute(0, 2, 1).contiguous().view(-1, ce_input_flat.size(1))  # (B*N, C)
+                    ce_label_flat = torch.cat(ce_label_tensor, dim=0)  # (N_total,)
                 
                 ce_loss = self.ce_loss_func(ce_input_flat, ce_label_flat)
                 losses['loss_ce'] = ce_loss
