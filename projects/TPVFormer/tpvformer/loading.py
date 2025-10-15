@@ -45,14 +45,19 @@ class SegLabelMapping(BaseTransform):
                 print(f"Warning: Error loading label mapping file: {e}. Using default NuScenes mapping.")
                 self.learning_map = self._get_default_nuscenes_mapping()
         else:
-            # Use default NuScenes occupancy mapping (32 classes -> 17 classes)
+            # Use default NuScenes occupancy mapping (33 lidarseg classes [0-32] -> 18 occupancy classes [0-17])
             self.learning_map = self._get_default_nuscenes_mapping()
     
     def _get_default_nuscenes_mapping(self):
         """Get default NuScenes lidarseg to occupancy mapping.
         
-        Maps NuScenes lidarseg labels (0-31) to 16 occupancy classes (0-16).
-        Based on TPVFormer_ori/config/label_mapping/nuscenes.yaml
+        Maps NuScenes lidarseg labels (0-32) to 18 occupancy classes (0-17).
+        Based on TPVFormer_ori/config/label_mapping/nuscenes-noIgnore.yaml
+        
+        Class mapping:
+        - Class 0: noise (ignore during training/evaluation)
+        - Class 1-16: actual occupancy classes (evaluated)
+        - Class 17: empty (used for filling, not evaluated)
         """
         return {
             1: 0, 5: 0, 7: 0, 8: 0, 10: 0, 11: 0, 13: 0, 19: 0, 20: 0, 0: 0, 29: 0, 31: 0,  # noise/ignore -> 0
@@ -72,6 +77,7 @@ class SegLabelMapping(BaseTransform):
             27: 14,    # terrain -> 14
             28: 15,    # manmade -> 15
             30: 16,    # vegetation -> 16
+            32: 17,    # empty -> 17 ✅ 추가 (원본과 동일)
         }
     
     def transform(self, results: dict) -> dict:

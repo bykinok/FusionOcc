@@ -10,8 +10,8 @@ ce_input = 'voxel'
 
 dataset_params = dict(
     version = "v1.0-trainval",
-    ignore_label = 17,  # 17 classes (0-16), so ignore_label should be 17
-    fill_label = 17,
+    ignore_label = 0,  # ✅ Class 0 (noise/background) ignore (원본과 동일)
+    fill_label = 17,   # ✅ Class 17 (empty)로 빈 voxel 채우기 (원본과 동일)
     fixed_volume_space = True,
     label_mapping = "./config/label_mapping/nuscenes-noIgnore.yaml",
     max_volume_space = [51.2, 51.2, 3],
@@ -52,6 +52,13 @@ train_pipeline = [
         with_seg_3d=True,
         with_attr_label=False,
         seg_3d_dtype='np.uint8'),
+    # ✅ 원본과 동일한 PhotoMetric Augmentation 추가 (train only)
+    dict(
+        type='PhotoMetricDistortionMultiViewImage',
+        brightness_delta=32,
+        contrast_range=(0.5, 1.5),
+        saturation_range=(0.5, 1.5),
+        hue_delta=18),
     # 원본과 동일한 정규화 값 적용
     dict(
         type='MultiViewImageNormalize',
@@ -105,7 +112,7 @@ val_pipeline = [
 test_pipeline = val_pipeline
 
 train_dataloader = dict(
-    batch_size=2,  # DDP 환경: 총 batch_size 4 = 2 GPU x 2
+    batch_size=1,  # ✅ 원본과 동일하게 batch_size=1 per GPU
     num_workers=4,
     persistent_workers=True,
     drop_last=True,
@@ -151,8 +158,8 @@ test_dataloader = dict(
 
 val_evaluator = dict(
     type='OccupancyMetric', 
-    class_indices=list(range(18)),  # 18 classes (0-17)
-    ignore_label=0)  # Background/empty class
+    class_indices=list(range(1, 17)),  # ✅ 1-16 classes만 평가 (원본과 동일)
+    ignore_label=0)  # ✅ Class 0 (noise) ignore
 
 test_evaluator = val_evaluator
 
@@ -185,6 +192,12 @@ val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
 default_hooks = dict(checkpoint=dict(type='CheckpointHook', interval=1))
+
+# Reproducibility settings (for consistent results across runs)
+randomness = dict(seed=0, deterministic=False, diff_rank_seed=False)
+
+# DDP settings (following original TPVFormer)
+find_unused_parameters = False
 
 # Load pretrained backbone weights (following original TPVFormer)
 # Only load img_backbone weights, ignore other keys
@@ -230,7 +243,7 @@ model = dict(
         )),
     use_grid_mask=True,
     # Loss configuration (following original TPVFormer)
-    ignore_label=17,  # 17 classes (0-16), ignore label is 17
+    ignore_label=0,  # ✅ Class 0 (noise/background) ignore (원본과 동일)
     lovasz_input=lovasz_input,  # 'voxel' or 'points'
     ce_input=ce_input,  # 'voxel' or 'points'
     tpv_aggregator = dict(
