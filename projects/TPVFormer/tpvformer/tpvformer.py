@@ -153,44 +153,50 @@ class TPVFormer(Base3DSegmentor):
             point_labels = None
             
             # Extract ground truth from batch_data_samples
-            if len(batch_data_samples) > 0:
-                data_sample = batch_data_samples[0]
-                
+            # Process all samples in the batch
+            voxel_coords_list = []
+            voxel_labels_list = []
+            point_labels_list = []
+            
+            for data_sample in batch_data_samples:
                 # Get voxel coordinates (for point-wise prediction)
+                sample_voxel_coords = None
                 if hasattr(data_sample, 'point_coors'):
-                    voxel_coords = data_sample.point_coors.float()
+                    sample_voxel_coords = data_sample.point_coors.float()
                 elif hasattr(data_sample, 'gt_pts_seg') and hasattr(data_sample.gt_pts_seg, 'point_coors'):
-                    voxel_coords = data_sample.gt_pts_seg.point_coors.float()
+                    sample_voxel_coords = data_sample.gt_pts_seg.point_coors.float()
                 
                 # Get ground truth labels
                 if hasattr(data_sample, 'gt_pts_seg'):
                     gt_pts_seg = data_sample.gt_pts_seg
+                    
                     # Voxel-level labels
                     if hasattr(gt_pts_seg, 'voxel_semantic_mask'):
-                        voxel_labels = gt_pts_seg.voxel_semantic_mask
-                        if not isinstance(voxel_labels, torch.Tensor):
-                            voxel_labels = torch.from_numpy(voxel_labels)
-                        voxel_labels = voxel_labels.long().to(img_feats[0].device)
-                        # Ensure correct shape: (W, H, Z) or (B, W, H, Z)
-                        if voxel_labels.dim() == 3:
-                            voxel_labels = voxel_labels.unsqueeze(0)  # Add batch dimension
+                        sample_voxel_labels = gt_pts_seg.voxel_semantic_mask
+                        if not isinstance(sample_voxel_labels, torch.Tensor):
+                            sample_voxel_labels = torch.from_numpy(sample_voxel_labels)
+                        sample_voxel_labels = sample_voxel_labels.long().to(img_feats[0].device)
+                        voxel_labels_list.append(sample_voxel_labels)
                     
                     # Point-level labels
                     if hasattr(gt_pts_seg, 'pts_semantic_mask'):
-                        point_labels = gt_pts_seg.pts_semantic_mask
-                        if not isinstance(point_labels, torch.Tensor):
-                            point_labels = torch.from_numpy(point_labels)
-                        point_labels = point_labels.long().to(img_feats[0].device)
-                        if point_labels.dim() == 1:
-                            point_labels = point_labels.unsqueeze(0)  # Add batch dimension
+                        sample_point_labels = gt_pts_seg.pts_semantic_mask
+                        if not isinstance(sample_point_labels, torch.Tensor):
+                            sample_point_labels = torch.from_numpy(sample_point_labels)
+                        sample_point_labels = sample_point_labels.long().to(img_feats[0].device)
+                        point_labels_list.append(sample_point_labels)
                 
-                # Move voxel_coords to device and add batch dimension if needed
-                if voxel_coords is not None:
-                    if not isinstance(voxel_coords, torch.Tensor):
-                        voxel_coords = torch.from_numpy(voxel_coords)
-                    voxel_coords = voxel_coords.float().to(img_feats[0].device)
-                    if voxel_coords.dim() == 2:
-                        voxel_coords = voxel_coords.unsqueeze(0)
+                # Add voxel_coords
+                if sample_voxel_coords is not None:
+                    if not isinstance(sample_voxel_coords, torch.Tensor):
+                        sample_voxel_coords = torch.from_numpy(sample_voxel_coords)
+                    sample_voxel_coords = sample_voxel_coords.float().to(img_feats[0].device)
+                    voxel_coords_list.append(sample_voxel_coords)
+            
+            # Stack all samples into batch tensors
+            voxel_coords = torch.stack(voxel_coords_list, dim=0) if voxel_coords_list else None  # (B, N, 3)
+            voxel_labels = torch.stack(voxel_labels_list, dim=0) if voxel_labels_list else None  # (B, W, H, Z)
+            point_labels = torch.stack(point_labels_list, dim=0) if point_labels_list else None  # (B, N)
             
             # Forward through aggregator (returns voxel and point predictions)
             outputs = self.tpv_aggregator(tpv_queries, voxel_coords)
@@ -259,12 +265,8 @@ class TPVFormer(Base3DSegmentor):
                     # Stack for lovasz: (B, C, N)
                     lovasz_input_sampled = torch.stack(lovasz_input_list, dim=0)  # (B, C, N)
                     
-                    # Handle label shape
-                    if lovasz_label_tensor.dim() == 1:
-                        # If 1D, assume it's for first batch, expand to (B, N)
-                        lovasz_label_sampled = lovasz_label_tensor.unsqueeze(0)  # (1, N)
-                    else:
-                        lovasz_label_sampled = lovasz_label_tensor  # (B, N)
+                    # Label should be (B, N) after batch processing fix
+                    lovasz_label_sampled = lovasz_label_tensor  # (B, N)
                     
                     lovasz_probas = F.softmax(lovasz_input_sampled, dim=1)
                     
@@ -324,15 +326,8 @@ class TPVFormer(Base3DSegmentor):
                     
                     ce_input_flat = torch.cat(ce_input_list, dim=0)  # (B*N, C)
                     
-                    # Handle label shape
-                    if ce_label_tensor.dim() == 1:
-                        # If 1D, use as-is (assume it's already flattened for all batches)
-                        ce_label_flat = ce_label_tensor
-                    elif ce_label_tensor.dim() == 2:
-                        # If 2D (B, N), flatten
-                        ce_label_flat = ce_label_tensor.view(-1)
-                    else:
-                        ce_label_flat = ce_label_tensor.view(-1)
+                    # Label should be (B, N) after batch processing fix, flatten to (B*N)
+                    ce_label_flat = ce_label_tensor.view(-1)
                 else:
                     # Point-based: (B, C, N, 1, 1) -> (B*N, C) and (B*N,)
                     ce_input_flat = ce_input_tensor.squeeze(-1).squeeze(-1)  # (B, C, N)
