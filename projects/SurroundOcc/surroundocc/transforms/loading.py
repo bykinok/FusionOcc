@@ -42,10 +42,11 @@ class LoadOccupancy(BaseTransform):
         if 'occ_path' in results:
             occ_path = results['occ_path']
             # Handle relative paths
+            workspace_root = os.getcwd()
             if occ_path.startswith('./data/'):
-                occ_path = occ_path.replace('./data/', '/home/h00323/Projects/occfrmwrk/data/')
+                occ_path = occ_path.replace('./data/', os.path.join(workspace_root, 'data') + '/')
             elif not occ_path.startswith('/'):
-                occ_path = os.path.join('/home/h00323/Projects/occfrmwrk', occ_path)
+                occ_path = os.path.join(workspace_root, occ_path)
                 
             if os.path.exists(occ_path):
                 try:

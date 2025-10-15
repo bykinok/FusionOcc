@@ -261,8 +261,8 @@ class LoadOccupancyAnnotations(BaseTransform):
                                     mask_path = mask_path[2:]  # Remove "./"
                                 
                                 # Construct absolute path from workspace root
-                                workspace_root = '/home/h00323/Projects/occfrmwrk/'
-                                full_path = f"{workspace_root}{mask_path}"
+                                workspace_root = os.getcwd()
+                                full_path = os.path.join(workspace_root, mask_path)
                                 # print(f"[DEBUG LoadOccupancy] Trying full path: {full_path}")
                                 if os.path.exists(full_path):
                                     pts_semantic_mask = np.fromfile(full_path, dtype=np.uint8)

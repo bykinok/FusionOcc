@@ -274,19 +274,19 @@ class TPVFormer(Base3DSegmentor):
                     lovasz_label_2d = lovasz_label_sampled  # (B, N)
                     
                     # Debug output
-                    if not hasattr(self, '_debug_lovasz'):
-                        print(f"[DEBUG LOVASZ] lovasz_probas_4d shape: {lovasz_probas_4d.shape}")
-                        print(f"[DEBUG LOVASZ] lovasz_label_2d shape: {lovasz_label_2d.shape}")
-                        print(f"[DEBUG LOVASZ] Unique labels in sample: {torch.unique(lovasz_label_2d)}")
-                        print(f"[DEBUG LOVASZ] Label counts: {[(i, (lovasz_label_2d==i).sum().item()) for i in torch.unique(lovasz_label_2d)[:10]]}")
-                        print(f"[DEBUG LOVASZ] ignore_label: {self.ignore_label}")
-                        self._debug_lovasz = True
+                    # if not hasattr(self, '_debug_lovasz'):
+                    #     print(f"[DEBUG LOVASZ] lovasz_probas_4d shape: {lovasz_probas_4d.shape}")
+                    #     print(f"[DEBUG LOVASZ] lovasz_label_2d shape: {lovasz_label_2d.shape}")
+                    #     print(f"[DEBUG LOVASZ] Unique labels in sample: {torch.unique(lovasz_label_2d)}")
+                    #     print(f"[DEBUG LOVASZ] Label counts: {[(i, (lovasz_label_2d==i).sum().item()) for i in torch.unique(lovasz_label_2d)[:10]]}")
+                    #     print(f"[DEBUG LOVASZ] ignore_label: {self.ignore_label}")
+                    #     self._debug_lovasz = True
                     
                     lovasz_loss = lovasz_softmax(lovasz_probas_4d, lovasz_label_2d, ignore=self.ignore_label)
                     
-                    if not hasattr(self, '_debug_lovasz_loss'):
-                        print(f"[DEBUG LOVASZ] lovasz_loss: {lovasz_loss.item() if hasattr(lovasz_loss, 'item') else lovasz_loss}")
-                        self._debug_lovasz_loss = True
+                    # if not hasattr(self, '_debug_lovasz_loss'):
+                    #     print(f"[DEBUG LOVASZ] lovasz_loss: {lovasz_loss.item() if hasattr(lovasz_loss, 'item') else lovasz_loss}")
+                    #     self._debug_lovasz_loss = True
                 else:
                     # Point-based: (B, C, N, 1, 1) -> (B, C, N)
                     lovasz_input_flat = lovasz_input_tensor.squeeze(-1).squeeze(-1)
