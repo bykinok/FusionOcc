@@ -254,96 +254,107 @@ class TPVFormer(Base3DSegmentor):
                 ce_input_tensor = outputs_pts
                 ce_label_tensor = point_labels
             
-            # Compute Lovasz loss
+            # Compute Lovasz loss (per-sample averaging for batch_size > 1)
             if lovasz_input_tensor is not None and lovasz_label_tensor is not None:
                 if self.lovasz_input == 'voxel' and voxel_coords is not None:
                     # Voxel-based: sample voxel predictions at point locations
-                    # voxel_coords and lovasz_label_tensor are now lists
+                    # Compute loss for each sample separately, then average
                     B, C, W, H, Z = lovasz_input_tensor.shape
                     
-                    # Sample predictions at point locations
-                    lovasz_input_list = []
+                    lovasz_losses = []
                     for b in range(B):
-                        coords = voxel_coords[b].long()  # List indexing: (N_b, 3)
-                        x_idx = coords[:, 0].clamp(0, W-1)
-                        y_idx = coords[:, 1].clamp(0, H-1)
-                        z_idx = coords[:, 2].clamp(0, Z-1)
-                        
-                        # Extract predictions: (C, N_b)
-                        sampled_preds = lovasz_input_tensor[b, :, x_idx, y_idx, z_idx]
-                        lovasz_input_list.append(sampled_preds)
-                    
-                    # Concatenate all samples: [(C, N_0), (C, N_1), ...] -> (C, N_total)
-                    lovasz_input_concat = torch.cat(lovasz_input_list, dim=1)  # (C, N_total)
-                    
-                    # Concatenate labels: [(N_0,), (N_1,), ...] -> (N_total,)
-                    lovasz_label_concat = torch.cat(lovasz_label_tensor, dim=0)  # (N_total,)
-                    
-                    # Reshape to 4D for lovasz_softmax: (C, N_total) -> (1, C, N_total, 1)
-                    lovasz_input_4d = lovasz_input_concat.unsqueeze(0).unsqueeze(-1)  # (1, C, N_total, 1)
-                    lovasz_label_2d = lovasz_label_concat.unsqueeze(0)  # (1, N_total)
-                    
-                    # Apply softmax before lovasz_softmax
-                    lovasz_probas_4d = F.softmax(lovasz_input_4d, dim=1)  # (1, C, N_total, 1)
-                    
-                    lovasz_loss = lovasz_softmax(lovasz_probas_4d, lovasz_label_2d, ignore=self.ignore_label)
-                    
-                    # if not hasattr(self, '_debug_lovasz_loss'):
-                    #     print(f"[DEBUG LOVASZ] lovasz_loss: {lovasz_loss.item() if hasattr(lovasz_loss, 'item') else lovasz_loss}")
-                    #     self._debug_lovasz_loss = True
-                else:
-                    # Point-based: (B, C, N, 1, 1) -> (B, C, N)
-                    # lovasz_label_tensor is a list, concatenate it
-                    lovasz_input_flat = lovasz_input_tensor.squeeze(-1).squeeze(-1)  # (B, C, N)
-                    B, C, N = lovasz_input_flat.shape
-                    
-                    # Concatenate labels across batch
-                    lovasz_label_concat = torch.cat(lovasz_label_tensor, dim=0)  # (B*N,)
-                    
-                    # Reshape input: (B, C, N) -> (1, C, B*N, 1) for lovasz_softmax
-                    lovasz_input_4d = lovasz_input_flat.reshape(1, C, -1, 1)  # (1, C, B*N, 1)
-                    lovasz_label_2d = lovasz_label_concat.unsqueeze(0)  # (1, B*N)
-                    
-                    # Apply softmax before lovasz_softmax
-                    lovasz_probas_4d = F.softmax(lovasz_input_4d, dim=1)  # (1, C, B*N, 1)
-                    
-                    lovasz_loss = lovasz_softmax(lovasz_probas_4d, lovasz_label_2d, ignore=self.ignore_label)
-                
-                losses['loss_lovasz'] = lovasz_loss
-                total_loss += lovasz_loss
-            
-            # Compute CE loss
-            if ce_input_tensor is not None and ce_label_tensor is not None:
-                if self.ce_input == 'voxel' and voxel_coords is not None:
-                    # Voxel-based: sample voxel predictions at point locations
-                    # voxel_coords and ce_label_tensor are now lists
-                    B, C, W, H, Z = ce_input_tensor.shape
-                    
-                    # Index into voxel grid: for each batch, extract predictions at point locations
-                    ce_input_list = []
-                    for b in range(B):
-                        # Get coordinates for this batch (list indexing)
+                        # Get coordinates and labels for this sample
                         coords = voxel_coords[b].long()  # (N_b, 3)
                         x_idx = coords[:, 0].clamp(0, W-1)
                         y_idx = coords[:, 1].clamp(0, H-1)
                         z_idx = coords[:, 2].clamp(0, Z-1)
                         
-                        # Extract predictions at these locations: (C, N_b)
-                        sampled_preds = ce_input_tensor[b, :, x_idx, y_idx, z_idx]  # (C, N_b)
-                        ce_input_list.append(sampled_preds.permute(1, 0))  # (N_b, C)
+                        # Extract predictions at point locations: (C, N_b)
+                        sampled_preds = lovasz_input_tensor[b, :, x_idx, y_idx, z_idx]
+                        
+                        # Reshape to 4D for lovasz_softmax: (C, N_b) -> (1, C, N_b, 1)
+                        lovasz_input_4d = sampled_preds.unsqueeze(0).unsqueeze(-1)  # (1, C, N_b, 1)
+                        lovasz_label_2d = lovasz_label_tensor[b].unsqueeze(0)  # (1, N_b)
+                        
+                        # Apply softmax before lovasz_softmax
+                        lovasz_probas_4d = F.softmax(lovasz_input_4d, dim=1)  # (1, C, N_b, 1)
+                        
+                        # Compute loss for this sample
+                        lovasz_loss_b = lovasz_softmax(lovasz_probas_4d, lovasz_label_2d, ignore=self.ignore_label)
+                        lovasz_losses.append(lovasz_loss_b)
                     
-                    ce_input_flat = torch.cat(ce_input_list, dim=0)  # (N_total, C)
+                    # Average across samples
+                    lovasz_loss = torch.stack(lovasz_losses).mean()
                     
-                    # Concatenate labels: [(N_0,), (N_1,), ...] -> (N_total,)
-                    ce_label_flat = torch.cat(ce_label_tensor, dim=0)
                 else:
-                    # Point-based: (B, C, N, 1, 1) -> (N_total, C) and (N_total,)
-                    # ce_label_tensor is a list, concatenate it
-                    ce_input_flat = ce_input_tensor.squeeze(-1).squeeze(-1)  # (B, C, N)
-                    ce_input_flat = ce_input_flat.permute(0, 2, 1).contiguous().view(-1, ce_input_flat.size(1))  # (B*N, C)
-                    ce_label_flat = torch.cat(ce_label_tensor, dim=0)  # (N_total,)
+                    # Point-based: compute loss for each sample separately
+                    lovasz_input_flat = lovasz_input_tensor.squeeze(-1).squeeze(-1)  # (B, C, N)
+                    B, C, N = lovasz_input_flat.shape
+                    
+                    lovasz_losses = []
+                    for b in range(B):
+                        # Get predictions and labels for this sample
+                        # Reshape: (C, N) -> (1, C, N, 1) for lovasz_softmax
+                        lovasz_input_4d = lovasz_input_flat[b].unsqueeze(0).unsqueeze(-1)  # (1, C, N, 1)
+                        lovasz_label_2d = lovasz_label_tensor[b].unsqueeze(0)  # (1, N)
+                        
+                        # Apply softmax before lovasz_softmax
+                        lovasz_probas_4d = F.softmax(lovasz_input_4d, dim=1)  # (1, C, N, 1)
+                        
+                        # Compute loss for this sample
+                        lovasz_loss_b = lovasz_softmax(lovasz_probas_4d, lovasz_label_2d, ignore=self.ignore_label)
+                        lovasz_losses.append(lovasz_loss_b)
+                    
+                    # Average across samples
+                    lovasz_loss = torch.stack(lovasz_losses).mean()
                 
-                ce_loss = self.ce_loss_func(ce_input_flat, ce_label_flat)
+                losses['loss_lovasz'] = lovasz_loss
+                total_loss += lovasz_loss
+            
+            # Compute CE loss (per-sample averaging for batch_size > 1)
+            if ce_input_tensor is not None and ce_label_tensor is not None:
+                if self.ce_input == 'voxel' and voxel_coords is not None:
+                    # Voxel-based: sample voxel predictions at point locations
+                    # Compute loss for each sample separately, then average
+                    B, C, W, H, Z = ce_input_tensor.shape
+                    
+                    ce_losses = []
+                    for b in range(B):
+                        # Get coordinates and labels for this sample
+                        coords = voxel_coords[b].long()  # (N_b, 3)
+                        x_idx = coords[:, 0].clamp(0, W-1)
+                        y_idx = coords[:, 1].clamp(0, H-1)
+                        z_idx = coords[:, 2].clamp(0, Z-1)
+                        
+                        # Extract predictions at these locations: (C, N_b) -> (N_b, C)
+                        sampled_preds = ce_input_tensor[b, :, x_idx, y_idx, z_idx].permute(1, 0)  # (N_b, C)
+                        sample_labels = ce_label_tensor[b]  # (N_b,)
+                        
+                        # Compute loss for this sample
+                        ce_loss_b = self.ce_loss_func(sampled_preds, sample_labels)
+                        ce_losses.append(ce_loss_b)
+                    
+                    # Average across samples
+                    ce_loss = torch.stack(ce_losses).mean()
+                    
+                else:
+                    # Point-based: compute loss for each sample separately
+                    ce_input_flat = ce_input_tensor.squeeze(-1).squeeze(-1)  # (B, C, N)
+                    B, C, N = ce_input_flat.shape
+                    
+                    ce_losses = []
+                    for b in range(B):
+                        # Get predictions and labels for this sample
+                        sample_preds = ce_input_flat[b].permute(1, 0)  # (C, N) -> (N, C)
+                        sample_labels = ce_label_tensor[b]  # (N,)
+                        
+                        # Compute loss for this sample
+                        ce_loss_b = self.ce_loss_func(sample_preds, sample_labels)
+                        ce_losses.append(ce_loss_b)
+                    
+                    # Average across samples
+                    ce_loss = torch.stack(ce_losses).mean()
+                
                 losses['loss_ce'] = ce_loss
                 total_loss += ce_loss
             
