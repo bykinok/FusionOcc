@@ -139,7 +139,6 @@ val_dataloader = dict(
         pipeline=val_pipeline,
         test_mode=True))
 
-# TEST: 200 samples only for quick testing
 test_dataloader = dict(
     batch_size=1,
     num_workers=4,
@@ -152,9 +151,7 @@ test_dataloader = dict(
         data_prefix=data_prefix,
         ann_file='occfrmwrk-nuscenes_infos_val.pkl',
         pipeline=val_pipeline,
-        test_mode=True,
-        # Limit to 200 samples for quick testing
-        indices=list(range(200))))
+        test_mode=True))
 
 val_evaluator = dict(
     type='OccupancyMetric', 
