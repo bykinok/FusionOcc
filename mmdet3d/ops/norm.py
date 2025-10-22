@@ -1,10 +1,18 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
-from mmcv.cnn import NORM_LAYERS
-from mmcv.runner import force_fp32
+from mmengine.registry import Registry
 from torch import distributed as dist
 from torch import nn as nn
 from torch.autograd.function import Function
+
+# Create NORM_LAYERS registry for compatibility
+NORM_LAYERS = Registry('norm_layer', locations=['mmdet3d.ops.norm'])
+
+def force_fp32(apply_to=None, out_fp16=False):
+    """Compatibility decorator for force_fp32."""
+    def decorator(func):
+        return func
+    return decorator
 
 
 class AllReduce(Function):

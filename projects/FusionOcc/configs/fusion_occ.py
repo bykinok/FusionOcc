@@ -215,14 +215,14 @@ share_data_config = dict(
 
 test_data_config = dict(
     pipeline=test_pipeline,
-    ann_file='data/nuscenes/fusionocc-nuscenes_infos_val.pkl')
+    ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_val.pkl')
 
 data = dict(
     samples_per_gpu=1,
     workers_per_gpu=4,
     train=dict(
         data_root=data_root,
-        ann_file='data/nuscenes/fusionocc-nuscenes_infos_train.pkl',
+        ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_train.pkl',
         pipeline=train_pipeline,
         classes=class_names,
         test_mode=False,
@@ -265,12 +265,22 @@ param_scheduler = [
 
 # MMEngine Training/Validation/Test Configuration
 train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=24, val_interval=0)
-val_cfg = None
-test_cfg = None
+val_cfg = dict(type='ValLoop')
+test_cfg = dict(type='TestLoop')
 
-# MMEngine Evaluator (disabled for initial training)
-val_evaluator = None
-test_evaluator = None
+# MMEngine Evaluator
+val_evaluator = dict(
+    type='OccupancyMetric',
+    num_classes=num_classes,
+    use_lidar_mask=False,
+    use_image_mask=use_mask
+)
+test_evaluator = dict(
+    type='OccupancyMetric',
+    num_classes=num_classes,
+    use_lidar_mask=False,
+    use_image_mask=use_mask
+)
 
 # MMEngine DataLoader Configuration
 train_dataloader = dict(
@@ -281,7 +291,7 @@ train_dataloader = dict(
     dataset=dict(
         type=dataset_type,
         data_root='',
-        ann_file='data/nuscenes/fusionocc-nuscenes_infos_train.pkl',
+        ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_train.pkl',
         pipeline=train_pipeline,
         use_mask=use_mask,
         classes=class_names,
@@ -297,9 +307,51 @@ train_dataloader = dict(
     )
 )
 
-val_dataloader = None
+val_dataloader = dict(
+    batch_size=1,
+    num_workers=4,
+    persistent_workers=True,
+    sampler=dict(type='DefaultSampler', shuffle=False),
+    dataset=dict(
+        type=dataset_type,
+        data_root='',
+        ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_val.pkl',
+        pipeline=test_pipeline,
+        use_mask=use_mask,
+        classes=class_names,
+        modality=input_modality,
+        stereo=False,
+        filter_empty_gt=False,
+        img_info_prototype='fusionocc',
+        multi_adj_frame_id_cfg=multi_adj_frame_id_cfg,
+        multi_adj_frame_id_cfg_lidar=multi_adj_frame_id_cfg_lidar,
+        test_mode=False,
+        box_type_3d='LiDAR'
+    )
+)
 
-test_dataloader = None
+test_dataloader = dict(
+    batch_size=1,
+    num_workers=4,
+    persistent_workers=True,
+    sampler=dict(type='DefaultSampler', shuffle=False),
+    dataset=dict(
+        type=dataset_type,
+        data_root='',
+        ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_val.pkl',
+        pipeline=test_pipeline,
+        use_mask=use_mask,
+        classes=class_names,
+        modality=input_modality,
+        stereo=False,
+        filter_empty_gt=False,
+        img_info_prototype='fusionocc',
+        multi_adj_frame_id_cfg=multi_adj_frame_id_cfg,
+        multi_adj_frame_id_cfg_lidar=multi_adj_frame_id_cfg_lidar,
+        test_mode=True,
+        box_type_3d='LiDAR'
+    )
+)
 
 # custom_hooks = [
 #     dict(
@@ -314,3 +366,5 @@ test_dataloader = None
 # ]
 
 # load_from = "../../ckpt/fusion_occ_mask.pth" 
+
+load_from = "./projects/FusionOcc/pretrain/bevdet-occ-stbase-4d-stereo-512x1408-24e.pth" 

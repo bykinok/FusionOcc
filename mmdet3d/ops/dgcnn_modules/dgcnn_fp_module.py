@@ -1,6 +1,12 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from mmcv.cnn import ConvModule
-from mmcv.runner import BaseModule, force_fp32
+from mmengine.model import BaseModule
+
+def force_fp32(apply_to=None, out_fp16=False):
+    """Compatibility decorator for force_fp32."""
+    def decorator(func):
+        return func
+    return decorator
 from torch import nn as nn
 
 

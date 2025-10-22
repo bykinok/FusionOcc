@@ -136,6 +136,7 @@ mmdet3d/evaluation/functional/waymo_utils/compute_detection_metrics_main
 mmdet3d/evaluation/functional/waymo_utils/compute_detection_let_metrics_main
 ckpt
 results
+pretrain
 
 # reference code
 BEVFormer_ori/

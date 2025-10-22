@@ -2,6 +2,7 @@
 import torch
 import numpy as np
 from torch import nn
+import torch.nn.functional as F
 from mmcv.cnn.bricks.conv_module import ConvModule
 try:
     from mmcv.runner import auto_fp16, force_fp32
@@ -41,74 +42,218 @@ from .lidar_encoder import CustomSparseEncoder
 class FusionDepthSeg(nn.Module):
     """Base class for FusionDepthSeg detector."""
     
-    def __init__(self, **kwargs):
+    def __init__(self, 
+                 img_backbone=None,
+                 img_neck=None,
+                 img_view_transformer=None,
+                 img_bev_encoder_backbone=None,
+                 img_bev_encoder_neck=None,
+                 pre_process=None,
+                 num_adj=1,
+                 **kwargs):
         super(FusionDepthSeg, self).__init__()
         # Initialize with basic components
-        self.num_frame = kwargs.get('num_frame', 1)
+        # num_frame = num_adj + 1 (current frame + adjacent frames)
+        self.num_frame = num_adj + 1
         self.align_after_view_transformation = kwargs.get('align_after_view_transformation', False)
-        self.pre_process = kwargs.get('pre_process', False)
         
-        # Initialize components (these would be built from config)
-        self.image_encoder = None
-        self.img_view_transformer = None
-        self.pre_process_net = None
-        self.bev_encoder = None
+        # Initialize grid for shift_feature (will be created on first use)
+        self.grid = None
+        
+        from mmdet3d.registry import MODELS as MODELS_REGISTRY
+        
+        # Build image backbone
+        self.img_backbone = MODELS_REGISTRY.build(img_backbone) if img_backbone is not None else None
+        
+        # Build image neck
+        self.img_neck = MODELS_REGISTRY.build(img_neck) if img_neck is not None else None
+        self.with_img_neck = img_neck is not None
+        
+        # Build image view transformer
+        self.img_view_transformer = MODELS_REGISTRY.build(img_view_transformer) if img_view_transformer is not None else None
+        
+        # Build pre-process network
+        if pre_process is not None and isinstance(pre_process, dict):
+            self.pre_process = True
+            self.pre_process_net = MODELS_REGISTRY.build(pre_process)
+        else:
+            self.pre_process = False
+            self.pre_process_net = None
+        
+        # Build BEV encoder from backbone and neck
+        # These names must match the checkpoint keys
+        if img_bev_encoder_backbone is not None:
+            self.img_bev_encoder_backbone = MODELS_REGISTRY.build(img_bev_encoder_backbone)
+            if img_bev_encoder_neck is not None:
+                self.img_bev_encoder_neck = MODELS_REGISTRY.build(img_bev_encoder_neck)
+            else:
+                self.img_bev_encoder_neck = None
+        else:
+            self.img_bev_encoder_backbone = None
+            self.img_bev_encoder_neck = None
+
+    def image_encoder(self, img, stereo=False):
+        """Encode images using backbone and neck."""
+        imgs = img
+        # Handle both (B, N, C, H, W) and (N, C, H, W) formats
+        if imgs.ndim == 4:  # (N, C, H, W)
+            N, C, imH, imW = imgs.shape
+            B = 1
+            imgs = imgs.unsqueeze(0)  # (1, N, C, H, W)
+        else:  # (B, N, C, H, W)
+            B, N, C, imH, imW = imgs.shape
+        imgs = imgs.view(B * N, C, imH, imW)
+        
+        x = self.img_backbone(imgs)
+        stereo_feat = None
+        if stereo:
+            stereo_feat = x[0]
+        x = x[1:]
+        
+        if self.with_img_neck:
+            x = self.img_neck(x)
+            if type(x) in [list, tuple]:
+                x = x[0]
+        _, output_dim, ouput_H, output_W = x.shape
+        x = x.view(B, N, output_dim, ouput_H, output_W)
+        return x, stereo_feat
 
     def prepare_img_3d_feat(self, img, sensor2keyego, ego2global, intrin,
                             post_rot, post_tran, bda, mlp_input, input_depth=None):
-        if self.image_encoder is None:
-            # Placeholder implementation
-            x = torch.randn(img.shape[0], 256, img.shape[2]//16, img.shape[3]//16)
-        else:
-            x, _ = self.image_encoder(img, stereo=False)
-            
-        if self.img_view_transformer is None:
-            # Placeholder implementation
-            img_3d_feat = torch.randn(img.shape[0], 32, 200, 200)
-            depth = torch.randn(img.shape[0], 88, 200, 200)
-            seg = torch.randn(img.shape[0], 18, 200, 200)
-        else:
-            img_3d_feat, depth, seg = self.img_view_transformer(
-                [x, sensor2keyego, ego2global, intrin, post_rot, post_tran, bda,
-                 mlp_input], input_depth)
+        x, _ = self.image_encoder(img, stereo=False)
+        
+        img_3d_feat, depth, seg = self.img_view_transformer(
+            [x, sensor2keyego, ego2global, intrin, post_rot, post_tran, bda,
+             mlp_input], input_depth)
                 
         if self.pre_process and self.pre_process_net is not None:
             img_3d_feat = self.pre_process_net(img_3d_feat)[0]
         return img_3d_feat, depth, seg
 
-    def extract_img_3d_feat(self, img_inputs, input_depth):
-        # Placeholder implementation for preparing inputs
-        imgs = [torch.randn(1, 3, 512, 1408)] * self.num_frame
-        sensor2keyegos = [torch.randn(1, 4, 4)] * self.num_frame
-        ego2globals = [torch.randn(1, 4, 4)] * self.num_frame
-        intrins = [torch.randn(1, 3, 3)] * self.num_frame
-        post_rots = [torch.randn(1, 3, 3)] * self.num_frame
-        post_trans = [torch.randn(1, 3)] * self.num_frame
-        bda = torch.randn(1, 4, 4)
+    def prepare_inputs(self, inputs, stereo=False):
+        """Split the inputs into each frame and compute sensor to key ego transforms."""
+        # Get device from model
+        device = next(self.parameters()).device
         
+        # inputs can be tuple or list: (imgs, sensor2egos, ego2globals, intrins, post_rots, post_trans, [bda], ...)
+        if isinstance(inputs, (tuple, list)) and len(inputs) >= 6:
+            # Convert all tuple elements to tensors if needed
+            def to_tensor(x):
+                if isinstance(x, (tuple, list)):
+                    if len(x) > 0 and isinstance(x[0], torch.Tensor):
+                        result = torch.stack(x) if x[0].ndim > 0 else torch.tensor(x)
+                    else:
+                        result = torch.tensor(x) if not isinstance(x[0], (tuple, list)) else torch.stack([to_tensor(item) for item in x])
+                else:
+                    result = x
+                # Move to device if it's a tensor
+                if isinstance(result, torch.Tensor):
+                    result = result.to(device)
+                return result
+            
+            imgs = to_tensor(inputs[0])
+            sensor2egos = to_tensor(inputs[1])
+            ego2globals = to_tensor(inputs[2])
+            intrins = to_tensor(inputs[3])
+            post_rots = to_tensor(inputs[4])
+            post_trans = to_tensor(inputs[5])
+            bda = to_tensor(inputs[6]) if len(inputs) > 6 else None
+        else:
+            raise ValueError(f"Invalid inputs format: {type(inputs)}, length: {len(inputs) if hasattr(inputs, '__len__') else 'N/A'}")
+        
+        # Handle different input shapes
+        if imgs.ndim == 4:  # (N, C, H, W) - no batch dimension
+            imgs = imgs.unsqueeze(0)  # (1, N, C, H, W)
+        
+        B, N, C, H, W = imgs.shape
+        # Split multi-frame: N = N_cameras * num_frame
+        N = N // self.num_frame
+        imgs = imgs.view(B, N, self.num_frame, C, H, W)
+        imgs = torch.split(imgs, 1, 2)
+        imgs = [t.squeeze(2) for t in imgs]
+        
+        # Ensure other tensors also have batch dimension
+        if sensor2egos.ndim == 3:  # (N, 4, 4)
+            sensor2egos = sensor2egos.unsqueeze(0)  # (1, N, 4, 4)
+        if ego2globals.ndim == 3:  # (N, 4, 4)
+            ego2globals = ego2globals.unsqueeze(0)
+        if intrins.ndim == 3:  # (N, 3, 3)
+            intrins = intrins.unsqueeze(0)
+        if post_rots.ndim == 3:  # (N, 3, 3)
+            post_rots = post_rots.unsqueeze(0)
+        if post_trans.ndim == 2:  # (N, 3)
+            post_trans = post_trans.unsqueeze(0)
+        if bda is not None and bda.ndim == 2:  # (3, 3)
+            bda = bda.unsqueeze(0)
+        
+        sensor2egos = sensor2egos.view(B, self.num_frame, N, 4, 4)
+        ego2globals = ego2globals.view(B, self.num_frame, N, 4, 4)
+        
+        # Calculate the transformation from sweep sensor to key ego
+        keyego2global = ego2globals[:, 0, 0, ...].unsqueeze(1).unsqueeze(1)
+        global2keyego = torch.inverse(keyego2global.double())
+        sensor2keyegos = global2keyego @ ego2globals.double() @ sensor2egos.double()
+        sensor2keyegos = sensor2keyegos.float()
+        
+        # Split into list of frames
+        extra = [
+            sensor2keyegos,
+            ego2globals,
+            intrins.view(B, self.num_frame, N, 3, 3),
+            post_rots.view(B, self.num_frame, N, 3, 3),
+            post_trans.view(B, self.num_frame, N, 3)
+        ]
+        extra = [torch.split(t, 1, 1) for t in extra]
+        extra = [[p.squeeze(1) for p in t] for t in extra]
+        sensor2keyegos, ego2globals, intrins, post_rots, post_trans = extra
+        
+        # If bda is None, create identity matrix
+        if bda is None:
+            device = imgs[0].device
+            bda = torch.eye(3, 3, device=device, dtype=imgs[0].dtype).unsqueeze(0).expand(B, -1, -1)
+        
+        return imgs, sensor2keyegos, ego2globals, intrins, post_rots, post_trans, bda, None
+
+    def extract_img_3d_feat(self, img_inputs, input_depth):
+        """Extract 3D image features from multiple frames."""
+        imgs, sensor2keyegos, ego2globals, intrins, post_rots, post_trans, bda, _ = \
+            self.prepare_inputs(img_inputs, stereo=False)
+        
+        """Extract features of images."""
         img_3d_feat_list = []
         depth_key_frame = None
         seg_key_frame = None
         
+        # Process each frame
         for fid in range(self.num_frame - 1, -1, -1):
+            # Use the correct frame index
             img, sensor2keyego, ego2global, intrin, post_rot, post_tran = \
                 imgs[fid], sensor2keyegos[fid], ego2globals[fid], intrins[fid], \
                 post_rots[fid], post_trans[fid]
             curr_frame = fid == 0
+            
             if self.align_after_view_transformation:
                 sensor2keyego, ego2global = sensor2keyegos[0], ego2globals[0]
-            mlp_input = torch.randn(1, 256)  # Placeholder
+            
+            # Pass individual frame's transformation matrices
+            mlp_input = self.img_view_transformer.get_mlp_input(
+                sensor2keyegos[0], ego2globals[0], intrin,
+                post_rot, post_tran, bda)
+            
             inputs_curr = (img, sensor2keyego, ego2global, intrin,
                            post_rot, post_tran, bda, mlp_input, input_depth)
+            
             if curr_frame:
                 img_3d_feat, depth, pred_seg = self.prepare_img_3d_feat(*inputs_curr)
                 seg_key_frame = pred_seg
                 depth_key_frame = depth
             else:
+                # For non-current frames, compute features without gradients
                 with torch.no_grad():
                     img_3d_feat, _, _ = self.prepare_img_3d_feat(*inputs_curr)
-            img_3d_feat_list.append(img_3d_feat)
             
+            img_3d_feat_list.append(img_3d_feat)
+        
         if self.align_after_view_transformation:
             for adj_id in range(self.num_frame - 1):
                 img_3d_feat_list[adj_id] = \
@@ -116,12 +261,103 @@ class FusionDepthSeg(nn.Module):
                                        [sensor2keyegos[0],
                                         sensor2keyegos[self.num_frame - 2 - adj_id]],
                                        bda)
+        
         img_3d_feat_feat = torch.cat(img_3d_feat_list, dim=1)
         return img_3d_feat_feat, depth_key_frame, seg_key_frame
 
-    def shift_feature(self, feature, sensor2keyegos, bda):
-        # Placeholder implementation
-        return feature
+    def gen_grid(self, input, sensor2keyegos, bda, bda_adj=None):
+        """Generate grid for feature alignment using transformation matrices.
+        
+        Args:
+            input: Feature tensor (N, C, H, W)
+            sensor2keyegos: List of transformation matrices [current, adjacent]
+            bda: BEV data augmentation matrix
+            bda_adj: Adjacent frame BEV data augmentation matrix (optional)
+            
+        Returns:
+            grid: Sampling grid for F.grid_sample (N, H, W, 2)
+        """
+        n, c, h, w = input.shape
+        _, v, _, _ = sensor2keyegos[0].shape
+        
+        if not hasattr(self, 'grid') or self.grid is None:
+            # Generate base grid
+            xs = torch.linspace(
+                0, w - 1, w, dtype=input.dtype,
+                device=input.device).view(1, w).expand(h, w)
+            ys = torch.linspace(
+                0, h - 1, h, dtype=input.dtype,
+                device=input.device).view(h, 1).expand(h, w)
+            grid = torch.stack((xs, ys, torch.ones_like(xs)), -1)
+            self.grid = grid
+        else:
+            grid = self.grid
+            
+        grid = grid.view(1, h, w, 3).expand(n, h, w, 3).view(n, h, w, 3, 1)
+
+        # Get transformation from current ego frame to adjacent ego frame
+        # Transformation from current camera frame to current ego frame
+        c02l0 = sensor2keyegos[0][:, 0:1, :, :]
+
+        # Transformation from adjacent camera frame to current ego frame
+        c12l0 = sensor2keyegos[1][:, 0:1, :, :]
+
+        # Add BEV data augmentation
+        bda_ = torch.zeros((n, 1, 4, 4), dtype=grid.dtype).to(grid)
+        bda_[:, :, :3, :3] = bda.unsqueeze(1)
+        bda_[:, :, 3, 3] = 1
+        c02l0 = bda_.matmul(c02l0)
+        
+        if bda_adj is not None:
+            bda_ = torch.zeros((n, 1, 4, 4), dtype=grid.dtype).to(grid)
+            bda_[:, :, :3, :3] = bda_adj.unsqueeze(1)
+            bda_[:, :, 3, 3] = 1
+        c12l0 = bda_.matmul(c12l0)
+
+        # Transformation from current ego frame to adjacent ego frame
+        l02l1 = c02l0.matmul(torch.inverse(c12l0))[:, 0, :, :].view(
+            n, 1, 1, 4, 4)
+        
+        # Remove Z dimension (keep X, Y only for BEV)
+        l02l1 = l02l1[:, :, :,
+                [True, True, False, True], :][:, :, :, :,
+                [True, True, False, True]]
+
+        # Create feature to BEV transformation matrix
+        feat2bev = torch.zeros((3, 3), dtype=grid.dtype).to(grid)
+        feat2bev[0, 0] = self.img_view_transformer.grid_interval[0]
+        feat2bev[1, 1] = self.img_view_transformer.grid_interval[1]
+        feat2bev[0, 2] = self.img_view_transformer.grid_lower_bound[0]
+        feat2bev[1, 2] = self.img_view_transformer.grid_lower_bound[1]
+        feat2bev[2, 2] = 1
+        feat2bev = feat2bev.view(1, 3, 3)
+        
+        # Apply transformation
+        tf = torch.inverse(feat2bev).matmul(l02l1).matmul(feat2bev)
+
+        # Transform and normalize grid
+        grid = tf.matmul(grid)
+        normalize_factor = torch.tensor([w - 1.0, h - 1.0],
+                                        dtype=input.dtype,
+                                        device=input.device)
+        grid = grid[:, :, :, :2, 0] / normalize_factor.view(1, 1, 1, 2) * 2.0 - 1.0
+        return grid
+
+    def shift_feature(self, feature, sensor2keyegos, bda, bda_adj=None):
+        """Shift feature based on sensor transformations using grid sampling.
+        
+        Args:
+            feature: Feature tensor to align (N, C, H, W)
+            sensor2keyegos: List of transformation matrices [current, adjacent]
+            bda: BEV data augmentation matrix
+            bda_adj: Adjacent frame BEV data augmentation matrix (optional)
+            
+        Returns:
+            output: Aligned feature tensor (N, C, H, W)
+        """
+        grid = self.gen_grid(feature, sensor2keyegos, bda, bda_adj=bda_adj)
+        output = F.grid_sample(feature, grid.to(feature.dtype), align_corners=True)
+        return output
 
 
 @MODELS.register_module()
@@ -141,7 +377,10 @@ class FusionOCC(FusionDepthSeg):
                  occ_encoder_backbone=None,
                  occ_encoder_neck=None,
                  **kwargs):
-        super(FusionOCC, self).__init__(**kwargs)
+        super(FusionOCC, self).__init__(
+            img_bev_encoder_backbone=occ_encoder_backbone,
+            img_bev_encoder_neck=occ_encoder_neck,
+            **kwargs)
         
         self.voxel_size = voxel_size
         self.lidar_out_channel = lidar_out_channel
@@ -191,46 +430,87 @@ class FusionOCC(FusionDepthSeg):
         self.fuse_loss_weight = fuse_loss_weight
 
     def occ_encoder(self, fusion_feat):
-        if self.bev_encoder is None:
-            # Placeholder implementation
+        """Encode fusion features using BEV encoder (backbone + neck)."""
+        if self.img_bev_encoder_backbone is None:
             return fusion_feat
-        return self.bev_encoder(fusion_feat)
+        
+        # Pass through backbone
+        x = self.img_bev_encoder_backbone(fusion_feat)
+        
+        # Pass through neck if available
+        if self.img_bev_encoder_neck is not None:
+            if isinstance(x, (list, tuple)):
+                x = self.img_bev_encoder_neck(x)
+            else:
+                x = self.img_bev_encoder_neck([x])
+        
+        # Return the output feature
+        if isinstance(x, (list, tuple)):
+            x = x[0]
+        
+        return x
 
     def extract_feat(self, lidar_feat, img, img_metas, input_depth=None, **kwargs):
         """Extract features from images and points."""
         fusion_feats, depth, pred_segs = self.extract_fusion_feat(
             lidar_feat, img, img_metas, input_depth=input_depth, **kwargs
         )
+        
         pts_feats = None
         return fusion_feats, pts_feats, depth, pred_segs
 
     def extract_fusion_feat(self, lidar_feat, img, img_metas, input_depth=None, **kwargs):
         """Extract fusion features from lidar and image."""
-        # Placeholder implementation
+        # Extract image 3D features first
         img_3d_feat_feat, depth_key_frame, seg_key_frame = self.extract_img_3d_feat(
             img_inputs=img, input_depth=input_depth)
         
-        # Ensure both features are on the same device
-        if lidar_feat.device != img_3d_feat_feat.device:
-            img_3d_feat_feat = img_3d_feat_feat.to(lidar_feat.device)
+        # print(f"DEBUG extract_fusion_feat - img_3d_feat_feat shape: {img_3d_feat_feat.shape}")
+        # print(f"DEBUG extract_fusion_feat - lidar_feat is None: {lidar_feat is None}")
+        # if lidar_feat is not None:
+        #     print(f"DEBUG extract_fusion_feat - lidar_feat shape: {lidar_feat.shape}, dim: {lidar_feat.dim()}")
         
-        # Ensure both features have the same number of dimensions and shape
-        if img_3d_feat_feat.dim() != lidar_feat.dim():
-            if img_3d_feat_feat.dim() == 4 and lidar_feat.dim() == 5:
-                # Add an extra dimension to img_3d_feat_feat
-                img_3d_feat_feat = img_3d_feat_feat.unsqueeze(2)  # Add dimension at index 2
-            elif img_3d_feat_feat.dim() == 5 and lidar_feat.dim() == 4:
-                # Add an extra dimension to lidar_feat
-                lidar_feat = lidar_feat.unsqueeze(2)
+        # Process lidar features
+        if lidar_feat is not None and lidar_feat.dim() == 5:
+            # Ensure both features are on the same device
+            if lidar_feat.device != img_3d_feat_feat.device:
+                img_3d_feat_feat = img_3d_feat_feat.to(lidar_feat.device)
+            
+            # Both features should be in (B, C, D, H, W) format
+            # img_3d_feat_feat is already (B, C, D, H, W)
+            # lidar_feat from lidar_encoder is (B, C, D, H, W)
+            # No need to permute, just ensure they match in spatial dimensions
+            
+            # Downsample lidar_feat to match img_3d_feat_feat size if needed
+            if lidar_feat.shape[2:] != img_3d_feat_feat.shape[2:]:
+                # Use adaptive average pooling to match target size
+                B, C, D, H, W = lidar_feat.shape
+                target_D, target_H, target_W = img_3d_feat_feat.shape[2], img_3d_feat_feat.shape[3], img_3d_feat_feat.shape[4]
+                
+                # print(f"DEBUG extract_fusion_feat - Downsampling lidar_feat from {lidar_feat.shape} to match img_3d_feat_feat spatial dims ({target_D}, {target_H}, {target_W})")
+                
+                # Reshape to (B*C, 1, D, H, W) for 3D pooling
+                lidar_feat = lidar_feat.view(B * C, 1, D, H, W)
+                lidar_feat = torch.nn.functional.adaptive_avg_pool3d(
+                    lidar_feat, 
+                    (target_D, target_H, target_W)
+                )
+                # Reshape back to (B, C, D, H, W)
+                lidar_feat = lidar_feat.view(B, C, target_D, target_H, target_W)
+                # print(f"DEBUG extract_fusion_feat - lidar_feat after downsampling: {lidar_feat.shape}")
+            
+            # Now both are (B, C, D, H, W), concatenate along channel dimension
+            # print(f"DEBUG extract_fusion_feat - Before cat: img_3d_feat_feat={img_3d_feat_feat.shape}, lidar_feat={lidar_feat.shape}")
+            fusion_feat = torch.cat([img_3d_feat_feat, lidar_feat], dim=1)
+            # print(f"DEBUG extract_fusion_feat - After cat: fusion_feat={fusion_feat.shape}")
+        else:
+            fusion_feat = img_3d_feat_feat
+            # print(f"DEBUG extract_fusion_feat - Using img_3d_feat_feat only (no lidar): {fusion_feat.shape}")
         
-        # Ensure both features have the same shape in the depth dimension (index 2)
-        if img_3d_feat_feat.shape[2] != lidar_feat.shape[2]:
-            # Repeat img_3d_feat_feat to match lidar_feat's depth dimension
-            depth_repeats = lidar_feat.shape[2]
-            img_3d_feat_feat = img_3d_feat_feat.repeat(1, 1, depth_repeats, 1, 1)
-        
-        fusion_feat = torch.cat([img_3d_feat_feat, lidar_feat], dim=1)
+        # Encode fusion features
+        # print(f"DEBUG extract_fusion_feat - Before occ_encoder: fusion_feat={fusion_feat.shape}")
         fusion_feat = self.occ_encoder(fusion_feat)
+        # print(f"DEBUG extract_fusion_feat - After occ_encoder: fusion_feat={fusion_feat.shape}")
         return fusion_feat, depth_key_frame, seg_key_frame
 
     def forward_train(self,
@@ -250,14 +530,11 @@ class FusionOCC(FusionDepthSeg):
 
         losses = dict()
         
-        # Placeholder for depth and segmentation losses
-        if depth_key_frame is not None and sparse_depth is not None:
-            depth_loss = torch.nn.functional.mse_loss(depth_key_frame, sparse_depth)
-            losses['depth_loss'] = depth_loss * self.fuse_loss_weight
-            
-        if seg_key_frame is not None and segs is not None:
-            seg_loss = torch.nn.functional.cross_entropy(seg_key_frame, segs)
-            losses['seg_loss'] = seg_loss * self.fuse_loss_weight
+        # Use img_view_transformer.get_loss for proper depth and segmentation loss calculation
+        depth_loss, seg_loss, vis_depth_pred, vis_depth_label, vis_seg_pred, vis_seg_label = \
+            self.img_view_transformer.get_loss(sparse_depth, depth_key_frame, segs, seg_key_frame)
+        losses['depth_loss'] = depth_loss * self.fuse_loss_weight
+        losses['seg_loss'] = seg_loss * self.fuse_loss_weight
 
         occ_pred = self.final_conv(fusion_feat).permute(0, 4, 3, 2, 1)
         if self.use_predicter:
@@ -825,4 +1102,99 @@ class FusionOCC(FusionDepthSeg):
         # Parse losses for logging
         parsed_losses, log_vars = self.parse_losses(losses)
         
-        return log_vars 
+        return log_vars
+    
+    def test_step(self, data):
+        """Test step function for mmengine runner.
+        
+        Args:
+            data (dict): The output of dataloader.
+            
+        Returns:
+            list: List of data samples with predictions and ground truth.
+        """
+        # Get device from model parameters
+        device = next(self.parameters()).device
+        
+        # Extract data
+        imgs = data['img_inputs']
+        points = data.get('points', None)
+        voxel_semantics = data.get('voxel_semantics', None)
+        mask_camera = data.get('mask_camera', None)
+        mask_lidar = data.get('mask_lidar', None)
+        img_metas = data.get('img_metas', {})
+        
+        # Move imgs to device
+        if isinstance(imgs, (tuple, list)):
+            imgs = tuple(x.to(device) if hasattr(x, 'to') and isinstance(x, torch.Tensor) else x for x in imgs)
+        elif isinstance(imgs, torch.Tensor):
+            imgs = imgs.to(device)
+        
+        # Convert LiDARPoints object to tensor if necessary and move to correct device
+        if points is not None:
+            if hasattr(points, 'tensor'):
+                points = points.tensor
+            # Ensure points is on the correct device
+            if isinstance(points, list):
+                points = [pt.to(device) if hasattr(pt, 'to') else pt for pt in points]
+            elif hasattr(points, 'to'):
+                points = points.to(device)
+        
+        # Forward pass (without gradient)
+        with torch.no_grad():
+            if points is not None:
+                # Process lidar data
+                lidar_feat, _, _ = self.lidar_encoder(points)
+                
+                # Extract features from both modalities
+                fusion_feats, pts_feats, depth, pred_segs = self.extract_feat(lidar_feat, imgs, img_metas)
+            else:
+                # Image-only mode
+                fusion_feats, pts_feats, depth, pred_segs = self.extract_feat(None, imgs, img_metas)
+            
+            # Apply final conv and predicter
+            occ_pred = self.final_conv(fusion_feats).permute(0, 4, 3, 2, 1)  # (B, out_C, D, H, W) -> (B, W, H, D, out_C)
+            if self.use_predicter:
+                occ_pred = self.predicter(occ_pred)  # (B, W, H, D, num_classes)
+        
+        # Get prediction labels (argmax over class dimension)
+        # occ_pred shape: (B, W, H, D, num_classes)
+        occ_pred_labels = torch.argmax(occ_pred, dim=-1)  # (B, W, H, D)
+        
+        # Prepare output as data samples
+        data_samples = []
+        batch_size = occ_pred_labels.shape[0]
+        
+        for i in range(batch_size):
+            data_sample = {}
+            
+            # Add prediction (now should be shape (200, 200, 16))
+            data_sample['occ_pred'] = occ_pred_labels[i].cpu().numpy()
+            
+            # Add ground truth if available
+            if voxel_semantics is not None:
+                if hasattr(voxel_semantics, 'cpu'):
+                    gt_semantics = voxel_semantics[i].cpu().numpy()
+                else:
+                    gt_semantics = voxel_semantics[i] if isinstance(voxel_semantics, list) else voxel_semantics
+                
+                gt_occ_data = {'semantics': gt_semantics}
+                
+                # Add masks if available
+                if mask_lidar is not None:
+                    if hasattr(mask_lidar, 'cpu'):
+                        gt_occ_data['mask_lidar'] = mask_lidar[i].cpu().numpy()
+                    else:
+                        gt_occ_data['mask_lidar'] = mask_lidar[i] if isinstance(mask_lidar, list) else mask_lidar
+                
+                if mask_camera is not None:
+                    if hasattr(mask_camera, 'cpu'):
+                        gt_occ_data['mask_camera'] = mask_camera[i].cpu().numpy()
+                    else:
+                        gt_occ_data['mask_camera'] = mask_camera[i] if isinstance(mask_camera, list) else mask_camera
+                
+                data_sample['gt_occ'] = gt_occ_data
+            
+            data_samples.append(data_sample)
+        
+        return data_samples 

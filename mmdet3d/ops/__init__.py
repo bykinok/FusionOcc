@@ -19,6 +19,7 @@ from mmcv.ops.three_interpolate import three_interpolate
 from mmcv.ops.three_nn import three_nn
 from mmcv.ops.voxelize import Voxelization, voxelization
 
+from .bev_pool_v2 import bev_pool_v2, TRTBEVPoolv2
 from .dgcnn_modules import DGCNNFAModule, DGCNNFPModule, DGCNNGFModule
 from .norm import NaiveSyncBatchNorm1d, NaiveSyncBatchNorm2d
 from .paconv import PAConv, PAConvCUDA
@@ -44,5 +45,5 @@ __all__ = [
     'get_compiler_version', 'assign_score_withk', 'get_compiling_cuda_version',
     'Points_Sampler', 'build_sa_module', 'PAConv', 'PAConvCUDA',
     'PAConvSAModuleMSG', 'PAConvSAModule', 'PAConvCUDASAModule',
-    'PAConvCUDASAModuleMSG', 'RoIPointPool3d'
+    'PAConvCUDASAModuleMSG', 'RoIPointPool3d', 'bev_pool_v2', 'TRTBEVPoolv2'
 ]

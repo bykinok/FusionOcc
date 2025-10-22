@@ -144,19 +144,47 @@ class LoadOccGTFromFile(object):
         
         if occ_gt_path and os.path.exists(occ_gt_path):
             try:
-                # Try to load actual occupancy data
-                # The format depends on how the ground truth is stored
-                # For now, create dummy data that matches expected dimensions
-                results['voxel_semantics'] = torch.zeros(*occ_size, dtype=torch.long)
-                results['mask_camera'] = torch.ones(*occ_size, dtype=torch.bool)
-            except Exception:
+                # Load actual occupancy data from .npz file
+                # Expected structure: occ_path/labels.npz with keys 'semantics', 'mask_lidar', 'mask_camera'
+                labels_file = os.path.join(occ_gt_path, 'labels.npz')
+                if os.path.exists(labels_file):
+                    occ_gt = np.load(labels_file)
+                    
+                    # Load semantics
+                    if 'semantics' in occ_gt:
+                        voxel_semantics = occ_gt['semantics']
+                        results['voxel_semantics'] = torch.from_numpy(voxel_semantics).long()
+                    else:
+                        results['voxel_semantics'] = torch.zeros(*occ_size, dtype=torch.long)
+                    
+                    # Load masks
+                    if 'mask_camera' in occ_gt:
+                        mask_camera = occ_gt['mask_camera'].astype(bool)
+                        results['mask_camera'] = torch.from_numpy(mask_camera).bool()
+                    else:
+                        results['mask_camera'] = torch.ones(*occ_size, dtype=torch.bool)
+                    
+                    if 'mask_lidar' in occ_gt:
+                        mask_lidar = occ_gt['mask_lidar'].astype(bool)
+                        results['mask_lidar'] = torch.from_numpy(mask_lidar).bool()
+                    else:
+                        results['mask_lidar'] = torch.ones(*occ_size, dtype=torch.bool)
+                else:
+                    # Fall back to dummy data if labels.npz doesn't exist
+                    results['voxel_semantics'] = torch.zeros(*occ_size, dtype=torch.long)
+                    results['mask_camera'] = torch.ones(*occ_size, dtype=torch.bool)
+                    results['mask_lidar'] = torch.ones(*occ_size, dtype=torch.bool)
+            except Exception as e:
                 # Fall back to dummy data if loading fails
+                print(f"Warning: Failed to load occupancy GT from {occ_gt_path}: {e}")
                 results['voxel_semantics'] = torch.zeros(*occ_size, dtype=torch.long)
                 results['mask_camera'] = torch.ones(*occ_size, dtype=torch.bool)
+                results['mask_lidar'] = torch.ones(*occ_size, dtype=torch.bool)
         else:
             # Create dummy occupancy ground truth
             results['voxel_semantics'] = torch.zeros(*occ_size, dtype=torch.long)
             results['mask_camera'] = torch.ones(*occ_size, dtype=torch.bool)
+            results['mask_lidar'] = torch.ones(*occ_size, dtype=torch.bool)
         
         return results
 
