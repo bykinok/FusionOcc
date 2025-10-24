@@ -205,7 +205,7 @@ class CustomSparseEncoder(nn.Module):
             self.encoder_layers.add_module(stage_name, stage_layers)
         return out_channels
 
-    @auto_fp16(apply_to=("voxel_features",))
+    # @auto_fp16(apply_to=("voxel_features",))  # Temporarily disabled for debugging
     def encode(self, voxel_features, coors, batch_size, **kwargs):
         # Ensure coors is on the same device as voxel_features
         device = voxel_features.device
@@ -216,7 +216,7 @@ class CustomSparseEncoder(nn.Module):
         x = self.conv_input(input_sp_tensor)
 
         encode_features = []
-        for encoder_layer in self.encoder_layers:
+        for i, encoder_layer in enumerate(self.encoder_layers):
             x = encoder_layer(x)
             encode_features.append(x)
 

@@ -9,10 +9,11 @@ custom_imports = dict(
 # cloud range accordingly
 point_cloud_range = [-40, -40, -1, 40, 40, 5.4]
 # For nuScenes we usually do 10-class detection
-# Use nuScenes original class order to match label IDs
+# IMPORTANT: Must match fusionocc class order since GT files were created with that order
+# Even though occfrmwrk pkl uses different bbox label order, occupancy GT is fusionocc order
 class_names = [
-    'car', 'truck', 'trailer', 'bus', 'construction_vehicle', 'bicycle',
-    'motorcycle', 'pedestrian', 'traffic_cone', 'barrier'
+    'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
+    'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
 ]
 
 data_config = {
@@ -118,7 +119,7 @@ model = dict(
         num_channels=[img_channels, ],
         stride=[1, ],
         backbone_output_ids=[0, ]),
-    occ_encoder_backbone=dict(
+    img_bev_encoder_backbone=dict(
         type='CustomResNet3D',
         numC_input=img_channels * (len(range(*multi_adj_frame_id_cfg)) + 1) + lidar_out_channel,
         num_layer=[1, 2, 3],
@@ -126,7 +127,7 @@ model = dict(
         num_channels=[numC_Trans, numC_Trans * 2, numC_Trans * 4],
         stride=[1, 2, 2],
         backbone_output_ids=[0, 1, 2]),
-    occ_encoder_neck=dict(type='LSSFPN3D',
+    img_bev_encoder_neck=dict(type='LSSFPN3D',
                           in_channels=numC_Trans * 7,
                           out_channels=numC_Trans),
     out_dim=numC_Trans,
@@ -164,6 +165,12 @@ train_pipeline = [
         load_dim=5,
         use_dim=5),
     dict(
+        type='FuseAdjacentSweeps',  # CRITICAL: Merge adjacent lidar frames for training
+        load_dim=5,
+        use_dim=5),
+    dict(type='PointsLidar2Ego'),  # Transform points to ego coordinate
+    dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),  # Filter points by range
+    dict(
         type='LoadAnnotationsAll',
         bda_aug_conf=bda_aug_conf,
         classes=class_names,
@@ -186,6 +193,12 @@ test_pipeline = [
         coord_type='LIDAR',
         load_dim=5,
         use_dim=5),
+    dict(
+        type='FuseAdjacentSweeps',  # CRITICAL: Merge adjacent lidar frames
+        load_dim=5,
+        use_dim=5),
+    dict(type='PointsLidar2Ego'),  # Transform points to ego coordinate
+    dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),  # Filter points by range
     dict(
         type='LoadAnnotationsAll',
         bda_aug_conf=bda_aug_conf,
@@ -215,14 +228,14 @@ share_data_config = dict(
 
 test_data_config = dict(
     pipeline=test_pipeline,
-    ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_val.pkl')
+    ann_file='data/nuscenes/fusionocc-nuscenes_infos_val.pkl')
 
 data = dict(
     samples_per_gpu=1,
     workers_per_gpu=4,
     train=dict(
         data_root=data_root,
-        ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_train.pkl',
+        ann_file='data/nuscenes/fusionocc-nuscenes_infos_train.pkl',
         pipeline=train_pipeline,
         classes=class_names,
         test_mode=False,
@@ -273,13 +286,21 @@ val_evaluator = dict(
     type='OccupancyMetric',
     num_classes=num_classes,
     use_lidar_mask=False,
-    use_image_mask=use_mask
+    use_image_mask=use_mask,
+    data_root='data/nuscenes/',
+    ann_file='data/nuscenes/fusionocc-nuscenes_infos_val.pkl',
+    backend_args=None,
+    metric='bbox'
 )
 test_evaluator = dict(
     type='OccupancyMetric',
     num_classes=num_classes,
     use_lidar_mask=False,
-    use_image_mask=use_mask
+    use_image_mask=use_mask,
+    data_root='data/nuscenes/',
+    ann_file='data/nuscenes/fusionocc-nuscenes_infos_val.pkl',
+    backend_args=None,
+    metric='bbox'
 )
 
 # MMEngine DataLoader Configuration
@@ -291,7 +312,7 @@ train_dataloader = dict(
     dataset=dict(
         type=dataset_type,
         data_root='',
-        ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_train.pkl',
+        ann_file='data/nuscenes/fusionocc-nuscenes_infos_train.pkl',
         pipeline=train_pipeline,
         use_mask=use_mask,
         classes=class_names,
@@ -315,7 +336,7 @@ val_dataloader = dict(
     dataset=dict(
         type=dataset_type,
         data_root='',
-        ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_val.pkl',
+        ann_file='data/nuscenes/fusionocc-nuscenes_infos_val.pkl',
         pipeline=test_pipeline,
         use_mask=use_mask,
         classes=class_names,
@@ -338,7 +359,7 @@ test_dataloader = dict(
     dataset=dict(
         type=dataset_type,
         data_root='',
-        ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_val.pkl',
+        ann_file='data/nuscenes/fusionocc-nuscenes_infos_val.pkl',
         pipeline=test_pipeline,
         use_mask=use_mask,
         classes=class_names,
@@ -348,7 +369,7 @@ test_dataloader = dict(
         img_info_prototype='fusionocc',
         multi_adj_frame_id_cfg=multi_adj_frame_id_cfg,
         multi_adj_frame_id_cfg_lidar=multi_adj_frame_id_cfg_lidar,
-        test_mode=True,
+        test_mode=False,  # Match original model's test_mode
         box_type_3d='LiDAR'
     )
 )
@@ -364,6 +385,20 @@ test_dataloader = dict(
 #         syncbn_start_epoch=0,
 #     ),
 # ]
+
+# Visualizer configuration (required by mmengine)
+visualizer = dict(
+    type='Det3DLocalVisualizer',
+    vis_backends=[dict(type='LocalVisBackend')],
+    name='visualizer'
+)
+vis_backends = [dict(type='LocalVisBackend')]
+
+# Work directory for saving logs and models
+work_dir = './work_dirs/fusion_occ'
+
+# Voxel size for occupancy grid
+voxel_size = [0.05, 0.05, 0.05]
 
 # load_from = "../../ckpt/fusion_occ_mask.pth" 
 

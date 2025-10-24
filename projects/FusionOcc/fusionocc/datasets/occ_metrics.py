@@ -131,20 +131,25 @@ class Metric_mIoU():
         self.hist += _hist
 
     def count_miou(self):
+        # Use mmengine logger instead of print() so output is saved to log file
+        from mmengine.logging import MMLogger
+        logger = MMLogger.get_current_instance()
+        
         # print("hist: ", self.hist)
         mIoU = self.per_class_iu(self.hist)
         # print(f'===> per class IoU of {self.cnt} samples:')
         # for ind_class in range(self.num_classes):
         #     print(f'===> {self.class_names[ind_class]} - IoU = ' + str(round(mIoU[ind_class] * 100, 2)))
         # assert cnt == num_samples, 'some samples are not included in the miou calculation'
-        print(f'===> per class IoU of {self.cnt} samples:')
+        
+        logger.info(f'===> per class IoU of {self.cnt} samples:')
         for ind_class in range(self.num_classes - 1):
-            print(f'===> {self.class_names[ind_class]} - IoU = ' + str(round(mIoU[ind_class] * 100, 2)))
+            logger.info(f'===> {self.class_names[ind_class]} - IoU = ' + str(round(mIoU[ind_class] * 100, 2)))
 
-        print(f'===> mIoU of {self.cnt} samples: ' + str(round(np.nanmean(mIoU[:self.num_classes - 1]) * 100, 2)))
+        logger.info(f'===> mIoU of {self.cnt} samples: ' + str(round(np.nanmean(mIoU[:self.num_classes - 1]) * 100, 2)))
         # print(f'===> sample-wise averaged mIoU of {cnt} samples: ' + str(round(np.nanmean(mIoU_avg), 2)))
 
-        print("use mask: ", self.use_image_mask)
+        logger.info("use mask: " + str(self.use_image_mask))
         return {'mIoU': round(np.nanmean(mIoU[:self.num_classes - 1]) * 100, 2)}
 
 

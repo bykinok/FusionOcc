@@ -178,14 +178,84 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         with open(ann_file, 'rb') as f:
             data = pickle.load(f)
         
-        if isinstance(data, dict) and 'data_list' in data:
-            return data['data_list']
+        # Support both fusionocc format ('infos') and mmdet3d format ('data_list')
+        if isinstance(data, dict):
+            if 'data_list' in data:
+                return data['data_list']
+            elif 'infos' in data:
+                return data['infos']
+            else:
+                raise ValueError(f"Dict in {ann_file} has neither 'data_list' nor 'infos' key. Keys: {data.keys()}")
         elif isinstance(data, list):
             return data
         else:
             raise ValueError(f"Unsupported data format in {ann_file}: {type(data)}")
     
     
+    def get_adj_info(self, info: dict, index: int) -> list:
+        """Get adjacent frame information for temporal fusion.
+        
+        Args:
+            info (dict): Current frame info
+            index (int): Current frame index
+            
+        Returns:
+            list: List of adjacent frame infos
+        """
+        info_adj_list = []
+        if not hasattr(self, 'multi_adj_frame_id_cfg'):
+            return info_adj_list
+            
+        adj_id_list = list(range(*self.multi_adj_frame_id_cfg))
+        
+        for select_id in adj_id_list:
+            orig_select_id = select_id
+            select_id = max(index - select_id, 0)
+            
+            # Check if adjacent frame is in the same scene
+            # If select_id == index, it means we can't go back (first frame of scene), use current frame
+            if (select_id == index or 
+                select_id >= len(self.data_list) or 
+                self.data_list[select_id].get('scene_token') != info.get('scene_token')):
+                # If not same scene, out of bounds, or same index, use current frame
+                info_adj_list.append(info)
+            else:
+                # Use previous frame from same scene
+                info_adj_list.append(self.data_list[select_id])
+        
+        return info_adj_list
+    
+    def get_adj_info_lidar(self, info: dict, index: int) -> list:
+        """Get adjacent lidar frame information for temporal fusion.
+        
+        Args:
+            info (dict): Current frame info
+            index (int): Current frame index
+            
+        Returns:
+            list: List of adjacent lidar frame infos
+        """
+        info_adj_list = []
+        if not hasattr(self, 'multi_adj_frame_id_cfg_lidar'):
+            return info_adj_list
+            
+        adj_id_list = list(range(*self.multi_adj_frame_id_cfg_lidar))
+        
+        for select_id in adj_id_list:
+            select_id = max(index - select_id, 0)
+            # Check if adjacent frame is in the same scene
+            # If select_id == index, it means we can't go back (first frame of scene), use current frame
+            if (select_id == index or 
+                select_id >= len(self.data_list) or 
+                self.data_list[select_id].get('scene_token') != info.get('scene_token')):
+                # If not same scene, out of bounds, or same index, use current frame
+                info_adj_list.append(info)
+            else:
+                # Use previous frame from same scene
+                info_adj_list.append(self.data_list[select_id])
+        
+        return info_adj_list
+
     def get_data_info(self, index):
         """Get data info according to the given index.
 
@@ -223,28 +293,42 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         input_dict['token'] = info.get('token', '')
         input_dict['timestamp'] = info.get('timestamp', 0.0)
         
-        # Lidar information
+        # Lidar information - support both formats
         if 'lidar_points' in info:
+            # occfrmwrk format: nested dict
             lidar_info = info['lidar_points']
-            # Construct full path for lidar file  
             lidar_path = lidar_info.get('lidar_path', '')
             if lidar_path and not lidar_path.startswith('/'):
-                # The lidar_path is just the filename, construct full path
                 lidar_path = f'data/nuscenes/samples/LIDAR_TOP/{lidar_path}'
             input_dict['pts_filename'] = lidar_path
             input_dict['lidar2ego'] = np.array(lidar_info.get('lidar2ego', np.eye(4)))
-            
-            # Add lidar_points info for transform compatibility
             input_dict['lidar_points'] = {
                 'lidar_path': lidar_path,
                 'num_pts_feats': lidar_info.get('num_pts_feats', 5)
             }
+        elif 'lidar_path' in info:
+            # fusionocc format: direct path (usually already includes './data/nuscenes/')
+            lidar_path = info['lidar_path']
+            # Remove leading './' if present
+            if lidar_path.startswith('./'):
+                lidar_path = lidar_path[2:]
+            input_dict['pts_filename'] = lidar_path
+            input_dict['lidar2ego'] = np.array(info.get('lidar2ego', np.eye(4)))
+            input_dict['lidar_points'] = {
+                'lidar_path': lidar_path,
+                'num_pts_feats': 5
+            }
         
-        # Image information
+        # Image information - support both formats
         if 'images' in info:
+            # occfrmwrk format
             input_dict['images'] = info['images']
+        elif 'cams' in info:
+            # fusionocc format: pass entire info as 'curr' for compatibility
+            # This includes cams, lidar2ego_rotation, lidar2ego_translation, etc.
+            input_dict['curr'] = info
             
-        # Ego to global transformation
+        # Ego to global transformation (occfrmwrk format)
         if 'ego2global' in info:
             input_dict['ego2global'] = np.array(info['ego2global'])
             
@@ -276,8 +360,8 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
             input_dict['ann_info']['gt_bboxes_3d'] = np.zeros((0, 7))
             input_dict['ann_info']['gt_labels_3d'] = np.array([])
         
-        # Occupancy ground truth path
-        input_dict['occ_gt_path'] = info.get('occ_path', '')
+        # Occupancy ground truth path - support both formats
+        input_dict['occ_gt_path'] = info.get('occ_gt_path', info.get('occ_path', ''))
         
         # Camera instances
         if 'cam_instances' in info:
@@ -286,6 +370,19 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         # Scene token
         if 'scene_token' in info:
             input_dict['scene_token'] = info['scene_token']
+        
+        # Add adjacent frames for temporal fusion
+        # Always add for fusionocc format to match original implementation
+        if 'cams' in info:
+            # Get adjacent camera frames
+            info_adj_list = self.get_adj_info(info, index)
+            if info_adj_list:
+                input_dict['adjacent'] = info_adj_list
+            
+            # Get adjacent lidar frames (CRITICAL for multi-frame lidar fusion)
+            info_adj_list_lidar = self.get_adj_info_lidar(info, index)
+            if info_adj_list_lidar:
+                input_dict['lidar_adjacent'] = info_adj_list_lidar
             
         return input_dict
         
