@@ -363,20 +363,10 @@ class PrepareImageSeg(object):
                     # Per-camera ego2global (PRIORITY - consistent with fusionocc)
                     ego2global_data = cam_info['ego2global']
                     ego2global = np.array(ego2global_data, dtype=np.float32).reshape(4, 4)
-                    # DEBUG:
-                    if cam_idx == 0:
-                        import sys
-                        sys.stderr.write(f"[DEBUG] Using per-camera ego2global: {ego2global[0,3]:.2f}, {ego2global[1,3]:.2f}\n")
-                        sys.stderr.flush()
                 elif 'ego2global' in results:
                     # Sample-level ego2global (fallback)
                     ego2global_data = results['ego2global']
                     ego2global = np.array(ego2global_data, dtype=np.float32).reshape(4, 4)
-                    # DEBUG:
-                    if cam_idx == 0:
-                        import sys
-                        sys.stderr.write(f"[DEBUG] Using sample-level ego2global: {ego2global[0,3]:.2f}, {ego2global[1,3]:.2f}\n")
-                        sys.stderr.flush()
                 else:
                     ego2global = np.eye(4, dtype=np.float32)
             ego2globals.append(torch.from_numpy(ego2global))
