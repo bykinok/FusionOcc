@@ -325,14 +325,8 @@ def main():
                 # Now modify the dataloader to use specific sample indices
                 from torch.utils.data import Subset
                 original_dataset = runner._test_loop.dataloader.dataset
-                # Use index 1270 to match the original model's first sample
-                # Original model's sample_idx: 30e55a3ec6184d8cb1944b39ba19d622
-                # This is at index 1270 in fusionocc-nuscenes_infos_val.pkl
-                if cfg.max_samples_limit == 1:
-                    subset_indices = [1270]  # Match original model's sample
-                else:
-                    # For multiple samples, start from index 1270
-                    subset_indices = list(range(1270, min(1270 + cfg.max_samples_limit, len(original_dataset))))
+                # Use first N samples for fair comparison
+                subset_indices = list(range(min(cfg.max_samples_limit, len(original_dataset))))
                 subset_dataset = Subset(original_dataset, subset_indices)
                 
                 # Rebuild dataloader with subset

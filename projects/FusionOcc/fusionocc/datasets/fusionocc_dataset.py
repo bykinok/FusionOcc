@@ -295,25 +295,47 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         
         # Lidar information - support both formats
         if 'lidar_points' in info:
-            # occfrmwrk format: nested dict
+            # occfrmwrk format: nested dict with 4x4 transformation matrix
             lidar_info = info['lidar_points']
             lidar_path = lidar_info.get('lidar_path', '')
-            if lidar_path and not lidar_path.startswith('/'):
+            
+            # Handle path: occfrmwrk uses relative filename like "n015-2018-07-11-11-54-16+0800__LIDAR_TOP__1531281439800013.pcd.bin"
+            if lidar_path and not lidar_path.startswith('data/') and not lidar_path.startswith('./'):
                 lidar_path = f'data/nuscenes/samples/LIDAR_TOP/{lidar_path}'
+            elif lidar_path.startswith('./'):
+                lidar_path = lidar_path[2:]
+                
             input_dict['pts_filename'] = lidar_path
-            input_dict['lidar2ego'] = np.array(lidar_info.get('lidar2ego', np.eye(4)))
+            
+            # lidar2ego: occfrmwrk provides 4x4 transformation matrix as nested list
+            lidar2ego_matrix = lidar_info.get('lidar2ego', np.eye(4))
+            input_dict['lidar2ego'] = np.array(lidar2ego_matrix).reshape(4, 4)
+            
             input_dict['lidar_points'] = {
                 'lidar_path': lidar_path,
                 'num_pts_feats': lidar_info.get('num_pts_feats', 5)
             }
         elif 'lidar_path' in info:
-            # fusionocc format: direct path (usually already includes './data/nuscenes/')
+            # fusionocc format: direct path with rotation and translation separate
             lidar_path = info['lidar_path']
             # Remove leading './' if present
             if lidar_path.startswith('./'):
                 lidar_path = lidar_path[2:]
             input_dict['pts_filename'] = lidar_path
-            input_dict['lidar2ego'] = np.array(info.get('lidar2ego', np.eye(4)))
+            
+            # Build 4x4 transformation matrix from rotation quaternion and translation
+            if 'lidar2ego_rotation' in info and 'lidar2ego_translation' in info:
+                from pyquaternion import Quaternion
+                lidar2ego_rotation = Quaternion(info['lidar2ego_rotation'])
+                lidar2ego_translation = np.array(info['lidar2ego_translation'])
+                
+                lidar2ego = np.eye(4)
+                lidar2ego[:3, :3] = lidar2ego_rotation.rotation_matrix
+                lidar2ego[:3, 3] = lidar2ego_translation
+                input_dict['lidar2ego'] = lidar2ego
+            else:
+                input_dict['lidar2ego'] = np.eye(4)
+                
             input_dict['lidar_points'] = {
                 'lidar_path': lidar_path,
                 'num_pts_feats': 5
@@ -328,9 +350,21 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
             # This includes cams, lidar2ego_rotation, lidar2ego_translation, etc.
             input_dict['curr'] = info
             
-        # Ego to global transformation (occfrmwrk format)
+        # Ego to global transformation - support both formats
         if 'ego2global' in info:
-            input_dict['ego2global'] = np.array(info['ego2global'])
+            # occfrmwrk format: 4x4 transformation matrix
+            ego2global_matrix = info['ego2global']
+            input_dict['ego2global'] = np.array(ego2global_matrix).reshape(4, 4)
+        elif 'ego2global_rotation' in info and 'ego2global_translation' in info:
+            # fusionocc format: rotation quaternion and translation separate
+            from pyquaternion import Quaternion
+            ego2global_rotation = Quaternion(info['ego2global_rotation'])
+            ego2global_translation = np.array(info['ego2global_translation'])
+            
+            ego2global = np.eye(4)
+            ego2global[:3, :3] = ego2global_rotation.rotation_matrix
+            ego2global[:3, 3] = ego2global_translation
+            input_dict['ego2global'] = ego2global
             
         # Instances (annotations)
         if 'instances' in info:
@@ -372,8 +406,8 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
             input_dict['scene_token'] = info['scene_token']
         
         # Add adjacent frames for temporal fusion
-        # Always add for fusionocc format to match original implementation
-        if 'cams' in info:
+        # Add for both fusionocc ('cams') and occfrmwrk ('images') formats
+        if 'cams' in info or 'images' in info:
             # Get adjacent camera frames
             info_adj_list = self.get_adj_info(info, index)
             if info_adj_list:

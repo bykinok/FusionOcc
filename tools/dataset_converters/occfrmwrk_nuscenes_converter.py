@@ -680,10 +680,17 @@ def create_occfrmwrk_infos(root_path,
                 lidar2sensor[:3, :3] = rot.T
                 lidar2sensor[:3, 3:4] = -1 * np.matmul(rot.T, trans.reshape(3, 1))
                 
+                # CRITICAL: Add per-camera ego2global pose (at camera timestamp)
+                # This is essential for FusionOcc's multi-camera fusion
+                cam_ego2global_matrix = convert_quaternion_to_matrix(
+                    cam_info['ego2global_rotation'],
+                    cam_info['ego2global_translation'])
+                
                 v2_info['images'][cam_name] = {
                     'img_path': Path(cam_info['data_path']).name,  # Only filename like nuscenes_converter.py
                     'cam2img': cam_info['cam_intrinsic'].tolist(),  # Convert to list
                     'cam2ego': cam2ego_matrix,
+                    'ego2global': cam_ego2global_matrix,  # Per-camera ego2global (FusionOcc requirement)
                     'sample_data_token': cam_info['sample_data_token'],
                     'timestamp': cam_info['timestamp']/1e6,  
                     'lidar2cam': lidar2sensor.astype(np.float32).tolist()  # Convert to float32 list like nuscenes_converter.py

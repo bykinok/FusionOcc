@@ -228,14 +228,14 @@ share_data_config = dict(
 
 test_data_config = dict(
     pipeline=test_pipeline,
-    ann_file='data/nuscenes/fusionocc-nuscenes_infos_val.pkl')
+    ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_val.pkl')
 
 data = dict(
     samples_per_gpu=1,
     workers_per_gpu=4,
     train=dict(
         data_root=data_root,
-        ann_file='data/nuscenes/fusionocc-nuscenes_infos_train.pkl',
+        ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_train.pkl',
         pipeline=train_pipeline,
         classes=class_names,
         test_mode=False,
@@ -282,13 +282,14 @@ val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
 # MMEngine Evaluator
+# IMPORTANT: Must use same pkl format as dataset for correct sample matching
 val_evaluator = dict(
     type='OccupancyMetric',
     num_classes=num_classes,
     use_lidar_mask=False,
     use_image_mask=use_mask,
     data_root='data/nuscenes/',
-    ann_file='data/nuscenes/fusionocc-nuscenes_infos_val.pkl',
+    ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_val.pkl',  # Match dataset pkl format
     backend_args=None,
     metric='bbox'
 )
@@ -298,7 +299,7 @@ test_evaluator = dict(
     use_lidar_mask=False,
     use_image_mask=use_mask,
     data_root='data/nuscenes/',
-    ann_file='data/nuscenes/fusionocc-nuscenes_infos_val.pkl',
+    ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_val.pkl',  # Match dataset pkl format
     backend_args=None,
     metric='bbox'
 )
@@ -312,7 +313,7 @@ train_dataloader = dict(
     dataset=dict(
         type=dataset_type,
         data_root='',
-        ann_file='data/nuscenes/fusionocc-nuscenes_infos_train.pkl',
+        ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_train.pkl',
         pipeline=train_pipeline,
         use_mask=use_mask,
         classes=class_names,
@@ -336,7 +337,7 @@ val_dataloader = dict(
     dataset=dict(
         type=dataset_type,
         data_root='',
-        ann_file='data/nuscenes/fusionocc-nuscenes_infos_val.pkl',
+        ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_val.pkl',
         pipeline=test_pipeline,
         use_mask=use_mask,
         classes=class_names,
@@ -359,7 +360,7 @@ test_dataloader = dict(
     dataset=dict(
         type=dataset_type,
         data_root='',
-        ann_file='data/nuscenes/fusionocc-nuscenes_infos_val.pkl',
+        ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_val.pkl',
         pipeline=test_pipeline,
         use_mask=use_mask,
         classes=class_names,

@@ -268,14 +268,25 @@ class PrepareImageSeg(object):
             # Original order: cam0_curr, cam0_adj, cam1_curr, cam1_adj, ...
             if self.sequential and 'adjacent' in results:
                 for adj_idx, adj_info in enumerate(results['adjacent']):
-                    cam_info_adj = adj_info['cams'][cam_name]
+                    # Support both 'cams' and 'images' for adjacent frames
+                    if 'cams' in adj_info:
+                        adj_cam_data = adj_info['cams']
+                        adj_format = 'fusionocc'
+                    elif 'images' in adj_info:
+                        adj_cam_data = adj_info['images']
+                        adj_format = 'occfrmwrk'
+                    else:
+                        continue  # Skip if no camera data
+                    
+                    cam_info_adj = adj_cam_data[cam_name]
                     
                     # Get image path
-                    img_path_adj = cam_info_adj['data_path']
-                    
-                    if data_format == 'fusionocc' and not img_path_adj.startswith('./'):
-                        img_path_adj = f"./data/nuscenes/{img_path_adj}"
-                    elif data_format == 'occfrmwrk':
+                    if adj_format == 'fusionocc':
+                        img_path_adj = cam_info_adj['data_path']
+                        if not img_path_adj.startswith('./'):
+                            img_path_adj = f"./data/nuscenes/{img_path_adj}"
+                    else:  # occfrmwrk
+                        img_path_adj = cam_info_adj['img_path']
                         if not img_path_adj.startswith('/'):
                             img_path_adj = f"./data/nuscenes/samples/{cam_name}/{img_path_adj}"
                     
@@ -308,7 +319,13 @@ class PrepareImageSeg(object):
                 cam2img = cam_info['cam2img']
                 if isinstance(cam2img, list):
                     cam2img = np.array(cam2img)
-                intrinsic = np.array(cam2img[:3, :3], dtype=np.float32)
+                # Ensure we get 3x3 intrinsic matrix
+                if cam2img.shape == (3, 3):
+                    intrinsic = cam2img.astype(np.float32)
+                elif cam2img.shape[0] >= 3 and cam2img.shape[1] >= 3:
+                    intrinsic = cam2img[:3, :3].astype(np.float32)
+                else:
+                    raise ValueError(f"Invalid cam2img shape: {cam2img.shape}")
             intrins.append(torch.from_numpy(intrinsic))
             
             # Get sensor2ego transformation
@@ -326,7 +343,8 @@ class PrepareImageSeg(object):
                 cam2ego = cam_info['cam2ego']
                 if isinstance(cam2ego, list):
                     cam2ego = np.array(cam2ego)
-                sensor2ego = np.array(cam2ego, dtype=np.float32)
+                # Ensure shape is (4, 4)
+                sensor2ego = np.array(cam2ego, dtype=np.float32).reshape(4, 4)
             sensor2egos.append(torch.from_numpy(sensor2ego))
             
             # Get ego2global transformation
@@ -339,17 +357,26 @@ class PrepareImageSeg(object):
                 ego2global[:3, :3] = rot
                 ego2global[:3, 3] = trans
             else:  # occfrmwrk
-                # Use ego2global from results (4x4 matrix or list of [R, t])
-                if 'ego2global' in results:
+                # IMPORTANT: Use per-camera ego2global (same as fusionocc) for consistency
+                # Original model was trained with per-camera ego2global
+                if 'ego2global' in cam_info:
+                    # Per-camera ego2global (PRIORITY - consistent with fusionocc)
+                    ego2global_data = cam_info['ego2global']
+                    ego2global = np.array(ego2global_data, dtype=np.float32).reshape(4, 4)
+                    # DEBUG:
+                    if cam_idx == 0:
+                        import sys
+                        sys.stderr.write(f"[DEBUG] Using per-camera ego2global: {ego2global[0,3]:.2f}, {ego2global[1,3]:.2f}\n")
+                        sys.stderr.flush()
+                elif 'ego2global' in results:
+                    # Sample-level ego2global (fallback)
                     ego2global_data = results['ego2global']
-                    if isinstance(ego2global_data, list) and len(ego2global_data) == 2:
-                        # [rotation_matrix, translation]
-                        rot, trans = ego2global_data
-                        ego2global = np.eye(4, dtype=np.float32)
-                        ego2global[:3, :3] = np.array(rot)
-                        ego2global[:3, 3] = np.array(trans)
-                    else:
-                        ego2global = np.array(ego2global_data, dtype=np.float32)
+                    ego2global = np.array(ego2global_data, dtype=np.float32).reshape(4, 4)
+                    # DEBUG:
+                    if cam_idx == 0:
+                        import sys
+                        sys.stderr.write(f"[DEBUG] Using sample-level ego2global: {ego2global[0,3]:.2f}, {ego2global[1,3]:.2f}\n")
+                        sys.stderr.flush()
                 else:
                     ego2global = np.eye(4, dtype=np.float32)
             ego2globals.append(torch.from_numpy(ego2global))
@@ -374,11 +401,21 @@ class PrepareImageSeg(object):
             
             # Add sensor2egos and ego2globals for adjacent frames
             for adj_info in results['adjacent']:
+                # Support both 'cams' and 'images' for adjacent frames
+                if 'cams' in adj_info:
+                    adj_cam_data = adj_info['cams']
+                    adj_format = 'fusionocc'
+                elif 'images' in adj_info:
+                    adj_cam_data = adj_info['images']
+                    adj_format = 'occfrmwrk'
+                else:
+                    continue  # Skip if no camera data
+                
                 for cam_name in cam_names:
-                    cam_info_adj = adj_info['cams'][cam_name]
+                    cam_info_adj = adj_cam_data[cam_name]
                     
                     # Get sensor transformations for adjacent frame
-                    if data_format == 'fusionocc':
+                    if adj_format == 'fusionocc':
                         # Quaternion to rotation matrix
                         quat_adj = cam_info_adj['sensor2ego_rotation']
                         rot_adj = R.from_quat([quat_adj[1], quat_adj[2], quat_adj[3], quat_adj[0]]).as_matrix()
@@ -398,8 +435,23 @@ class PrepareImageSeg(object):
                         ego2global_adj[:3, 3] = trans_ego_adj
                     else:  # occfrmwrk
                         cam2ego_adj = cam_info_adj.get('cam2ego', np.eye(4))
-                        sensor2ego_adj = np.array(cam2ego_adj, dtype=np.float32)
-                        ego2global_adj = np.array(adj_info.get('ego2global', np.eye(4)), dtype=np.float32)
+                        if isinstance(cam2ego_adj, list):
+                            cam2ego_adj = np.array(cam2ego_adj)
+                        sensor2ego_adj = np.array(cam2ego_adj, dtype=np.float32).reshape(4, 4)
+                        
+                        # IMPORTANT: Use per-camera ego2global (same as fusionocc) for consistency
+                        # Original model was trained with per-camera ego2global
+                        if 'ego2global' in cam_info_adj:
+                            # Per-camera ego2global (PRIORITY - consistent with fusionocc)
+                            ego2global_adj_data = cam_info_adj['ego2global']
+                        elif 'ego2global' in adj_info:
+                            # Sample-level ego2global (fallback)
+                            ego2global_adj_data = adj_info['ego2global']
+                        else:
+                            ego2global_adj_data = np.eye(4)
+                        if isinstance(ego2global_adj_data, list):
+                            ego2global_adj_data = np.array(ego2global_adj_data)
+                        ego2global_adj = np.array(ego2global_adj_data, dtype=np.float32).reshape(4, 4)
                     
                     sensor2egos.append(torch.from_numpy(sensor2ego_adj))
                     ego2globals.append(torch.from_numpy(ego2global_adj))
@@ -554,8 +606,20 @@ class FuseAdjacentSweeps(object):
         return points
     
     def get_adj_points(self, pre_info):
-        """Load points from adjacent frame."""
-        pts_filename = pre_info['lidar_path']
+        """Load points from adjacent frame - supports both formats."""
+        # Support both fusionocc ('lidar_path') and occfrmwrk ('lidar_points' dict) formats
+        if 'lidar_points' in pre_info:
+            # occfrmwrk format
+            pts_filename = pre_info['lidar_points']['lidar_path']
+            # occfrmwrk uses just the filename, need to add full path
+            if not pts_filename.startswith('data/') and not pts_filename.startswith('./'):
+                pts_filename = f'data/nuscenes/samples/LIDAR_TOP/{pts_filename}'
+        elif 'lidar_path' in pre_info:
+            # fusionocc format
+            pts_filename = pre_info['lidar_path']
+        else:
+            return None
+            
         # Handle relative paths
         if pts_filename.startswith('./'):
             pts_filename = pts_filename[2:]
@@ -574,17 +638,37 @@ class FuseAdjacentSweeps(object):
         return points
     
     def get_lidar2global_matrix(self, info):
-        """Get lidar to global transformation matrices."""
-        lidar2lidarego = np.eye(4, dtype=np.float32)
-        lidar2lidarego[:3, :3] = Quaternion(
-            info['lidar2ego_rotation']).rotation_matrix
-        lidar2lidarego[:3, 3] = info['lidar2ego_translation']
+        """Get lidar to global transformation matrices - supports both formats."""
+        # Support both fusionocc and occfrmwrk formats
+        
+        # lidar2ego matrix
+        # IMPORTANT: Check top-level 'lidar2ego' FIRST (for current frame in occfrmwrk format)
+        if 'lidar2ego' in info:
+            # occfrmwrk format: 4x4 matrix at top level (current frame)
+            lidar2lidarego = np.array(info['lidar2ego'], dtype=np.float32).reshape(4, 4)
+        elif 'lidar_points' in info and 'lidar2ego' in info['lidar_points']:
+            # occfrmwrk format: 4x4 matrix in lidar_points dict (adjacent frames)
+            lidar2lidarego = np.array(info['lidar_points']['lidar2ego'], dtype=np.float32).reshape(4, 4)
+        elif 'lidar2ego_rotation' in info and 'lidar2ego_translation' in info:
+            # fusionocc format: rotation quaternion and translation separate
+            lidar2lidarego = np.eye(4, dtype=np.float32)
+            lidar2lidarego[:3, :3] = Quaternion(info['lidar2ego_rotation']).rotation_matrix
+            lidar2lidarego[:3, 3] = info['lidar2ego_translation']
+        else:
+            lidar2lidarego = np.eye(4, dtype=np.float32)
         lidar2lidarego = torch.from_numpy(lidar2lidarego)
         
-        lidarego2global = np.eye(4, dtype=np.float32)
-        lidarego2global[:3, :3] = Quaternion(
-            info['ego2global_rotation']).rotation_matrix
-        lidarego2global[:3, 3] = info['ego2global_translation']
+        # ego2global matrix
+        if 'ego2global' in info:
+            # occfrmwrk format: 4x4 matrix
+            lidarego2global = np.array(info['ego2global'], dtype=np.float32).reshape(4, 4)
+        elif 'ego2global_rotation' in info and 'ego2global_translation' in info:
+            # fusionocc format: rotation quaternion and translation separate
+            lidarego2global = np.eye(4, dtype=np.float32)
+            lidarego2global[:3, :3] = Quaternion(info['ego2global_rotation']).rotation_matrix
+            lidarego2global[:3, 3] = info['ego2global_translation']
+        else:
+            lidarego2global = np.eye(4, dtype=np.float32)
         lidarego2global = torch.from_numpy(lidarego2global)
         
         return lidar2lidarego, lidarego2global
@@ -596,7 +680,15 @@ class FuseAdjacentSweeps(object):
             return results
         
         points = results['points']
-        curr_lidar2ego, curr_ego2global = self.get_lidar2global_matrix(results["curr"])
+        
+        # Get current frame transformation matrices
+        # Support both fusionocc ('curr' wrapper) and occfrmwrk (direct) formats
+        if 'curr' in results:
+            curr_info = results["curr"]
+        else:
+            curr_info = results
+        
+        curr_lidar2ego, curr_ego2global = self.get_lidar2global_matrix(curr_info)
         
         pre_points_list = []
         for i, pre_info in enumerate(results["lidar_adjacent"]):
@@ -605,11 +697,13 @@ class FuseAdjacentSweeps(object):
                 continue
                 
             pre_lidar2ego, pre_ego2global = self.get_lidar2global_matrix(pre_info)
+            
             # Transform from previous frame to current frame
             pre2curr = torch.inverse(curr_ego2global.matmul(curr_lidar2ego)).matmul(
                 pre_ego2global.matmul(pre_lidar2ego))
             pre_points.tensor[:, :3] = pre_points.tensor[:, :3].matmul(
                 pre2curr[:3, :3].T) + pre2curr[:3, 3].unsqueeze(0)
+            
             pre_points_list.append(pre_points)
         
         # Concatenate all points
@@ -723,33 +817,51 @@ class PointsLidar2Ego(object):
     
     This transform converts point coordinates from the LiDAR sensor frame
     to the ego vehicle frame using the lidar2ego transformation matrix.
+    Supports both fusionocc and occfrmwrk data formats.
     """
     
     def __call__(self, input_dict):
         """Transform points from lidar to ego coordinate.
         
         Args:
-            input_dict (dict): Result dict with 'points' and 'curr' containing
-                             'lidar2ego_rotation' and 'lidar2ego_translation'.
+            input_dict (dict): Result dict with 'points' and lidar2ego transformation.
+                             For fusionocc: expects 'curr' dict with 'lidar2ego_rotation' and 'lidar2ego_translation'.
+                             For occfrmwrk: expects 'lidar2ego' 4x4 matrix directly in input_dict.
         
         Returns:
             dict: Results with transformed points.
         """
         points = input_dict['points']
         
-        # Get lidar2ego transformation from curr dict
-        lidar2ego_rotation = input_dict['curr']['lidar2ego_rotation']
-        lidar2ego_translation = input_dict['curr']['lidar2ego_translation']
-        
-        # Convert rotation to rotation matrix
-        lidar2ego_rots = torch.tensor(
-            Quaternion(lidar2ego_rotation).rotation_matrix
-        ).float()
-        lidar2ego_trans = torch.tensor(lidar2ego_translation).float()
-        
-        # Apply rotation and translation
-        points.tensor[:, :3] = points.tensor[:, :3] @ lidar2ego_rots.T
-        points.tensor[:, :3] += lidar2ego_trans
+        # Support both formats
+        if 'lidar2ego' in input_dict:
+            # occfrmwrk format or dataset already provided the matrix
+            lidar2ego = input_dict['lidar2ego']
+            if isinstance(lidar2ego, np.ndarray):
+                lidar2ego = torch.from_numpy(lidar2ego).float()
+            else:
+                lidar2ego = torch.tensor(lidar2ego).float()
+            
+            # Apply transformation
+            points.tensor[:, :3] = points.tensor[:, :3] @ lidar2ego[:3, :3].T
+            points.tensor[:, :3] += lidar2ego[:3, 3]
+        elif 'curr' in input_dict and 'lidar2ego_rotation' in input_dict['curr']:
+            # fusionocc format
+            lidar2ego_rotation = input_dict['curr']['lidar2ego_rotation']
+            lidar2ego_translation = input_dict['curr']['lidar2ego_translation']
+            
+            # Convert rotation quaternion to rotation matrix
+            lidar2ego_rots = torch.tensor(
+                Quaternion(lidar2ego_rotation).rotation_matrix
+            ).float()
+            lidar2ego_trans = torch.tensor(lidar2ego_translation).float()
+            
+            # Apply rotation and translation
+            points.tensor[:, :3] = points.tensor[:, :3] @ lidar2ego_rots.T
+            points.tensor[:, :3] += lidar2ego_trans
+        else:
+            # No transformation available, skip
+            pass
         
         input_dict['points'] = points
         return input_dict
