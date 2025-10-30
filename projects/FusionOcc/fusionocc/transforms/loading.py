@@ -49,10 +49,11 @@ class PrepareImageSeg(object):
             self,
             data_config,
             restore_upsample=8,
-        downsample=1,
+	downsample=1,
             is_train=False,
             sequential=False,
-            img_seg_dir=None
+            img_seg_dir=None,
+            num_adj_frames=1  # Number of adjacent frames expected
     ):
         self.is_train = is_train
         self.data_config = data_config
@@ -60,6 +61,7 @@ class PrepareImageSeg(object):
         self.restore_upsample = restore_upsample
         self.downsample = downsample
         self.img_seg_dir = img_seg_dir
+        self.num_adj_frames = num_adj_frames  # Expected number of adjacent frames
 
         # Normalization (ImageNet stats)
         self.mean = np.array([123.675, 116.28, 103.53])
@@ -380,71 +382,129 @@ class PrepareImageSeg(object):
             post_rots.append(post_rot_3d)
             post_trans.append(post_tran_3d)
         
-        # After camera loop: extend intrins/post_rots/post_trans and add adjacent sensor2egos/ego2globals
-        # NOTE: Original uses INTERLEAVED order for imgs but SEPARATED order for transformations!
-        if self.sequential and 'adjacent' in results and len(results['adjacent']) > 0:
-            num_cams = len(cam_names)
+        # After camera loop: CRITICAL - check if we have the expected number of images
+        # We should have num_cams * (1 + num_adj_frames) images if sequential=True
+        num_cams = len(cam_names)
+        if self.sequential:
+            expected_imgs_per_cam = 1 + self.num_adj_frames
+            expected_total_imgs = num_cams * expected_imgs_per_cam
+            actual_imgs = len(imgs)
+            
+            # If we don't have enough images, duplicate current frames
+            if actual_imgs < expected_total_imgs:
+                num_missing = expected_total_imgs - actual_imgs
+                # Duplicate the last num_missing images from the current frames
+                for i in range(num_missing):
+                    imgs.append(imgs[i % num_cams].clone())
+                    segs.append(segs[i % num_cams].clone())
+            
             # Extend intrins, post_rots, post_trans for adjacent frames (same values)
             intrins.extend(intrins[:num_cams])
             post_rots.extend(post_rots[:num_cams])
             post_trans.extend(post_trans[:num_cams])
             
             # Add sensor2egos and ego2globals for adjacent frames
-            for adj_info in results['adjacent']:
-                # Support both 'cams' and 'images' for adjacent frames
-                if 'cams' in adj_info:
-                    adj_cam_data = adj_info['cams']
-                    adj_format = 'fusionocc'
-                elif 'images' in adj_info:
-                    adj_cam_data = adj_info['images']
-                    adj_format = 'occfrmwrk'
-                else:
-                    continue  # Skip if no camera data
-                
-                for cam_name in cam_names:
-                    cam_info_adj = adj_cam_data[cam_name]
+            has_adjacent = 'adjacent' in results and len(results['adjacent']) > 0
+            
+            if has_adjacent and len(results['adjacent']) >= self.num_adj_frames:
+                # Use actual adjacent frames
+                for adj_info in results['adjacent'][:self.num_adj_frames]:
+                    # Support both 'cams' and 'images' for adjacent frames
+                    if 'cams' in adj_info:
+                        adj_cam_data = adj_info['cams']
+                        adj_format = 'fusionocc'
+                    elif 'images' in adj_info:
+                        adj_cam_data = adj_info['images']
+                        adj_format = 'occfrmwrk'
+                    else:
+                        # No camera data, use current frame data
+                        adj_cam_data = cam_data
+                        adj_format = data_format
                     
-                    # Get sensor transformations for adjacent frame
-                    if adj_format == 'fusionocc':
-                        # Quaternion to rotation matrix
-                        quat_adj = cam_info_adj['sensor2ego_rotation']
-                        rot_adj = R.from_quat([quat_adj[1], quat_adj[2], quat_adj[3], quat_adj[0]]).as_matrix()
-                        trans_adj = np.array(cam_info_adj['sensor2ego_translation'])
+                    for cam_name in cam_names:
+                        cam_info_adj = adj_cam_data[cam_name]
                         
-                        sensor2ego_adj = np.eye(4, dtype=np.float32)
-                        sensor2ego_adj[:3, :3] = rot_adj
-                        sensor2ego_adj[:3, 3] = trans_adj
+                        # Get sensor transformations for adjacent frame
+                        if adj_format == 'fusionocc':
+                            # Quaternion to rotation matrix
+                            quat_adj = cam_info_adj['sensor2ego_rotation']
+                            rot_adj = R.from_quat([quat_adj[1], quat_adj[2], quat_adj[3], quat_adj[0]]).as_matrix()
+                            trans_adj = np.array(cam_info_adj['sensor2ego_translation'])
+                            
+                            sensor2ego_adj = np.eye(4, dtype=np.float32)
+                            sensor2ego_adj[:3, :3] = rot_adj
+                            sensor2ego_adj[:3, 3] = trans_adj
+                            
+                            # ego2global for adjacent frame
+                            quat_ego_adj = cam_info_adj['ego2global_rotation']
+                            rot_ego_adj = R.from_quat([quat_ego_adj[1], quat_ego_adj[2], quat_ego_adj[3], quat_ego_adj[0]]).as_matrix()
+                            trans_ego_adj = np.array(cam_info_adj['ego2global_translation'])
+                            
+                            ego2global_adj = np.eye(4, dtype=np.float32)
+                            ego2global_adj[:3, :3] = rot_ego_adj
+                            ego2global_adj[:3, 3] = trans_ego_adj
+                        else:  # occfrmwrk
+                            cam2ego_adj = cam_info_adj.get('cam2ego', np.eye(4))
+                            if isinstance(cam2ego_adj, list):
+                                cam2ego_adj = np.array(cam2ego_adj)
+                            sensor2ego_adj = np.array(cam2ego_adj, dtype=np.float32).reshape(4, 4)
+                            
+                            # IMPORTANT: Use per-camera ego2global (same as fusionocc) for consistency
+                            # Original model was trained with per-camera ego2global
+                            if 'ego2global' in cam_info_adj:
+                                # Per-camera ego2global (PRIORITY - consistent with fusionocc)
+                                ego2global_adj_data = cam_info_adj['ego2global']
+                            elif 'ego2global' in adj_info:
+                                # Sample-level ego2global (fallback)
+                                ego2global_adj_data = adj_info['ego2global']
+                            else:
+                                ego2global_adj_data = np.eye(4)
+                            if isinstance(ego2global_adj_data, list):
+                                ego2global_adj_data = np.array(ego2global_adj_data)
+                            ego2global_adj = np.array(ego2global_adj_data, dtype=np.float32).reshape(4, 4)
                         
-                        # ego2global for adjacent frame
-                        quat_ego_adj = cam_info_adj['ego2global_rotation']
-                        rot_ego_adj = R.from_quat([quat_ego_adj[1], quat_ego_adj[2], quat_ego_adj[3], quat_ego_adj[0]]).as_matrix()
-                        trans_ego_adj = np.array(cam_info_adj['ego2global_translation'])
-                        
-                        ego2global_adj = np.eye(4, dtype=np.float32)
-                        ego2global_adj[:3, :3] = rot_ego_adj
-                        ego2global_adj[:3, 3] = trans_ego_adj
-                    else:  # occfrmwrk
-                        cam2ego_adj = cam_info_adj.get('cam2ego', np.eye(4))
-                        if isinstance(cam2ego_adj, list):
-                            cam2ego_adj = np.array(cam2ego_adj)
-                        sensor2ego_adj = np.array(cam2ego_adj, dtype=np.float32).reshape(4, 4)
-                        
-                        # IMPORTANT: Use per-camera ego2global (same as fusionocc) for consistency
-                        # Original model was trained with per-camera ego2global
-                        if 'ego2global' in cam_info_adj:
-                            # Per-camera ego2global (PRIORITY - consistent with fusionocc)
-                            ego2global_adj_data = cam_info_adj['ego2global']
-                        elif 'ego2global' in adj_info:
-                            # Sample-level ego2global (fallback)
-                            ego2global_adj_data = adj_info['ego2global']
-                        else:
-                            ego2global_adj_data = np.eye(4)
-                        if isinstance(ego2global_adj_data, list):
-                            ego2global_adj_data = np.array(ego2global_adj_data)
-                        ego2global_adj = np.array(ego2global_adj_data, dtype=np.float32).reshape(4, 4)
-                    
-                    sensor2egos.append(torch.from_numpy(sensor2ego_adj))
-                    ego2globals.append(torch.from_numpy(ego2global_adj))
+                        sensor2egos.append(torch.from_numpy(sensor2ego_adj))
+                        ego2globals.append(torch.from_numpy(ego2global_adj))
+            else:
+                # No adjacent frames or not enough: duplicate current frame transformations
+                sensor2egos.extend(sensor2egos[:num_cams] * self.num_adj_frames)
+                ego2globals.extend(ego2globals[:num_cams] * self.num_adj_frames)
+        
+        # CRITICAL: Final validation and padding to ensure consistent sizes
+        num_cams = len(cam_names)
+        if self.sequential:
+            # Expected: num_cams * (1 current + num_adj_frames adjacent)
+            expected_total = num_cams * (1 + self.num_adj_frames)
+            
+            # Pad images if needed
+            while len(imgs) < expected_total:
+                imgs.append(imgs[len(imgs) % num_cams].clone())
+            
+            # Pad segs if needed
+            while len(segs) < expected_total:
+                segs.append(segs[len(segs) % num_cams].clone())
+            
+            # Truncate if too many (shouldn't happen, but just in case)
+            imgs = imgs[:expected_total]
+            segs = segs[:expected_total]
+            
+            # Ensure transformations match
+            while len(intrins) < expected_total:
+                intrins.append(intrins[len(intrins) % num_cams].clone())
+            while len(post_rots) < expected_total:
+                post_rots.append(post_rots[len(post_rots) % num_cams].clone())
+            while len(post_trans) < expected_total:
+                post_trans.append(post_trans[len(post_trans) % num_cams].clone())
+            while len(sensor2egos) < expected_total:
+                sensor2egos.append(sensor2egos[len(sensor2egos) % num_cams].clone())
+            while len(ego2globals) < expected_total:
+                ego2globals.append(ego2globals[len(ego2globals) % num_cams].clone())
+            
+            intrins = intrins[:expected_total]
+            post_rots = post_rots[:expected_total]
+            post_trans = post_trans[:expected_total]
+            sensor2egos = sensor2egos[:expected_total]
+            ego2globals = ego2globals[:expected_total]
         
         # Stack all tensors
         imgs = torch.stack(imgs)
@@ -459,9 +519,10 @@ class PrepareImageSeg(object):
         # Debug logging for tensor shapes
         import sys
         sample_idx = results.get('sample_idx', -1)
-        if sample_idx < 3:
+        if sample_idx < 5:
             sys.stderr.write(f"\n[DEBUG PrepareImageSeg] Sample {sample_idx}: imgs.shape={imgs.shape}, "
-                           f"sensor2egos.shape={sensor2egos.shape}, segs.shape={segs.shape}\n")
+                           f"sensor2egos.shape={sensor2egos.shape}, segs.shape={segs.shape}, "
+                           f"adjacent_len={len(results.get('adjacent', []))}\n")
             sys.stderr.flush()
         
         # Store segs in results for later use
@@ -673,47 +734,60 @@ class FuseAdjacentSweeps(object):
     
     def __call__(self, results):
         """Fuse adjacent lidar sweeps into current frame."""
-        # Check if lidar_adjacent exists and is not empty
-        if 'lidar_adjacent' not in results or len(results['lidar_adjacent']) == 0:
-            return results
-        
         points = results['points']
         
-        # Get current frame transformation matrices
-        # Support both fusionocc ('curr' wrapper) and occfrmwrk (direct) formats
-        if 'curr' in results:
-            curr_info = results["curr"]
-        else:
-            curr_info = results
-        
-        curr_lidar2ego, curr_ego2global = self.get_lidar2global_matrix(curr_info)
-        
-        pre_points_list = []
-        for i, pre_info in enumerate(results["lidar_adjacent"]):
-            pre_points = self.get_adj_points(pre_info)
-            if pre_points is None:
-                continue
+        # Check if lidar_adjacent exists and is not empty
+        if 'lidar_adjacent' in results and len(results['lidar_adjacent']) > 0:
+            # Get current frame transformation matrices
+            # Support both fusionocc ('curr' wrapper) and occfrmwrk (direct) formats
+            if 'curr' in results:
+                curr_info = results["curr"]
+            else:
+                curr_info = results
+            
+            curr_lidar2ego, curr_ego2global = self.get_lidar2global_matrix(curr_info)
+            
+            pre_points_list = []
+            for i, pre_info in enumerate(results["lidar_adjacent"]):
+                pre_points = self.get_adj_points(pre_info)
+                if pre_points is None:
+                    continue
+                    
+                pre_lidar2ego, pre_ego2global = self.get_lidar2global_matrix(pre_info)
                 
-            pre_lidar2ego, pre_ego2global = self.get_lidar2global_matrix(pre_info)
+                # Transform from previous frame to current frame
+                pre2curr = torch.inverse(curr_ego2global.matmul(curr_lidar2ego)).matmul(
+                    pre_ego2global.matmul(pre_lidar2ego))
+                pre_points.tensor[:, :3] = pre_points.tensor[:, :3].matmul(
+                    pre2curr[:3, :3].T) + pre2curr[:3, 3].unsqueeze(0)
+                
+                pre_points_list.append(pre_points)
             
-            # Transform from previous frame to current frame
-            pre2curr = torch.inverse(curr_ego2global.matmul(curr_lidar2ego)).matmul(
-                pre_ego2global.matmul(pre_lidar2ego))
-            pre_points.tensor[:, :3] = pre_points.tensor[:, :3].matmul(
-                pre2curr[:3, :3].T) + pre2curr[:3, 3].unsqueeze(0)
-            
-            pre_points_list.append(pre_points)
+            # Concatenate all points
+            if pre_points_list:
+                points = points.cat(pre_points_list)
+                points = points[:, self.use_dim]
         
-        # Concatenate all points
-        points = points.cat(pre_points_list)
-        points = points[:, self.use_dim]
+        # CRITICAL: Always fix point size to ensure consistent batch sizes
+        # This must be done even when there are no adjacent frames
+        num_points = len(points.tensor)
+        target_num_points = 40000  # Fixed number of points per sample
         
-        # Sample points to reduce computation (deterministic for testing)
-        # Only keep points with timestamp > 16 (for deterministic comparison)
-        mask = points.tensor[:, 4] > 16
-        # NOTE: Original has random sampling but we disable it for reproducibility
-        # mask = mask | (torch.randint(0, 10, size=mask.shape) > 7)  # random sampling
-        points = points[mask]
+        if num_points > target_num_points:
+            # Random sampling to reduce to target size
+            if self.test_mode:
+                # Deterministic sampling for test mode
+                indices = torch.arange(0, num_points, num_points // target_num_points)[:target_num_points]
+            else:
+                # Random sampling for training
+                indices = torch.randperm(num_points)[:target_num_points]
+            points = points[indices]
+        elif num_points < target_num_points:
+            # Pad with zeros if not enough points
+            padding = target_num_points - num_points
+            padding_points = torch.zeros(padding, points.tensor.shape[1], 
+                                        dtype=points.tensor.dtype, device=points.tensor.device)
+            points.tensor = torch.cat([points.tensor, padding_points], dim=0)
         
         results['points'] = points
         
@@ -764,6 +838,22 @@ class FormatDataSamples(object):
     def __call__(self, results):
         """Format data samples for MMEngine."""
         
+        # CRITICAL: Print all keys and their types/shapes for debugging
+        import sys
+        sample_idx = results.get('sample_idx', -1)
+        if sample_idx < 3:
+            sys.stderr.write(f"\n[DEBUG FormatDataSamples] Sample {sample_idx} keys:\n")
+            for key, value in results.items():
+                if isinstance(value, torch.Tensor):
+                    sys.stderr.write(f"  {key}: Tensor {value.shape}\n")
+                elif isinstance(value, tuple) and len(value) > 0 and isinstance(value[0], torch.Tensor):
+                    sys.stderr.write(f"  {key}: tuple of {len(value)} tensors, first: {value[0].shape}\n")
+                elif isinstance(value, list) and len(value) > 0:
+                    sys.stderr.write(f"  {key}: list of {len(value)} items\n")
+                else:
+                    sys.stderr.write(f"  {key}: {type(value).__name__}\n")
+            sys.stderr.flush()
+        
         # Create data_samples key for MMEngine compatibility
         from mmengine.structures import InstanceData
         try:
@@ -805,6 +895,16 @@ class FormatDataSamples(object):
             data_samples.eval_ann_info = gt_occ  # Also add as eval_ann_info for compatibility
         
         results['data_samples'] = data_samples
+        
+        # CRITICAL: Remove any keys that might cause collation issues
+        # Keep only the essential keys needed for training
+        essential_keys = ['img_inputs', 'points', 'data_samples', 'segs', 'voxel_semantics', 
+                         'mask_camera', 'mask_lidar', 'sample_idx']
+        keys_to_remove = [k for k in results.keys() if k not in essential_keys]
+        for key in keys_to_remove:
+            if sample_idx < 3:
+                sys.stderr.write(f"  Removing key: {key}\n")
+            results.pop(key, None)
         
         return results
 
@@ -921,4 +1021,51 @@ class FusionOccPointsRangeFilter(object):
         """Return a string that describes the module."""
         repr_str = self.__class__.__name__
         repr_str += f'(point_cloud_range={self.pcd_range.tolist()})'
+        return repr_str
+
+
+@TRANSFORMS.register_module()
+class FixPointSize(object):
+    """Fix point cloud size to a constant for batch collation.
+    
+    This transform ensures all samples have the same number of points,
+    which is required for DataLoader collation in PyTorch.
+    
+    Args:
+        target_num_points (int): Target number of points per sample.
+        test_mode (bool): Whether in test mode (deterministic sampling).
+    """
+    
+    def __init__(self, target_num_points=40000, test_mode=False):
+        self.target_num_points = target_num_points
+        self.test_mode = test_mode
+    
+    def __call__(self, results):
+        """Fix point size by sampling or padding."""
+        points = results['points']
+        num_points = len(points.tensor)
+        
+        if num_points > self.target_num_points:
+            # Random sampling to reduce to target size
+            if self.test_mode:
+                # Deterministic sampling for test mode
+                indices = torch.arange(0, num_points, num_points // self.target_num_points)[:self.target_num_points]
+            else:
+                # Random sampling for training
+                indices = torch.randperm(num_points)[:self.target_num_points]
+            points = points[indices]
+        elif num_points < self.target_num_points:
+            # Pad with zeros if not enough points
+            padding = self.target_num_points - num_points
+            padding_points = torch.zeros(padding, points.tensor.shape[1], 
+                                        dtype=points.tensor.dtype, device=points.tensor.device)
+            points.tensor = torch.cat([points.tensor, padding_points], dim=0)
+        
+        results['points'] = points
+        return results
+    
+    def __repr__(self):
+        """Return a string that describes the module."""
+        repr_str = self.__class__.__name__
+        repr_str += f'(target_num_points={self.target_num_points}, test_mode={self.test_mode})'
         return repr_str
