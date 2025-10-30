@@ -200,17 +200,15 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
             index (int): Current frame index
             
         Returns:
-            list: List of adjacent frame infos (ALWAYS returns a list with fixed length)
+            list: List of adjacent frame infos
         """
         info_adj_list = []
         if not hasattr(self, 'multi_adj_frame_id_cfg'):
-            # If no multi_adj_frame_id_cfg, return list with current frame
-            # to maintain consistent batch size
-            return [info]
+            # If no multi_adj_frame_id_cfg, return empty list to maintain consistency
+            return info_adj_list
             
         adj_id_list = list(range(*self.multi_adj_frame_id_cfg))
         
-        # CRITICAL: ALWAYS return a list with len(adj_id_list) elements
         for select_id in adj_id_list:
             orig_select_id = select_id
             select_id = max(index - select_id, 0)
@@ -220,16 +218,11 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
             if (select_id == index or 
                 select_id >= len(self.data_list) or 
                 self.data_list[select_id].get('scene_token') != info.get('scene_token')):
-                # If not same scene, out of bounds, or same index, use current frame as fallback
+                # If not same scene, out of bounds, or same index, use current frame
                 info_adj_list.append(info)
             else:
                 # Use previous frame from same scene
                 info_adj_list.append(self.data_list[select_id])
-        
-        # CRITICAL: Ensure we always return the expected number of adjacent frames
-        # If the list is empty (shouldn't happen), fill with current frame
-        if len(info_adj_list) == 0:
-            info_adj_list = [info] * len(adj_id_list)
         
         return info_adj_list
     
@@ -241,17 +234,15 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
             index (int): Current frame index
             
         Returns:
-            list: List of adjacent lidar frame infos (ALWAYS returns a list with fixed length)
+            list: List of adjacent lidar frame infos
         """
         info_adj_list = []
         if not hasattr(self, 'multi_adj_frame_id_cfg_lidar'):
-            # If no multi_adj_frame_id_cfg_lidar, return list with current frame
-            # to maintain consistent batch size
-            return [info]
+            # If no multi_adj_frame_id_cfg_lidar, return empty list to maintain consistency
+            return info_adj_list
             
         adj_id_list = list(range(*self.multi_adj_frame_id_cfg_lidar))
         
-        # CRITICAL: ALWAYS return a list with len(adj_id_list) elements
         for select_id in adj_id_list:
             select_id = max(index - select_id, 0)
             # Check if adjacent frame is in the same scene
@@ -259,16 +250,11 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
             if (select_id == index or 
                 select_id >= len(self.data_list) or 
                 self.data_list[select_id].get('scene_token') != info.get('scene_token')):
-                # If not same scene, out of bounds, or same index, use current frame as fallback
+                # If not same scene, out of bounds, or same index, use current frame
                 info_adj_list.append(info)
             else:
                 # Use previous frame from same scene
                 info_adj_list.append(self.data_list[select_id])
-        
-        # CRITICAL: Ensure we always return the expected number of adjacent frames
-        # If the list is empty (shouldn't happen), fill with current frame
-        if len(info_adj_list) == 0:
-            info_adj_list = [info] * len(adj_id_list)
         
         return info_adj_list
 
@@ -426,14 +412,14 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         if 'cams' in info or 'images' in info:
             # Get adjacent camera frames
             info_adj_list = self.get_adj_info(info, index)
-            # CRITICAL: Always add 'adjacent' key with GUARANTEED non-empty list
-            # get_adj_info now ALWAYS returns a list with fixed length
-            input_dict['adjacent'] = info_adj_list
+            # CRITICAL: Always add 'adjacent' key even if list is empty to ensure consistent batch sizes
+            # If no adjacent frames available, the list will contain the current frame as fallback
+            input_dict['adjacent'] = info_adj_list if info_adj_list else []
             
             # Get adjacent lidar frames (CRITICAL for multi-frame lidar fusion)
             info_adj_list_lidar = self.get_adj_info_lidar(info, index)
-            # CRITICAL: Always add 'lidar_adjacent' key with GUARANTEED non-empty list
-            input_dict['lidar_adjacent'] = info_adj_list_lidar
+            # CRITICAL: Always add 'lidar_adjacent' key even if list is empty
+            input_dict['lidar_adjacent'] = info_adj_list_lidar if info_adj_list_lidar else []
             
             # Debug logging for first few samples to verify consistency
             if index < 3:

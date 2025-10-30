@@ -156,8 +156,7 @@ train_pipeline = [
         is_train=True,
         data_config=data_config,
         sequential=True,
-        img_seg_dir=img_seg_dir,
-        num_adj_frames=1  # Number of adjacent frames (matches multi_adj_frame_id_cfg)
+        img_seg_dir=img_seg_dir
     ),
     dict(type='LoadOccGTFromFile'),
     dict(
@@ -171,7 +170,6 @@ train_pipeline = [
         use_dim=5),
     dict(type='PointsLidar2Ego'),  # Transform points to ego coordinate
     dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),  # Filter points by range
-    dict(type='FixPointSize', target_num_points=40000, test_mode=False),  # CRITICAL: Fix point size for batch collation
     dict(
         type='LoadAnnotationsAll',
         bda_aug_conf=bda_aug_conf,
@@ -187,8 +185,7 @@ test_pipeline = [
         downsample=1,
         data_config=data_config,
         sequential=True,
-        img_seg_dir=img_seg_dir,
-        num_adj_frames=1  # Number of adjacent frames (matches multi_adj_frame_id_cfg)
+        img_seg_dir=img_seg_dir
     ),
     dict(type='LoadOccGTFromFile'),
     dict(
@@ -199,11 +196,9 @@ test_pipeline = [
     dict(
         type='FuseAdjacentSweeps',  # CRITICAL: Merge adjacent lidar frames
         load_dim=5,
-        use_dim=5,
-        test_mode=True),
+        use_dim=5),
     dict(type='PointsLidar2Ego'),  # Transform points to ego coordinate
     dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),  # Filter points by range
-    dict(type='FixPointSize', target_num_points=40000, test_mode=True),  # CRITICAL: Fix point size for batch collation
     dict(
         type='LoadAnnotationsAll',
         bda_aug_conf=bda_aug_conf,
@@ -312,7 +307,7 @@ test_evaluator = dict(
 # MMEngine DataLoader Configuration
 train_dataloader = dict(
     batch_size=1,
-    num_workers=4,  # Back to 4 for normal training
+    num_workers=4,
     persistent_workers=True,
     sampler=dict(type='DefaultSampler', shuffle=True),
     dataset=dict(
