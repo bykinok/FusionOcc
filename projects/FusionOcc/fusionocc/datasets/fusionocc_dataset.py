@@ -204,7 +204,6 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         """
         info_adj_list = []
         if not hasattr(self, 'multi_adj_frame_id_cfg'):
-            # If no multi_adj_frame_id_cfg, return empty list to maintain consistency
             return info_adj_list
             
         adj_id_list = list(range(*self.multi_adj_frame_id_cfg))
@@ -238,7 +237,6 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         """
         info_adj_list = []
         if not hasattr(self, 'multi_adj_frame_id_cfg_lidar'):
-            # If no multi_adj_frame_id_cfg_lidar, return empty list to maintain consistency
             return info_adj_list
             
         adj_id_list = list(range(*self.multi_adj_frame_id_cfg_lidar))
@@ -412,20 +410,13 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         if 'cams' in info or 'images' in info:
             # Get adjacent camera frames
             info_adj_list = self.get_adj_info(info, index)
-            # CRITICAL: Always add 'adjacent' key even if list is empty to ensure consistent batch sizes
-            # If no adjacent frames available, the list will contain the current frame as fallback
-            input_dict['adjacent'] = info_adj_list if info_adj_list else []
+            if info_adj_list:
+                input_dict['adjacent'] = info_adj_list
             
             # Get adjacent lidar frames (CRITICAL for multi-frame lidar fusion)
             info_adj_list_lidar = self.get_adj_info_lidar(info, index)
-            # CRITICAL: Always add 'lidar_adjacent' key even if list is empty
-            input_dict['lidar_adjacent'] = info_adj_list_lidar if info_adj_list_lidar else []
-            
-            # Debug logging for first few samples to verify consistency
-            if index < 3:
-                import sys
-                sys.stderr.write(f"\n[DEBUG] Sample {index}: adjacent={len(input_dict['adjacent'])}, lidar_adjacent={len(input_dict['lidar_adjacent'])}\n")
-                sys.stderr.flush()
+            if info_adj_list_lidar:
+                input_dict['lidar_adjacent'] = info_adj_list_lidar
             
         return input_dict
         

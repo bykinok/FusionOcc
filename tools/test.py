@@ -218,25 +218,25 @@ def main():
             cfg.model = ConfigDict(**cfg.tta_model, module=cfg.model)
 
         # Limit test samples if max_samples is specified
-        # if args.max_samples is not None:
-        #     print(f"\n==> Limiting test to FIRST {args.max_samples} samples (indices 0-{args.max_samples-1}) for quick evaluation\n")
-        #     # Modify sampler to limit number of samples
-        #     # Use a custom sampler that only samples the first max_samples
-        #     # IMPORTANT: Ensure shuffle=False to get deterministic sample order
-        #     cfg.test_dataloader.sampler = dict(
-        #         type='DefaultSampler',
-        #         shuffle=False,  # CRITICAL: Must be False for reproducible results
-        #     )
-        #     # Also update dataset test_mode to ensure consistent behavior
-        #     if hasattr(cfg, 'test_dataloader') and hasattr(cfg.test_dataloader, 'dataset'):
-        #         cfg.test_dataloader.dataset.test_mode = True
-        #     # Store max_samples in cfg for later use
-        #     cfg.max_samples_limit = args.max_samples
+        if args.max_samples is not None:
+            print(f"\n==> Limiting test to FIRST {args.max_samples} samples (indices 0-{args.max_samples-1}) for quick evaluation\n")
+            # Modify sampler to limit number of samples
+            # Use a custom sampler that only samples the first max_samples
+            # IMPORTANT: Ensure shuffle=False to get deterministic sample order
+            cfg.test_dataloader.sampler = dict(
+                type='DefaultSampler',
+                shuffle=False,  # CRITICAL: Must be False for reproducible results
+            )
+            # Also update dataset test_mode to ensure consistent behavior
+            if hasattr(cfg, 'test_dataloader') and hasattr(cfg.test_dataloader, 'dataset'):
+                cfg.test_dataloader.dataset.test_mode = True
+            # Store max_samples in cfg for later use
+            cfg.max_samples_limit = args.max_samples
 
-        # # Ensure work_dir exists
-        # if cfg.work_dir is not None:
-        #     import os
-        #     os.makedirs(cfg.work_dir, exist_ok=True)
+        # Ensure work_dir exists
+        if cfg.work_dir is not None:
+            import os
+            os.makedirs(cfg.work_dir, exist_ok=True)
 
         # build the runner from config
         if 'runner_type' not in cfg:
@@ -248,112 +248,107 @@ def main():
             runner = RUNNERS.build(cfg)
         
         # Verify work_dir is set correctly
-        # print(f"==> Runner work_dir: {runner.work_dir}")
+        print(f"==> Runner work_dir: {runner.work_dir}")
         
-        # # Fix LoggerHook to prevent "join() argument must be str" error
-        # from pathlib import Path
-        # import logging
-        # from mmengine.fileio import FileClient
+        # Fix LoggerHook to prevent "join() argument must be str" error
+        from pathlib import Path
+        import logging
         
-        # for i, hook in enumerate(runner._hooks):
-        #     hook_name = type(hook).__name__
-        #     if hook_name == 'LoggerHook':
-        #         # Ensure LoggerHook has proper paths set
-        #         work_dir_path = Path(runner.work_dir) if runner.work_dir else None
+        for i, hook in enumerate(runner._hooks):
+            hook_name = type(hook).__name__
+            if hook_name == 'LoggerHook':
+                # Ensure LoggerHook has proper paths set
+                work_dir_path = Path(runner.work_dir) if runner.work_dir else None
                 
-        #         # Initialize file_backend if not present (critical fix for mmengine compatibility)
-        #         if not hasattr(hook, 'file_backend') or hook.file_backend is None:
-        #             hook.file_backend = FileClient.infer_client(uri=str(work_dir_path) if work_dir_path else './')
+                # Set out_dir properly
+                if hasattr(hook, 'out_dir') and work_dir_path:
+                    hook.out_dir = str(work_dir_path)
                 
-        #         # Set out_dir properly
-        #         if hasattr(hook, 'out_dir') and work_dir_path:
-        #             hook.out_dir = str(work_dir_path)
+                # Ensure json_log_path is set correctly
+                if hasattr(hook, 'json_log_path') and work_dir_path:
+                    if hook.json_log_path is None:
+                        hook.json_log_path = str(work_dir_path / 'test.log.json')
                 
-        #         # Ensure json_log_path is set correctly
-        #         if hasattr(hook, 'json_log_path') and work_dir_path:
-        #             if hook.json_log_path is None:
-        #                 hook.json_log_path = str(work_dir_path / 'test.log.json')
-                
-        #         # Get or create the log file path
-        #         if hasattr(hook, 'file_handler'):
-        #             if hook.file_handler is None and work_dir_path:
-        #                 # Create a file handler if it doesn't exist
-        #                 log_file = work_dir_path / f"{work_dir_path.name}.log"
-        #                 file_handler = logging.FileHandler(log_file, 'a')
-        #                 file_handler.setLevel(logging.INFO)
-        #                 formatter = logging.Formatter(
-        #                     '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        #                     datefmt='%Y/%m/%d %H:%M:%S'
-        #                 )
-        #                 file_handler.setFormatter(formatter)
-        #                 hook.file_handler = file_handler
+                # Get or create the log file path
+                if hasattr(hook, 'file_handler'):
+                    if hook.file_handler is None and work_dir_path:
+                        # Create a file handler if it doesn't exist
+                        log_file = work_dir_path / f"{work_dir_path.name}.log"
+                        file_handler = logging.FileHandler(log_file, 'a')
+                        file_handler.setLevel(logging.INFO)
+                        formatter = logging.Formatter(
+                            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                            datefmt='%Y/%m/%d %H:%M:%S'
+                        )
+                        file_handler.setFormatter(formatter)
+                        hook.file_handler = file_handler
         
         # CRITICAL: Explicitly load checkpoint
         # Use args.checkpoint directly instead of cfg.load_from to avoid path issues
-        # if args.checkpoint:
-        #     import torch
-        #     import os
-        #     from mmengine.runner import load_checkpoint
+        if args.checkpoint:
+            import torch
+            import os
+            from mmengine.runner import load_checkpoint
             
-        #     # Handle checkpoint path - try multiple possible locations
-        #     checkpoint_path = args.checkpoint
-        #     possible_paths = [
-        #         checkpoint_path,
-        #         os.path.join('projects/FusionOcc', checkpoint_path),
-        #         os.path.join('FusionOcc_ori', checkpoint_path),
-        #     ]
+            # Handle checkpoint path - try multiple possible locations
+            checkpoint_path = args.checkpoint
+            possible_paths = [
+                checkpoint_path,
+                os.path.join('projects/FusionOcc', checkpoint_path),
+                os.path.join('FusionOcc_ori', checkpoint_path),
+            ]
             
-        #     # Find the actual checkpoint file
-        #     actual_checkpoint_path = None
-        #     for path in possible_paths:
-        #         if os.path.exists(path):
-        #             actual_checkpoint_path = os.path.abspath(path)
-        #             break
+            # Find the actual checkpoint file
+            actual_checkpoint_path = None
+            for path in possible_paths:
+                if os.path.exists(path):
+                    actual_checkpoint_path = os.path.abspath(path)
+                    break
             
-        #     if actual_checkpoint_path is None:
-        #         raise FileNotFoundError(f"Checkpoint not found. Tried: {possible_paths}")
+            if actual_checkpoint_path is None:
+                raise FileNotFoundError(f"Checkpoint not found. Tried: {possible_paths}")
             
-        #     # Load checkpoint explicitly with strict=False to handle any missing/unexpected keys
-        #     load_checkpoint(runner.model, actual_checkpoint_path, map_location='cpu', strict=False)
+            # Load checkpoint explicitly with strict=False to handle any missing/unexpected keys
+            load_checkpoint(runner.model, actual_checkpoint_path, map_location='cpu', strict=False)
 
         # Apply max_samples limit after runner is built
-        # if args.max_samples is not None and hasattr(cfg, 'max_samples_limit'):
-        #     # We need to modify the test_loop after it's created
-        #     # Save original test method and wrap it
-        #     original_test = runner.test
+        if args.max_samples is not None and hasattr(cfg, 'max_samples_limit'):
+            # We need to modify the test_loop after it's created
+            # Save original test method and wrap it
+            original_test = runner.test
             
-        #     def limited_test():
-        #         # Build test loop if not already built
-        #         if runner._test_loop is None or isinstance(runner._test_loop, dict):
-        #             runner._test_loop = runner.build_test_loop(runner._test_loop)
+            def limited_test():
+                # Build test loop if not already built
+                if runner._test_loop is None or isinstance(runner._test_loop, dict):
+                    runner._test_loop = runner.build_test_loop(runner._test_loop)
                 
-        #         # Now modify the dataloader to use specific sample indices
-        #         from torch.utils.data import Subset
-        #         original_dataset = runner._test_loop.dataloader.dataset
-        #         # Use first N samples for fair comparison
-        #         subset_indices = list(range(min(cfg.max_samples_limit, len(original_dataset))))
-        #         subset_dataset = Subset(original_dataset, subset_indices)
+                # Now modify the dataloader to use specific sample indices
+                from torch.utils.data import Subset
+                original_dataset = runner._test_loop.dataloader.dataset
+                # Use first N samples for fair comparison
+                subset_indices = list(range(min(cfg.max_samples_limit, len(original_dataset))))
+                subset_dataset = Subset(original_dataset, subset_indices)
                 
-        #         # Rebuild dataloader with subset
-        #         from torch.utils.data import DataLoader
-        #         dataloader_cfg = runner._test_loop.dataloader
+                # Rebuild dataloader with subset
+                from torch.utils.data import DataLoader
+                dataloader_cfg = runner._test_loop.dataloader
                 
-        #         # Create new dataloader with explicit settings for reproducibility
-        #         runner._test_loop.dataloader = DataLoader(
-        #             subset_dataset,
-        #             batch_size=1,  # Always use batch_size=1 for testing
-        #             num_workers=dataloader_cfg.num_workers if hasattr(dataloader_cfg, 'num_workers') else 4,
-        #             collate_fn=dataloader_cfg.collate_fn if hasattr(dataloader_cfg, 'collate_fn') else None,
-        #             pin_memory=getattr(dataloader_cfg, 'pin_memory', False),
-        #             sampler=None,  # No sampler, sequential access
-        #             shuffle=False,  # CRITICAL: Never shuffle for reproducibility
-        #             drop_last=False
-        #         )
+                # Create new dataloader with explicit settings for reproducibility
+                runner._test_loop.dataloader = DataLoader(
+                    subset_dataset,
+                    batch_size=1,  # Always use batch_size=1 for testing
+                    num_workers=dataloader_cfg.num_workers if hasattr(dataloader_cfg, 'num_workers') else 4,
+                    collate_fn=dataloader_cfg.collate_fn if hasattr(dataloader_cfg, 'collate_fn') else None,
+                    pin_memory=getattr(dataloader_cfg, 'pin_memory', False),
+                    sampler=None,  # No sampler, sequential access
+                    shuffle=False,  # CRITICAL: Never shuffle for reproducibility
+                    drop_last=False
+                )
                 
-        #         # Call the original test loop run (LoggerHook should be fixed now)
-        #         runner._test_loop.run()
+                # Call the original test loop run (LoggerHook should be fixed now)
+                runner._test_loop.run()
             
-        #     runner.test = limited_test
+            runner.test = limited_test
 
         # start testing
         runner.test()
@@ -368,34 +363,34 @@ def main():
                 save_eval_results_to_log(f"Results saved to: {args.out}", args.log_file, args.config, args.checkpoint)
         
         # Clean up resources and exit cleanly
-        # import sys
-        # print("\n" + "="*60, flush=True)
-        # print("✓ Testing completed successfully!", flush=True)
-        # print("="*60, flush=True)
-        # sys.stdout.flush()
-        # sys.stderr.flush()
+        import sys
+        print("\n" + "="*60, flush=True)
+        print("✓ Testing completed successfully!", flush=True)
+        print("="*60, flush=True)
+        sys.stdout.flush()
+        sys.stderr.flush()
         
-        # import gc
-        # import torch
-        # import os
+        import gc
+        import torch
+        import os
         
-        # # Clear CUDA cache
-        # if torch.cuda.is_available():
-        #     torch.cuda.empty_cache()
-        #     torch.cuda.synchronize()
+        # Clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
         
-        # # Delete runner and model explicitly
-        # if 'runner' in locals():
-        #     if hasattr(runner, 'model'):
-        #         del runner.model
-        #     del runner
+        # Delete runner and model explicitly
+        if 'runner' in locals():
+            if hasattr(runner, 'model'):
+                del runner.model
+            del runner
         
-        # # Force garbage collection
-        # gc.collect()
+        # Force garbage collection
+        gc.collect()
         
-        # # Use os._exit(0) to avoid Python cleanup handlers
-        # # which may cause "free(): invalid pointer" core dump
-        # os._exit(0)
+        # Use os._exit(0) to avoid Python cleanup handlers
+        # which may cause "free(): invalid pointer" core dump
+        os._exit(0)
 
     finally:
         # Cleanup logging (only if we didn't exit cleanly above)

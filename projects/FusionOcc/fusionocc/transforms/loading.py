@@ -266,7 +266,7 @@ class PrepareImageSeg(object):
             
             # IMPORTANT: Process adjacent frames IMMEDIATELY after current frame (interleaved!)
             # Original order: cam0_curr, cam0_adj, cam1_curr, cam1_adj, ...
-            if self.sequential and 'adjacent' in results and len(results['adjacent']) > 0:
+            if self.sequential and 'adjacent' in results:
                 for adj_idx, adj_info in enumerate(results['adjacent']):
                     # Support both 'cams' and 'images' for adjacent frames
                     if 'cams' in adj_info:
@@ -382,7 +382,7 @@ class PrepareImageSeg(object):
         
         # After camera loop: extend intrins/post_rots/post_trans and add adjacent sensor2egos/ego2globals
         # NOTE: Original uses INTERLEAVED order for imgs but SEPARATED order for transformations!
-        if self.sequential and 'adjacent' in results and len(results['adjacent']) > 0:
+        if self.sequential and 'adjacent' in results:
             num_cams = len(cam_names)
             # Extend intrins, post_rots, post_trans for adjacent frames (same values)
             intrins.extend(intrins[:num_cams])
@@ -455,14 +455,6 @@ class PrepareImageSeg(object):
         intrins = torch.stack(intrins)
         post_rots = torch.stack(post_rots)
         post_trans = torch.stack(post_trans)
-        
-        # Debug logging for tensor shapes
-        import sys
-        sample_idx = results.get('sample_idx', -1)
-        if sample_idx < 3:
-            sys.stderr.write(f"\n[DEBUG PrepareImageSeg] Sample {sample_idx}: imgs.shape={imgs.shape}, "
-                           f"sensor2egos.shape={sensor2egos.shape}, segs.shape={segs.shape}\n")
-            sys.stderr.flush()
         
         # Store segs in results for later use
         results['segs'] = segs
@@ -673,8 +665,8 @@ class FuseAdjacentSweeps(object):
     
     def __call__(self, results):
         """Fuse adjacent lidar sweeps into current frame."""
-        # Check if lidar_adjacent exists and is not empty
-        if 'lidar_adjacent' not in results or len(results['lidar_adjacent']) == 0:
+        # Check if lidar_adjacent exists
+        if 'lidar_adjacent' not in results:
             return results
         
         points = results['points']
