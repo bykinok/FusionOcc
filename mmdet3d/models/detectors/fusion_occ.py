@@ -14,6 +14,10 @@ from .bevdet import BEVDepth4D
 @DETECTORS.register_module()
 class FusionDepthSeg(BEVDepth4D):
     def __init__(self, **kwargs):
+        # Initialize data_preprocessor if not present (for compatibility with MMEngine)
+        if 'data_preprocessor' not in kwargs:
+            kwargs['data_preprocessor'] = None
+            
         super(FusionDepthSeg, self).__init__(**kwargs)
 
     def prepare_img_3d_feat(self, img, sensor2keyego, ego2global, intrin,
@@ -83,6 +87,10 @@ class FusionOCC(FusionDepthSeg):
                  occ_encoder_backbone=None,
                  occ_encoder_neck=None,
                  **kwargs):
+        # Initialize data_preprocessor if not present
+        if 'data_preprocessor' not in kwargs:
+            kwargs['data_preprocessor'] = None
+        
         super(FusionOCC, self).__init__(
             img_bev_encoder_backbone=occ_encoder_backbone,
             img_bev_encoder_neck=occ_encoder_neck,

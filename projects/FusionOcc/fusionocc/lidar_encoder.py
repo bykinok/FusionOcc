@@ -229,6 +229,26 @@ class CustomSparseEncoder(nn.Module):
         return spatial_features, encode_features, out
 
     def forward(self, points, **kwargs):
+        # Get the device of the model parameters
+        device = next(self.parameters()).device
+        
+        # Move points to the correct device if they're not already there
+        if isinstance(points, list):
+            moved_points = []
+            for pt in points:
+                if hasattr(pt, 'tensor'):
+                    # LiDARPoints or similar object with tensor attribute
+                    if pt.tensor.device != device:
+                        pt.tensor = pt.tensor.to(device)
+                    moved_points.append(pt)
+                elif isinstance(pt, torch.Tensor):
+                    moved_points.append(pt.to(device))
+                else:
+                    moved_points.append(pt)
+            points = moved_points
+        elif isinstance(points, torch.Tensor):
+            points = points.to(device)
+        
         lidar_feats, coords, bs_list, inv_idx_list = self.scatter_voxelize(points)
         batch_size = coords[-1, 0] + 1
         lidar_feat, x_list, x_sparse_out = self.encode(lidar_feats, coords, batch_size)

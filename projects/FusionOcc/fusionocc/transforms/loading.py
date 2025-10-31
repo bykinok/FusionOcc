@@ -748,15 +748,52 @@ class LoadAnnotationsAll(object):
 
 @TRANSFORMS.register_module()
 class FormatDataSamples(object):
-    """Format data for MMEngine compatibility."""
+    """Format data for MMEngine compatibility and collect necessary keys."""
     
-    def __init__(self):
-        pass
+    def __init__(self, 
+                 keys=('img_inputs', 'points', 'sparse_depth', 'segs', 'voxel_semantics', 'mask_camera'),
+                 meta_keys=('filename', 'ori_shape', 'img_shape', 'lidar2img', 'ego2img', 'ego2lidar', 
+                           'sensor2sensorego', 'sensorego2global', 'sensorego2sensor', 'global2sensorego', 
+                           'cam2img', 'depth2img', 'pad_shape', 'scale_factor', 'flip',
+                           'pcd_horizontal_flip', 'pcd_vertical_flip', 'box_mode_3d',
+                           'box_type_3d', 'img_norm_cfg', 'pcd_trans', 'sample_idx',
+                           'pcd_scale_factor', 'pcd_rotation', 'pcd_rotation_angle',
+                           'pts_filename', 'transformation_3d_flow', 'trans_mat', 'index',
+                           'sequence_group_idx', 'curr_to_prev_lidar_rt', 'curr_to_prev_ego_rt', 
+                           'start_of_sequence', 'can_bus', 'scene_name', 'affine_aug')):
+        self.keys = keys
+        self.meta_keys = meta_keys
     
     def __call__(self, results):
-        """Format data samples for MMEngine."""
+        """Format data samples for MMEngine and collect keys."""
         
-        # Create data_samples key for MMEngine compatibility
+        # Collect data similar to Collect3D
+        data = {}
+        img_metas = {}
+        
+        # Collect meta information
+        for key in self.meta_keys:
+            if key in results:
+                img_metas[key] = results[key]
+        
+        # Collect main data keys and convert to tensors
+        for key in self.keys:
+            if key in results:
+                value = results[key]
+                # Convert lists to tensors to match original behavior
+                if isinstance(value, list):
+                    if key in ['voxel_semantics', 'mask_camera', 'segs', 'sparse_depth']:
+                        if len(value) > 0:
+                            if isinstance(value[0], torch.Tensor):
+                                value = torch.stack(value, dim=0)
+                            elif isinstance(value[0], np.ndarray):
+                                value = torch.from_numpy(np.stack(value, axis=0))
+                data[key] = value
+        
+        # Add img_metas
+        data['img_metas'] = img_metas
+        
+        # Create data_samples for MMEngine compatibility
         from mmengine.structures import InstanceData
         try:
             from mmdet3d.structures import Det3DDataSample
@@ -796,9 +833,10 @@ class FormatDataSamples(object):
             data_samples.gt_occ = gt_occ
             data_samples.eval_ann_info = gt_occ  # Also add as eval_ann_info for compatibility
         
-        results['data_samples'] = data_samples
+        data['data_samples'] = data_samples
         
-        return results
+        # Return the collected data
+        return data
 
 
 @TRANSFORMS.register_module()

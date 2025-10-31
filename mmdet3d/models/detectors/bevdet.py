@@ -25,6 +25,10 @@ class BEVDet(CenterPoint):
 
     def __init__(self, img_view_transformer, img_bev_encoder_backbone,
                  img_bev_encoder_neck, **kwargs):
+        # Initialize data_preprocessor if not present (for compatibility with MMEngine)
+        if 'data_preprocessor' not in kwargs:
+            kwargs['data_preprocessor'] = None
+            
         super(BEVDet, self).__init__(**kwargs)
         self.img_view_transformer = builder.build_neck(img_view_transformer)
         self.img_bev_encoder_backbone = \

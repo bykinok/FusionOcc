@@ -185,26 +185,72 @@ class CrossModalLSS(LSSViewTransformerBEVDepth):
 
     @force_fp32()
     def seg_loss(self, seg_pred, seg_label, mask_empty=True):
-        seg_label = seg_label[:, :, ::self.seg_down_sample, ::self.seg_down_sample]
+        # Convert list to tensor if needed
+        if isinstance(seg_label, list):
+            # Stack along batch dimension
+            seg_label = torch.stack(seg_label, dim=0)
+        
+        # Handle different seg_label shapes
+        # Expected: seg_label should be [batch*cameras, H, W] or [batch, cameras, H, W]
+        if seg_label.dim() == 4:
+            # Shape is [batch, cameras, H, W], reshape to [batch*cameras, H, W]
+            B, C, H, W = seg_label.shape
+            seg_label = seg_label.reshape(B * C, H, W)
+        
+        # seg_pred is [batch*cameras, num_classes, H_feat, W_feat]
+        # seg_label should be [batch*cameras, H_orig, W_orig]
+        # We need to match the number of samples
+        if seg_label.shape[0] != seg_pred.shape[0]:
+            # Adjust seg_label to match seg_pred batch size
+            if seg_label.shape[0] > seg_pred.shape[0]:
+                # Take first N samples to match seg_pred
+                seg_label = seg_label[:seg_pred.shape[0]]
+        
+        # Downsample seg_label
+        seg_label = seg_label[:, ::self.seg_down_sample, ::self.seg_down_sample]
         vis_seg_label = seg_label.clone().detach()
-        seg_label = seg_label.reshape(-1)
+        
+        # Reshape seg_pred
         seg_pred = seg_pred.permute(0, 2, 3, 1).contiguous()
         vis_seg_pred = seg_pred
         seg_pred = seg_pred.view(-1, self.seg_num_classes)
+        
+        # Reshape seg_label to match seg_pred
+        seg_label = seg_label.reshape(-1).long()
+        
+        # Apply mask
         if mask_empty:
             mask = seg_label != 17
-            seg_pred = seg_pred[mask]
-            seg_label = seg_label[mask]
+            if mask.sum() > 0:  # Only apply if there are valid pixels
+                seg_pred = seg_pred[mask]
+                seg_label = seg_label[mask]
+        
         seg_loss = torch.nn.functional.cross_entropy(input=seg_pred, target=seg_label)
         return seg_loss, vis_seg_pred, vis_seg_label
 
     @force_fp32()
     def depth_loss(self, depth_pred, depth_label):
         depth_label, vis_depth_label = self.get_downsampled_gt_depth(depth_label)
+        
+        # Handle case when depth_label is None
+        if depth_label is None:
+            # Return zero loss
+            depth_loss = torch.tensor(0.0, device=depth_pred.device, dtype=depth_pred.dtype)
+            depth_pred = depth_pred.permute(0, 2, 3, 1).contiguous()
+            vis_depth_pred = depth_pred
+            return depth_loss, vis_depth_pred, None
+        
         depth_pred = depth_pred.permute(0, 2, 3, 1).contiguous()
         vis_depth_pred = depth_pred
         depth_pred = depth_pred.view(-1, self.D)
         fg_mask = torch.max(depth_label, dim=1).values > 0.0
+        
+        # Check if there are any foreground pixels
+        if fg_mask.sum() == 0:
+            # No foreground pixels, return zero loss
+            depth_loss = torch.tensor(0.0, device=depth_pred.device, dtype=depth_pred.dtype)
+            return depth_loss, vis_depth_pred, vis_depth_label
+        
         depth_label = depth_label[fg_mask]
         depth_pred = depth_pred[fg_mask]
         with autocast(enabled=False):

@@ -38,6 +38,28 @@ except ImportError:
 from .lidar_encoder import CustomSparseEncoder
 
 
+class SimpleDataPreprocessor(nn.Module):
+    """Simple data preprocessor that moves data to the correct device."""
+    
+    def __init__(self):
+        super().__init__()
+        
+    def forward(self, data, training=False):
+        """Process data and move to device - PASSTHROUGH mode.
+        
+        Args:
+            data (dict): Input data dictionary
+            training (bool): Whether in training mode
+            
+        Returns:
+            dict: Processed data (unchanged, just passed through)
+        """
+        # CRITICAL: Just return data as-is
+        # MMEngine will handle device placement
+        # FormatDataSamples already collected the necessary keys
+        return data
+
+
 @MODELS.register_module()
 class FusionDepthSeg(nn.Module):
     """Base class for FusionDepthSeg detector."""
@@ -50,8 +72,17 @@ class FusionDepthSeg(nn.Module):
                  img_bev_encoder_neck=None,
                  pre_process=None,
                  num_adj=1,
+                 data_preprocessor=None,
                  **kwargs):
         super(FusionDepthSeg, self).__init__()
+        
+        # Initialize data_preprocessor for MMEngine compatibility
+        if data_preprocessor is not None:
+            from mmdet3d.registry import MODELS as MODELS_REGISTRY
+            self.data_preprocessor = MODELS_REGISTRY.build(data_preprocessor)
+        else:
+            # Create a simple data_preprocessor that moves data to device
+            self.data_preprocessor = SimpleDataPreprocessor()
         # Initialize with basic components
         # num_frame = num_adj + 1 (current frame + adjacent frames)
         self.num_frame = num_adj + 1
@@ -134,6 +165,13 @@ class FusionDepthSeg(nn.Module):
         """Split the inputs into each frame and compute sensor to key ego transforms."""
         # Get device from model
         device = next(self.parameters()).device
+        
+        # Handle None inputs - this should not happen if forward_train is correct
+        if inputs is None:
+            raise ValueError(
+                "prepare_inputs received None! This should have been caught earlier in forward_train. "
+                "Check that img_inputs is being passed correctly."
+            )
         
         # inputs can be tuple or list: (imgs, sensor2egos, ego2globals, intrins, post_rots, post_trans, [bda], ...)
         if isinstance(inputs, (tuple, list)) and len(inputs) >= 6:
@@ -390,10 +428,12 @@ class FusionOCC(FusionDepthSeg):
                  fuse_loss_weight=0.1,
                  img_bev_encoder_backbone=None,
                  img_bev_encoder_neck=None,
+                 data_preprocessor=None,
                  **kwargs):
         super(FusionOCC, self).__init__(
             img_bev_encoder_backbone=img_bev_encoder_backbone,
             img_bev_encoder_neck=img_bev_encoder_neck,
+            data_preprocessor=data_preprocessor,
             **kwargs)
         
         self.voxel_size = voxel_size
@@ -514,12 +554,181 @@ class FusionOCC(FusionDepthSeg):
         # print(f"DEBUG extract_fusion_feat - After occ_encoder: fusion_feat={fusion_feat.shape}")
         return fusion_feat, depth_key_frame, seg_key_frame
 
+    def train_step(self, data, optim_wrapper=None):
+        """Training step for MMEngine compatibility.
+        
+        This is called by MMEngine's training loop instead of forward().
+        """
+        # Extract data from the batch
+        # MMEngine passes data as a dict or list
+        if isinstance(data, dict):
+            # Try to extract all necessary data
+            losses = self.forward_train(
+                points=data.get('points'),
+                img_inputs=data.get('img_inputs') or data.get('imgs') or data.get('img'),
+                segs=data.get('segs'),
+                sparse_depth=data.get('sparse_depth'),
+                voxel_semantics=data.get('voxel_semantics'),
+                mask_camera=data.get('mask_camera'),
+            )
+        else:
+            # Fallback to forward
+            losses = self(**data, mode='loss')
+        
+        # Parse losses
+        parsed_losses, log_vars = self._parse_losses(losses)
+        
+        # Backward
+        if optim_wrapper is not None:
+            optim_wrapper.update_params(parsed_losses)
+        
+        return log_vars
+    
+    def _parse_losses(self, losses):
+        """Parse losses dict."""
+        import torch
+        log_vars = {}
+        for loss_name, loss_value in losses.items():
+            if isinstance(loss_value, torch.Tensor):
+                log_vars[loss_name] = loss_value.mean().item()
+            elif isinstance(loss_value, list):
+                log_vars[loss_name] = sum(_loss.mean().item() for _loss in loss_value)
+            else:
+                log_vars[loss_name] = loss_value
+        
+        loss = sum(value for key, value in losses.items() if 'loss' in key.lower())
+        log_vars['loss'] = loss.item() if isinstance(loss, torch.Tensor) else loss
+        
+        return loss, log_vars
+
+    def forward(self, inputs=None, data_samples=None, mode='tensor', **kwargs):
+        """Forward function for MMEngine compatibility.
+        
+        Args:
+            inputs (dict): Input data containing 'points' and 'img_inputs'
+            data_samples: Data samples (not used in this implementation)
+            mode (str): Mode of forward pass ('tensor', 'loss', or 'predict')
+            **kwargs: Additional keyword arguments
+            
+        Returns:
+            dict or list: Depending on the mode
+        """
+        # Extract data from data_samples if present
+        if data_samples is not None and not isinstance(data_samples, list):
+            data_samples = [data_samples]
+        
+        # Merge inputs with data from data_samples
+        if data_samples is not None and len(data_samples) > 0:
+            # Extract data from data_samples and merge with inputs
+            for sample in data_samples:
+                if hasattr(sample, 'keys'):
+                    # data_samples is dict-like
+                    for key in ['img_inputs', 'imgs', 'img', 'segs', 'sparse_depth', 'voxel_semantics', 'mask_camera']:
+                        if key in sample:
+                            if inputs is None:
+                                inputs = {}
+                            if key not in inputs:
+                                inputs[key] = sample[key]
+                elif hasattr(sample, '__dict__'):
+                    # data_samples has attributes
+                    for key in ['img_inputs', 'imgs', 'img', 'segs', 'sparse_depth', 'voxel_semantics', 'mask_camera']:
+                        if hasattr(sample, key):
+                            if inputs is None:
+                                inputs = {}
+                            if key not in inputs:
+                                inputs[key] = getattr(sample, key)
+        
+        # Map common alternative key names to expected names
+        if inputs is not None and isinstance(inputs, dict):
+            # Map various possible key names to expected names
+            if 'imgs' in inputs and 'img_inputs' not in inputs:
+                inputs['img_inputs'] = inputs.pop('imgs')
+            if 'img' in inputs and 'img_inputs' not in inputs:
+                inputs['img_inputs'] = inputs.pop('img')
+        
+        # Also check kwargs for image inputs and other data
+        for key in ['img_inputs', 'imgs', 'img', 'segs', 'sparse_depth', 'voxel_semantics', 'mask_camera']:
+            if key in kwargs:
+                if inputs is None:
+                    inputs = {}
+                target_key = 'img_inputs' if key in ['imgs', 'img'] else key
+                if target_key not in inputs:
+                    inputs[target_key] = kwargs.pop(key)
+        
+        if mode == 'loss':
+            # Training mode
+            if inputs is not None and isinstance(inputs, dict):
+                return self.forward_train(**inputs, **kwargs)
+            else:
+                return self.forward_train(**kwargs)
+        elif mode == 'predict':
+            # Testing/Inference mode
+            if inputs is not None and isinstance(inputs, dict):
+                return self.simple_test(**inputs, **kwargs)
+            else:
+                return self.simple_test(**kwargs)
+        elif mode == 'tensor':
+            # Tensor mode (for feature extraction)
+            if inputs is not None and isinstance(inputs, dict):
+                return self.forward_train(**inputs, **kwargs)
+            else:
+                return self.forward_train(**kwargs)
+        else:
+            raise ValueError(f"Invalid mode: {mode}")
+
     def forward_train(self,
                       points=None,
                       img_inputs=None,
                       segs=None,
                       sparse_depth=None,
                       **kwargs):
+        # Debug: print all available parameters
+        # If img_inputs is None, try to find it in kwargs with different names
+        if img_inputs is None:
+            for key in ['imgs', 'img', 'img_inputs']:
+                if key in kwargs and kwargs[key] is not None:
+                    img_inputs = kwargs.pop(key)
+                    break
+        
+        # If still None, raise error
+        if img_inputs is None:
+            raise ValueError("img_inputs is None! Image data is not being passed to forward_train.")
+        
+        # Get model device
+        device = next(self.parameters()).device
+        
+        # Move all inputs to the correct device
+        if points is not None:
+            if isinstance(points, list):
+                points = [p.to(device) if isinstance(p, torch.Tensor) else p for p in points]
+            elif isinstance(points, torch.Tensor):
+                points = points.to(device)
+        
+        if img_inputs is not None:
+            if isinstance(img_inputs, (list, tuple)):
+                img_inputs = [inp.to(device) if isinstance(inp, torch.Tensor) else inp for inp in img_inputs]
+            elif isinstance(img_inputs, torch.Tensor):
+                img_inputs = img_inputs.to(device)
+        
+        if segs is not None:
+            if isinstance(segs, torch.Tensor):
+                segs = segs.to(device)
+            elif isinstance(segs, list):
+                segs = [s.to(device) if isinstance(s, torch.Tensor) else s for s in segs]
+        
+        if sparse_depth is not None:
+            if isinstance(sparse_depth, torch.Tensor):
+                sparse_depth = sparse_depth.to(device)
+            elif isinstance(sparse_depth, list):
+                sparse_depth = [s.to(device) if isinstance(s, torch.Tensor) else s for s in sparse_depth]
+        
+        # Move kwargs tensors to device
+        for key, value in kwargs.items():
+            if isinstance(value, torch.Tensor):
+                kwargs[key] = value.to(device)
+            elif isinstance(value, list):
+                kwargs[key] = [v.to(device) if isinstance(v, torch.Tensor) else v for v in value]
+        
         lidar_feat, x_list, x_sparse_out = self.lidar_encoder(points)
         lidar_feat = lidar_feat.permute(0, 1, 2, 4, 3).contiguous()
 
@@ -543,6 +752,21 @@ class FusionOCC(FusionDepthSeg):
             
         voxel_semantics = kwargs['voxel_semantics']
         mask_camera = kwargs['mask_camera']
+        
+        # Convert to tensor if needed (safety check)
+        if isinstance(voxel_semantics, list):
+            if len(voxel_semantics) > 0:
+                if isinstance(voxel_semantics[0], torch.Tensor):
+                    voxel_semantics = torch.stack(voxel_semantics, dim=0)
+                elif isinstance(voxel_semantics[0], np.ndarray):
+                    voxel_semantics = torch.from_numpy(np.stack(voxel_semantics, axis=0))
+        
+        if isinstance(mask_camera, list):
+            if len(mask_camera) > 0:
+                if isinstance(mask_camera[0], torch.Tensor):
+                    mask_camera = torch.stack(mask_camera, dim=0)
+                elif isinstance(mask_camera[0], np.ndarray):
+                    mask_camera = torch.from_numpy(np.stack(mask_camera, axis=0))
 
         assert voxel_semantics.min() >= 0 and voxel_semantics.max() <= 17
         loss_occ = self.loss_single(voxel_semantics, mask_camera, occ_pred)
@@ -558,7 +782,23 @@ class FusionOCC(FusionDepthSeg):
             preds = preds.reshape(-1, self.num_classes)
             mask_camera = mask_camera.reshape(-1)
             num_total_samples = mask_camera.sum()
-            loss_occ = self.loss_occ(preds, voxel_semantics, mask_camera, avg_factor=num_total_samples)
+            
+            # Manually implement the same behavior as MMDet's CrossEntropyLoss with avg_factor
+            # This is equivalent to the original implementation
+            # Calculate loss with reduction='none' to get per-sample losses
+            loss_per_sample = torch.nn.functional.cross_entropy(
+                preds, voxel_semantics, reduction='none')
+            
+            # Apply mask_camera as weight (convert to float for weighting)
+            weighted_loss = loss_per_sample * mask_camera.float()
+            
+            # Sum and normalize by avg_factor (num_total_samples)
+            # This is exactly what MMDet's loss does with avg_factor parameter
+            if num_total_samples > 0:
+                loss_occ = weighted_loss.sum() / num_total_samples
+            else:
+                loss_occ = weighted_loss.sum() * 0.0
+            
             loss_['loss_occ'] = loss_occ
         else:
             voxel_semantics = voxel_semantics.reshape(-1)
@@ -574,8 +814,26 @@ class FusionOCC(FusionDepthSeg):
                     sparse_depth=None,
                     **kwargs):
         """Test function without augmentation."""
+        # Get model device
+        device = next(self.parameters()).device
+        
+        # Move all inputs to the correct device
+        if points is not None:
+            if isinstance(points, list):
+                points = [p.to(device) if isinstance(p, torch.Tensor) else p for p in points]
+            elif isinstance(points, torch.Tensor):
+                points = points.to(device)
+        
+        if img_inputs is not None:
+            if isinstance(img_inputs, (list, tuple)):
+                img_inputs = [inp.to(device) if isinstance(inp, torch.Tensor) else inp for inp in img_inputs]
+            elif isinstance(img_inputs, torch.Tensor):
+                img_inputs = img_inputs.to(device)
+        
         if sparse_depth is not None:
-            sparse_depth = sparse_depth[0]
+            sparse_depth = sparse_depth[0] if isinstance(sparse_depth, (list, tuple)) else sparse_depth
+            if isinstance(sparse_depth, torch.Tensor):
+                sparse_depth = sparse_depth.to(device)
             
         lidar_feat, x_list, x_sparse_out = self.lidar_encoder(points)
         # N, C, D, H, W -> N,C,D,W,H
