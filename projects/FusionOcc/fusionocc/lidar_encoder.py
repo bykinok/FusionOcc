@@ -210,6 +210,13 @@ class CustomSparseEncoder(nn.Module):
         # Ensure coors is on the same device as voxel_features
         device = voxel_features.device
         coors = coors.int().to(device)
+        
+        # Convert batch_size to int if it's a tensor
+        if isinstance(batch_size, torch.Tensor):
+            batch_size = int(batch_size.item())
+        else:
+            batch_size = int(batch_size)
+        
         input_sp_tensor = SparseConvTensor(
             voxel_features, coors, self.sparse_shape, batch_size
         )

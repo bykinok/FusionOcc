@@ -176,6 +176,7 @@ train_pipeline = [
         bda_aug_conf=bda_aug_conf,
         classes=class_names,
         is_train=True),
+    dict(type='PointToMultiViewDepth', downsample=1, grid_config=grid_config),  # CRITICAL: Generate sparse depth
     dict(type='FormatDataSamples'),
 ]
 
@@ -205,6 +206,7 @@ test_pipeline = [
         bda_aug_conf=bda_aug_conf,
         classes=class_names,
         is_train=False),
+    dict(type='PointToMultiViewDepth', downsample=1, grid_config=grid_config),  # CRITICAL: Generate sparse depth
     dict(type='FormatDataSamples'),
 ]
 

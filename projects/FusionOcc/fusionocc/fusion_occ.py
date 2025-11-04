@@ -729,10 +729,26 @@ class FusionOCC(FusionDepthSeg):
             elif isinstance(value, list):
                 kwargs[key] = [v.to(device) if isinstance(v, torch.Tensor) else v for v in value]
         
+        # Convert sparse_depth and segs from list to tensor if needed
+        if sparse_depth is not None and isinstance(sparse_depth, list):
+            if len(sparse_depth) > 0:
+                if isinstance(sparse_depth[0], torch.Tensor):
+                    sparse_depth = torch.stack(sparse_depth, dim=0).to(device)
+                elif isinstance(sparse_depth[0], np.ndarray):
+                    sparse_depth = torch.from_numpy(np.stack(sparse_depth, axis=0)).to(device)
+        
+        if segs is not None and isinstance(segs, list):
+            if len(segs) > 0:
+                if isinstance(segs[0], torch.Tensor):
+                    segs = torch.stack(segs, dim=0).to(device)
+                elif isinstance(segs[0], np.ndarray):
+                    segs = torch.from_numpy(np.stack(segs, axis=0)).to(device)
+        
         lidar_feat, x_list, x_sparse_out = self.lidar_encoder(points)
         lidar_feat = lidar_feat.permute(0, 1, 2, 4, 3).contiguous()
 
         input_depth = sparse_depth
+        
         img_3d_feat_feat, depth_key_frame, seg_key_frame = self.extract_img_3d_feat(
             img_inputs=img_inputs, input_depth=input_depth)
         fusion_feat = torch.cat([img_3d_feat_feat, lidar_feat], dim=1)
@@ -743,6 +759,7 @@ class FusionOCC(FusionDepthSeg):
         # Use img_view_transformer.get_loss for proper depth and segmentation loss calculation
         depth_loss, seg_loss, vis_depth_pred, vis_depth_label, vis_seg_pred, vis_seg_label = \
             self.img_view_transformer.get_loss(sparse_depth, depth_key_frame, segs, seg_key_frame)
+        
         losses['depth_loss'] = depth_loss * self.fuse_loss_weight
         losses['seg_loss'] = seg_loss * self.fuse_loss_weight
 
@@ -1103,6 +1120,10 @@ class FusionOCC(FusionDepthSeg):
                 mask_camera = data.get('mask_camera', None)
                 
             img_metas = data.get('img_metas', {})
+            
+            # CRITICAL: Extract sparse_depth and segs for depth/seg losses
+            sparse_depth = data.get('sparse_depth', None)
+            segs = data.get('segs', None)
         else:
             # Direct format
             imgs = data['img_inputs']
@@ -1110,148 +1131,22 @@ class FusionOCC(FusionDepthSeg):
             voxel_semantics = data.get('voxel_semantics', None)
             mask_camera = data.get('mask_camera', None)
             img_metas = data.get('img_metas', {})
+            sparse_depth = data.get('sparse_depth', None)
+            segs = data.get('segs', None)
         
-        # Get device from model parameters
-        device = next(self.parameters()).device
-        
-        # Convert LiDARPoints object to tensor if necessary and move to correct device
-        if points is not None:
-            if hasattr(points, 'tensor'):
-                points = points.tensor
-            # Ensure points is on the correct device
-            if isinstance(points, list):
-                points = [pt.to(device) if hasattr(pt, 'to') else pt for pt in points]
-            elif hasattr(points, 'to'):
-                points = points.to(device)
-        
-        # Forward pass
-        if points is not None:
-            # Process lidar data
-            lidar_feat, _, _ = self.lidar_encoder(points)
-            
-            # Extract features from both modalities
-            occ_pred = self.extract_feat(lidar_feat, imgs, img_metas)
-        else:
-            # Image-only mode
-            occ_pred = self.extract_feat(None, imgs, img_metas)
-        
-        # Calculate loss
-        losses = dict()
-        if self.loss_occ is not None:
-            # Reshape predictions and targets
-            if isinstance(occ_pred, (list, tuple)):
-                occ_pred = occ_pred[0]
-            
-            # Make sure shapes match
-            if occ_pred.ndim == 5:  # (B, C, H, W, D)
-                B, C, H, W, D = occ_pred.shape
-                occ_pred = occ_pred.permute(0, 2, 3, 4, 1).reshape(-1, C)
-            
-            # Handle voxel_semantics conversion
-            if voxel_semantics is not None:
-                # Convert to tensor if needed
-                if isinstance(voxel_semantics, list):
-                    if len(voxel_semantics) > 0:
-                        # If it's a single-element list, extract the element
-                        if len(voxel_semantics) == 1:
-                            voxel_semantics = voxel_semantics[0]
-                        
-                        # Now handle the extracted element or list
-                        if isinstance(voxel_semantics, torch.Tensor):
-                            voxel_semantics = voxel_semantics.to(device)
-                        elif hasattr(voxel_semantics, 'shape'):
-                            # If it's a numpy array or similar
-                            voxel_semantics = torch.as_tensor(voxel_semantics, device=device)
-                        else:
-                            # If it's still a list of tensors, stack them
-                            if isinstance(voxel_semantics, list) and len(voxel_semantics) > 0:
-                                voxel_semantics = torch.stack([torch.as_tensor(vs, device=device) for vs in voxel_semantics])
-                            else:
-                                # Convert to tensor
-                                voxel_semantics = torch.tensor(voxel_semantics, device=device)
-                    else:
-                        voxel_semantics = None
-                elif not isinstance(voxel_semantics, torch.Tensor):
-                    voxel_semantics = torch.as_tensor(voxel_semantics, device=device)
-                else:
-                    voxel_semantics = voxel_semantics.to(device)
-                
-                # Reshape if needed
-                if voxel_semantics is not None and hasattr(voxel_semantics, 'ndim'):
-                    if voxel_semantics.ndim == 4:  # (B, H, W, D)
-                        voxel_semantics = voxel_semantics.reshape(-1)
-                    elif voxel_semantics.ndim > 1:
-                        voxel_semantics = voxel_semantics.flatten()
-            
-            # Apply mask if available
-            if mask_camera is not None and self.use_mask:
-                # Convert mask_camera to tensor if needed - handle complex structures safely
-                try:
-                    if isinstance(mask_camera, list):
-                        if len(mask_camera) > 0:
-                            # If it's a single-element list, extract the element
-                            if len(mask_camera) == 1:
-                                mask_camera = mask_camera[0]
-                            
-                            # Now handle the extracted element
-                            if isinstance(mask_camera, torch.Tensor):
-                                mask_camera = mask_camera.to(device)
-                            elif hasattr(mask_camera, 'shape'):
-                                mask_camera = torch.as_tensor(mask_camera, device=device)
-                            else:
-                                # Skip mask if too complex
-                                mask_camera = None
-                        else:
-                            mask_camera = None
-                    elif not isinstance(mask_camera, torch.Tensor):
-                        mask_camera = torch.as_tensor(mask_camera, device=device)
-                    else:
-                        mask_camera = mask_camera.to(device)
-                except (TypeError, ValueError, RuntimeError):
-                    # Skip mask if conversion fails
-                    mask_camera = None
-                    
-                if mask_camera is not None:
-                    if hasattr(mask_camera, 'ndim') and mask_camera.ndim == 4:
-                        mask_camera = mask_camera.reshape(-1)
-                    elif hasattr(mask_camera, 'ndim') and mask_camera.ndim > 1:
-                        mask_camera = mask_camera.flatten()
-                        
-                    if hasattr(mask_camera, 'ndim') and not isinstance(mask_camera, list):
-                        valid_mask = mask_camera > 0
-                        if valid_mask.sum() > 0 and voxel_semantics is not None:
-                            occ_pred = occ_pred[valid_mask]
-                            voxel_semantics = voxel_semantics[valid_mask]
-            
-            # Calculate occupancy loss
-            if voxel_semantics is not None and hasattr(voxel_semantics, 'long'):
-                # Ensure both tensors have compatible shapes
-                if occ_pred.shape[0] != voxel_semantics.shape[0]:
-                    min_size = min(occ_pred.shape[0], voxel_semantics.shape[0])
-                    occ_pred = occ_pred[:min_size]
-                    voxel_semantics = voxel_semantics[:min_size]
-                
-                # Clamp values to valid range
-                voxel_semantics = torch.clamp(voxel_semantics.long(), 0, occ_pred.shape[1] - 1)
-                
-                # Debug - uncomment for debugging
-                # print(f"occ_pred shape: {occ_pred.shape}, voxel_semantics shape: {voxel_semantics.shape}")
-                # print(f"voxel_semantics min: {voxel_semantics.min()}, max: {voxel_semantics.max()}")
-                
-                loss_occ = self.loss_occ(occ_pred, voxel_semantics)
-                
-                # Debug - uncomment for debugging
-                # print(f"Calculated loss: {loss_occ.item()}")
-            else:
-                # If no valid GT, create a dummy loss but warn
-                # print("Warning: No valid voxel_semantics found, using dummy loss")
-                loss_occ = torch.tensor(0.0, device=occ_pred.device, requires_grad=True)
-                
-            losses['loss_occ'] = loss_occ
-        else:
-            # No loss function defined
-            loss_occ = torch.tensor(0.0, device=next(self.parameters()).device, requires_grad=True)
-            losses['loss_occ'] = loss_occ
+        # Call forward_train instead of directly calling extract_feat
+        # This ensures depth_loss and seg_loss are calculated
+        # Note: points should be passed as LiDARPoints objects (or list of tensors)
+        # The lidar_encoder will handle device placement and conversion internally
+        losses = self.forward_train(
+            points=points,
+            img_inputs=imgs,
+            segs=segs,
+            sparse_depth=sparse_depth,
+            voxel_semantics=voxel_semantics,
+            mask_camera=mask_camera,
+            img_metas=img_metas
+        )
         
         # Backward and optimize
         parsed_losses, log_vars = self.parse_losses(losses)
@@ -1427,28 +1322,22 @@ class FusionOCC(FusionDepthSeg):
         if sparse_depth is not None and isinstance(sparse_depth, (list, tuple)):
             sparse_depth = sparse_depth[0]
         
+        # Ensure sparse_depth has batch dimension [B, N, H, W]
+        # If it's [N, H, W], add batch dimension
+        if sparse_depth is not None and isinstance(sparse_depth, torch.Tensor):
+            if sparse_depth.ndim == 3:
+                sparse_depth = sparse_depth.unsqueeze(0)  # [N, H, W] -> [1, N, H, W]
+            # Move sparse_depth to device
+            sparse_depth = sparse_depth.to(device)
+        
         # Move imgs to device
         if isinstance(imgs, (tuple, list)):
             imgs = tuple(x.to(device) if hasattr(x, 'to') and isinstance(x, torch.Tensor) else x for x in imgs)
         elif isinstance(imgs, torch.Tensor):
             imgs = imgs.to(device)
         
-        # Convert LiDARPoints object to tensor if necessary and move to correct device
-        if points is not None:
-            # Handle list of points (e.g., [LiDARPoints])
-            if isinstance(points, list):
-                if len(points) > 0:
-                    points = points[0]  # Extract first element
-                    if hasattr(points, 'tensor'):
-                        points = points.tensor  # Extract tensor from LiDARPoints
-                else:
-                    points = None
-            elif hasattr(points, 'tensor'):
-                points = points.tensor
-            
-            # Ensure points is on the correct device
-            if points is not None and hasattr(points, 'to'):
-                points = points.to(device)
+        # Keep points as LiDARPoints objects - lidar_encoder will handle conversion
+        # No need to convert to tensor here
         
         # Forward pass (without gradient)
         with torch.no_grad():

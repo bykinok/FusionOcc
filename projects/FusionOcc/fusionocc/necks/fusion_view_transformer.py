@@ -234,8 +234,8 @@ class CrossModalLSS(LSSViewTransformerBEVDepth):
         
         # Handle case when depth_label is None
         if depth_label is None:
-            # Return zero loss
-            depth_loss = torch.tensor(0.0, device=depth_pred.device, dtype=depth_pred.dtype)
+            # Return zero loss that preserves computational graph
+            depth_loss = depth_pred.sum() * 0.0  # Maintains requires_grad=True
             depth_pred = depth_pred.permute(0, 2, 3, 1).contiguous()
             vis_depth_pred = depth_pred
             return depth_loss, vis_depth_pred, None
@@ -247,8 +247,8 @@ class CrossModalLSS(LSSViewTransformerBEVDepth):
         
         # Check if there are any foreground pixels
         if fg_mask.sum() == 0:
-            # No foreground pixels, return zero loss
-            depth_loss = torch.tensor(0.0, device=depth_pred.device, dtype=depth_pred.dtype)
+            # No foreground pixels, return zero loss that preserves computational graph
+            depth_loss = depth_pred.sum() * 0.0  # Maintains requires_grad=True
             return depth_loss, vis_depth_pred, vis_depth_label
         
         depth_label = depth_label[fg_mask]
