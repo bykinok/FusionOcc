@@ -1,25 +1,26 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 _base_ = [
-    '_base_/custom_nus-3d.py',
     '_base_/default_runtime.py'
 ]
 
 # Plugin configuration
 custom_imports = dict(
-    imports=['projects.CONNet_CL.mmdet3d_plugin'],
+    imports=['projects.CONNet_L.mmdet3d_plugin'],
     allow_failed_imports=False)
+
+# Runtime configuration
+img_norm_cfg = None
 
 # Input modality
 input_modality = dict(
     use_lidar=True,
-    use_camera=True,
+    use_camera=False,
     use_radar=False,
     use_map=False,
     use_external=False)
 
 # Data configuration
 occ_path = "./data/nuScenes-Occupancy"
-depth_gt_path = './data/depth_gt'
 train_ann_file = "nuscenes_occ_infos_train.pkl"
 val_ann_file = "nuscenes_occ_infos_val.pkl"
 
@@ -30,10 +31,6 @@ class_names = [
 ]
 point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
 occ_size = [512, 512, 40]
-lss_downsample = [4, 4, 4]  # [128 128 10]
-voxel_x = (point_cloud_range[3] - point_cloud_range[0]) / occ_size[0]  # 0.4
-voxel_y = (point_cloud_range[4] - point_cloud_range[1]) / occ_size[1]
-voxel_z = (point_cloud_range[5] - point_cloud_range[2]) / occ_size[2]
 voxel_channels = [80, 160, 320, 640]
 empty_idx = 0  # noise 0-->255
 num_cls = 17  # 0 free, 1-16 obj
@@ -41,33 +38,12 @@ visible_mask = False
 
 cascade_ratio = 4
 sample_from_voxel = True
-sample_from_img = True  # Enable image sampling for multimodal setup
+sample_from_img = False
 
 dataset_type = 'NuscOCCDataset'
 data_root = 'data/nuscenes/'
 backend_args = dict(backend='disk')
 
-data_config = {
-    'cams': ['CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT',
-             'CAM_BACK_LEFT', 'CAM_BACK', 'CAM_BACK_RIGHT'],
-    'Ncams': 6,
-    'input_size': (896, 1600),
-    'src_size': (900, 1600),
-    # image-view augmentation
-    'resize': (-0.06, 0.11),
-    'rot': (-5.4, 5.4),
-    'flip': True,
-    'crop_h': (0.0, 0.0),
-    'resize_test': 0.00,
-}
-
-# downsample ratio in [x, y, z] when generating 3D volumes in LSS
-grid_config = {
-    'xbound': [point_cloud_range[0], point_cloud_range[3], voxel_x*lss_downsample[0]],
-    'ybound': [point_cloud_range[1], point_cloud_range[4], voxel_y*lss_downsample[1]],
-    'zbound': [point_cloud_range[2], point_cloud_range[5], voxel_z*lss_downsample[2]],
-    'dbound': [2.0, 58.0, 0.5],
-}
 numC_Trans = 80
 voxel_out_channel = 256
 voxel_out_indices = (0, 1, 2, 3)
@@ -75,46 +51,13 @@ voxel_out_indices = (0, 1, 2, 3)
 # Model configuration
 model = dict(
     type='OccNet',
-    data_preprocessor=dict(
-        type='Det3DDataPreprocessor',
-        voxel=True,
-        voxel_layer=dict(
-            max_num_points=10,
-            point_cloud_range=point_cloud_range,
-            voxel_size=[0.1, 0.1, 0.1],
-            max_voxels=(90000, 120000))),
     loss_norm=True,
-    img_backbone=dict(
-        pretrained='torchvision://resnet50',
-        type='ResNet',
-        depth=50,
-        num_stages=4,
-        out_indices=(0, 1, 2, 3),
-        frozen_stages=0,
-        with_cp=True,
-        norm_cfg=dict(type='SyncBN', requires_grad=True),
-        norm_eval=False,
-        style='pytorch'),
-    img_neck=dict(
-        type='SECONDFPN',
-        in_channels=[256, 512, 1024, 2048],
-        upsample_strides=[0.25, 0.5, 1, 2],
-        out_channels=[128, 128, 128, 128]),
-    img_view_transformer=dict(
-        type='ViewTransformerLiftSplatShootVoxel',
-        norm_cfg=dict(type='SyncBN', requires_grad=True),
-        loss_depth_weight=3.,
-        loss_depth_type='kld',
-        grid_config=grid_config,
-        data_config=data_config,
-        numC_Trans=numC_Trans,
-        vp_megvii=False),
     pts_voxel_layer=dict(
         max_num_points=10, 
         point_cloud_range=point_cloud_range,
         voxel_size=[0.1, 0.1, 0.1],  # xy size follow centerpoint
         max_voxels=(90000, 120000)),
-    pts_voxel_encoder=dict(type='HardSimpleVFE', num_features=5),
+    pts_voxel_encoder=dict(type='HardSimpleVFE', num_features=4),
     pts_middle_encoder=dict(
         type='SparseLiDAREnc8x',
         input_channel=4,
@@ -123,11 +66,6 @@ model = dict(
         norm_cfg=dict(type='SyncBN', requires_grad=True),
         sparse_shape_xyz=[1024, 1024, 80],  # hardcode, xy size follow centerpoint
         ),
-    occ_fuser=dict(
-        type='VisFuser',
-        in_channels=numC_Trans,
-        out_channels=numC_Trans,
-    ),
     occ_encoder_backbone=dict(
         type='CustomResNet3D',
         depth=18,
@@ -151,7 +89,7 @@ model = dict(
         sample_from_voxel=sample_from_voxel,
         sample_from_img=sample_from_img,
         final_occ_size=occ_size,
-        fine_topk=10000,  # Note: Different from camera-only config
+        fine_topk=15000,
         empty_idx=empty_idx,
         num_level=len(voxel_out_indices),
         in_channels=[voxel_out_channel] * len(voxel_out_indices),
@@ -181,16 +119,6 @@ train_pipeline = [
         use_dim=5),
     dict(type='LoadPointsFromMultiSweeps',
         sweeps_num=10),
-    dict(type='LoadMultiViewImageFromFiles_BEVDet', 
-         is_train=True, 
-         data_config=data_config,
-         sequential=False, 
-         aligned=True, 
-         trans_only=False, 
-         depth_gt_path=depth_gt_path,
-         mmlabnorm=True, 
-         load_depth=True, 
-         img_norm_cfg=None),
     dict(
         type='LoadAnnotationsBEVDepth',
         bda_aug_conf=bda_aug_conf,
@@ -206,7 +134,7 @@ train_pipeline = [
          pc_range=point_cloud_range, 
          cal_visible=visible_mask),
     dict(type='OccDefaultFormatBundle3D', class_names=class_names),
-    dict(type='Collect3D', keys=['img_inputs', 'gt_occ', 'points']),
+    dict(type='Collect3D', keys=['gt_occ', 'points']),
 ]
 
 test_pipeline = [
@@ -216,14 +144,6 @@ test_pipeline = [
         use_dim=5),
     dict(type='LoadPointsFromMultiSweeps',
         sweeps_num=10),
-    dict(type='LoadMultiViewImageFromFiles_BEVDet', 
-         data_config=data_config, 
-         depth_gt_path=depth_gt_path,
-         sequential=False, 
-         aligned=True, 
-         trans_only=False, 
-         mmlabnorm=True, 
-         img_norm_cfg=None),
     dict(
         type='LoadAnnotationsBEVDepth',
         bda_aug_conf=bda_aug_conf,
@@ -241,14 +161,16 @@ test_pipeline = [
          cal_visible=visible_mask),
     dict(type='OccDefaultFormatBundle3D', class_names=class_names, with_label=False), 
     dict(type='Collect3D', 
-         keys=['img_inputs', 'gt_occ', 'points'],
+         keys=['gt_occ', 'points'],
          meta_keys=['pc_range', 'occ_size', 'scene_token', 'lidar_token']),
 ]
+
+# Dataset configs moved to dataloader definitions
 
 # Data loaders
 train_dataloader = dict(
     batch_size=1,
-    num_workers=2,
+    num_workers=4,
     persistent_workers=True,
     sampler=dict(type='DefaultSampler', shuffle=True),
     dataset=dict(
@@ -268,8 +190,8 @@ train_dataloader = dict(
 
 val_dataloader = dict(
     batch_size=1,
-    num_workers=0,
-    persistent_workers=False,
+    num_workers=1,
+    persistent_workers=True,
     drop_last=False,
     sampler=dict(type='DefaultSampler', shuffle=False),
     dataset=dict(
@@ -309,13 +231,15 @@ param_scheduler = [
         eta_min=3e-7,
         by_epoch=True,
         begin=0,
-        end=15),
+        end=15,
+        ),
     dict(
         type='LinearLR',
         start_factor=1.0 / 3,
         by_epoch=False,
         begin=0,
-        end=500)
+        end=500,
+        )
 ]
 
 # Training configuration

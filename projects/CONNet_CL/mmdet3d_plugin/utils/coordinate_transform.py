@@ -25,6 +25,72 @@ def coarse_to_fine_coordinates(coarse_cor, ratio, topk=30000):
 
 def project_points_on_img(points, rots, trans, intrins, post_rots, post_trans, bda_mat, pts_range,
                         W_img, H_img, W_occ, H_occ, D_occ):
+    """Simplified version from original CONet for multimodal setup."""
+    # Handle W_img and H_img being tuple/list (from DataLoader collation)
+    if isinstance(W_img, (tuple, list)):
+        W_img = W_img[0]
+    if isinstance(H_img, (tuple, list)):
+        H_img = H_img[0]
+    
+    with torch.no_grad():
+        voxel_size = ((pts_range[3:] - pts_range[:3]) / torch.tensor([W_occ-1, H_occ-1, D_occ-1])).to(points.device)
+        points = points * voxel_size[None, None] + pts_range[:3][None, None].to(points.device)
+
+        # project 3D point cloud (after bev-aug) onto multi-view images for corresponding 2D coordinates
+        # Handle bda_mat shape and ensure it's on the same device as points
+        if bda_mat.dim() == 2:  # [3, 3]
+            # For 3x3 matrix, add batch dimension and extend to 4x4
+            bda_4x4 = torch.eye(4, device=points.device, dtype=bda_mat.dtype)
+            bda_4x4[:3, :3] = bda_mat.to(points.device)
+            inv_bda = bda_4x4.inverse()
+        else:  # [1, 3, 3] or [1, 4, 4]
+            if bda_mat.shape[-1] == 3:
+                # Convert 3x3 to 4x4
+                bda_4x4 = torch.eye(4, device=points.device, dtype=bda_mat.dtype).unsqueeze(0).repeat(bda_mat.shape[0], 1, 1)
+                bda_4x4[:, :3, :3] = bda_mat.to(points.device)
+                inv_bda = bda_4x4.inverse()[0]  # [4, 4]
+            else:
+                inv_bda = bda_mat.to(points.device).inverse()[0]  # [4, 4]
+        
+        # Apply BDA transformation (points: [1, N, 3])
+        points_homo = torch.cat([points, torch.ones(*points.shape[:-1], 1, device=points.device)], dim=-1)  # [1, N, 4]
+        points = (inv_bda @ points_homo.unsqueeze(-1)).squeeze(-1)[..., :3]  # [1, N, 3]
+        
+        # from lidar to camera
+        # Move all transformation matrices to the same device as points
+        trans = trans.to(points.device)
+        rots = rots.to(points.device)
+        intrins = intrins.to(points.device)
+        post_rots = post_rots.to(points.device)
+        post_trans = post_trans.to(points.device)
+        
+        points = points.view(-1, 1, 3)  # [N, 1, 3]
+        points = points - trans.view(1, -1, 3)  # Broadcasting: [N, n_cam, 3]
+        inv_rots = rots.inverse().unsqueeze(0)  # [1, n_cam, 3, 3]
+        points = (inv_rots @ points.unsqueeze(-1))  # [N, n_cam, 3, 1]
+        
+        # from camera to raw pixel
+        points = (intrins.unsqueeze(0) @ points).squeeze(-1)  # [N, n_cam, 3]
+        points_d = points[..., 2:3]  # [N, n_cam, 1]
+        points_uv = points[..., :2] / (points_d + 1e-5)  # [N, n_cam, 2]
+        
+        # from raw pixel to transformed pixel
+        points_uv = post_rots[..., :2, :2].unsqueeze(0) @ points_uv.unsqueeze(-1)  # [N, n_cam, 2, 1]
+        points_uv = points_uv.squeeze(-1) + post_trans[..., :2].unsqueeze(0)  # [N, n_cam, 2]
+
+        points_uv[..., 0] = (points_uv[..., 0] / (W_img-1) - 0.5) * 2
+        points_uv[..., 1] = (points_uv[..., 1] / (H_img-1) - 0.5) * 2
+
+        mask = (points_d[..., 0] > 1e-5) \
+            & (points_uv[..., 0] > -1) & (points_uv[..., 0] < 1) \
+            & (points_uv[..., 1] > -1) & (points_uv[..., 1] < 1)
+    
+    # points_uv shape: [B, N, n_cam, 2] -> [n_cam, B, N, 2] -> [n_cam, 1, N, 2] (when B=1)
+    # permute(2, 0, 1, 3): dim 2->0, dim 0->1, dim 1->2, dim 3->3
+    return points_uv.permute(2, 0, 1, 3), mask  # [n_cam, 1, N, 2], [N, n_cam]
+
+def project_points_on_img_complex(points, rots, trans, intrins, post_rots, post_trans, bda_mat, pts_range,
+                        W_img, H_img, W_occ, H_occ, D_occ):
     
     def ensure_device(tensor, target_device):
         """Helper function to move tensor to target device"""

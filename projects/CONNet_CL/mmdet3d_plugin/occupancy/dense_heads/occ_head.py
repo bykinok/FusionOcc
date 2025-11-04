@@ -68,8 +68,8 @@ class OccHead(nn.Module):
                         nn.GroupNorm(16, 64),
                         nn.ReLU(inplace=True),
                     )
-                    # Only add image channels if actually using image features
-                    # fine_mlp_input_dim += 64  # Commented out to fix dimension mismatch
+                    # Add image channels since image features are now active
+                    fine_mlp_input_dim += 64  # 128 (voxel) + 64 (image) = 192
 
                 self.fine_mlp = nn.Sequential(
                     nn.Linear(fine_mlp_input_dim, 64),
@@ -172,6 +172,25 @@ class OccHead(nn.Module):
         if self.cascade_ratio != 1:
             if self.sample_from_img or self.sample_from_voxel:
                 coarse_occ_mask = coarse_occ.argmax(1) != self.empty_idx
+                
+                # Debug: Check argmax distribution and logits
+                if not hasattr(self, '_argmax_checked'):
+                    argmax_result = coarse_occ.argmax(1)
+                    print(f"\n[OCC_HEAD] Argmax and Logits analysis:")
+                    print(f"  empty_idx: {self.empty_idx}")
+                    print(f"\nClass distribution (argmax):")
+                    for cls_idx in range(17):
+                        count = (argmax_result == cls_idx).sum().item()
+                        ratio = count / argmax_result.numel() * 100
+                        print(f"  Class {cls_idx}: {count} ({ratio:.2f}%)")
+                    
+                    print(f"\nLogits statistics (mean across spatial dims):")
+                    for cls_idx in range(17):
+                        cls_logits = coarse_occ[0, cls_idx]
+                        print(f"  Class {cls_idx}: mean={cls_logits.mean().item():.4f}, std={cls_logits.std().item():.4f}, max={cls_logits.max().item():.4f}")
+                    
+                    self._argmax_checked = True
+                
                 if coarse_occ_mask.sum() == 0:
                     output['fine_output'] = []
                     output['fine_coord'] = []
@@ -205,13 +224,34 @@ class OccHead(nn.Module):
 
                 for b in range(B):
                     append_feats = []
+                    
+                    # Debug: Check coarse mask
+                    if b == 0 and not hasattr(self, '_coarse_mask_checked'):
+                        print(f"\n[OCC_HEAD Debug] Coarse prediction analysis:")
+                        print(f"  Coarse prediction shape: {coarse_occ.shape}")
+                        print(f"  Coarse occ mask sum: {coarse_occ_mask[b].sum().item()} / {coarse_occ_mask[b].numel()}")
+                        print(f"  Coarse occ mask ratio: {coarse_occ_mask[b].sum().item() / coarse_occ_mask[b].numel() * 100:.2f}%")
+                        self._coarse_mask_checked = True
+                    
                     this_coarse_coord = torch.stack([coarse_coord_x[coarse_occ_mask[b]],
                                                     coarse_coord_y[coarse_occ_mask[b]],
                                                     coarse_coord_z[coarse_occ_mask[b]]], dim=0)  # 3, N
+                    
+                    # Debug: Check coordinates before/after expansion
+                    if b == 0 and not hasattr(self, '_fine_coord_checked'):
+                        print(f"  Coarse coords: {this_coarse_coord.shape}")
+                        self._fine_coord_checked = True
+                    
                     if self.training:
                         this_fine_coord = coarse_to_fine_coordinates(this_coarse_coord, self.cascade_ratio, topk=self.fine_topk)  # 3, 8N/64N
                     else:
                         this_fine_coord = coarse_to_fine_coordinates(this_coarse_coord, self.cascade_ratio)  # 3, 8N/64N
+
+                    # Debug: Check after expansion
+                    if b == 0 and hasattr(self, '_fine_coord_checked') and not hasattr(self, '_fine_expansion_checked'):
+                        print(f"  Fine coords after expansion: {this_fine_coord.shape}")
+                        print(f"  Expansion ratio: {this_fine_coord.shape[1] / this_coarse_coord.shape[1]:.1f}x")
+                        self._fine_expansion_checked = True
 
                     output['fine_coord'].append(this_fine_coord)
                     new_coord = this_fine_coord[None].permute(0,2,1).float().contiguous()  # x y z
@@ -226,84 +266,58 @@ class OccHead(nn.Module):
                         new_feat = F.grid_sample(out_voxel_feats[b:b+1].permute(0,1,4,3,2), this_fine_coord, mode='bilinear', padding_mode='zeros', align_corners=False)
                         append_feats.append(new_feat[0,:,:,0,0].permute(1,0))
                         assert torch.isnan(new_feat).sum().item() == 0
-                        
-            # image branch - temporarily disabled for camera-only model (voxel branch works now)
-            if False and img_feats is not None and self.sample_from_img and transform is not None:
+                    
+                    # image branch
+                    if img_feats is not None and self.sample_from_img and transform is not None:
                         W_new, H_new, D_new = W * self.cascade_ratio, H * self.cascade_ratio, D * self.cascade_ratio
-                        # For camera-only models, handle tuple transform parameters
-                        # transform structure: [rots, trans, intrins, post_rots, post_trans, bda_mat, mlp_input]
                         
-                        # Helper function to extract tensor from potentially tuple parameters
-                        def extract_tensor(param, batch_idx):
-                            if isinstance(param, tuple):
-                                # Use first element of tuple if it's a tuple
-                                tensor = param[0] if len(param) > 0 else param
-                            else:
-                                tensor = param
-                            
-                            if hasattr(tensor, 'dim'):
-                                # For camera parameters, always try to get all cameras for the batch
-                                if tensor.dim() == 3:  # [B, N_cam, ...]  
-                                    return tensor[batch_idx:batch_idx+1]  # [1, N_cam, ...]
-                                elif tensor.dim() == 2:  # [N_cam, ...] 
-                                    return tensor  # Keep all cameras
-                                else:
-                                    return tensor
-                            else:
-                                # If not a tensor, return as is (will be handled in coordinate_transform)
-                                return param
+                        # Handle transform[6] being torch.Size, tensor, or tuple
+                        # Extract H_img and W_img from various possible formats
+                        img_shape = transform[6]
+                        if isinstance(img_shape, (torch.Size, tuple)):
+                            H_img_val = img_shape[0]
+                            W_img_val = img_shape[1]
+                            # If H_img_val or W_img_val are still tuple/list, extract first element
+                            if isinstance(H_img_val, (tuple, list)):
+                                H_img_val = H_img_val[0]
+                            if isinstance(W_img_val, (tuple, list)):
+                                W_img_val = W_img_val[0]
+                        else:
+                            H_img_val = img_shape[0][b:b+1]
+                            W_img_val = img_shape[1][b:b+1]
                         
-                        batch_rots = extract_tensor(transform[0], b)
-                        batch_trans = extract_tensor(transform[1], b)
-                        batch_intrins = extract_tensor(transform[2], b)
-                        batch_post_rots = extract_tensor(transform[3], b)
-                        batch_post_trans = extract_tensor(transform[4], b)
-                        batch_bda = extract_tensor(transform[5], b)
+                        # Transform matrices don't have batch dimension, so unsqueeze them
+                        # transform[i] has shape [n_cam, ...], need to make it [1, n_cam, ...]
+                        rots_b = transform[0].unsqueeze(0) if transform[0].dim() == 3 else transform[0][b:b+1]
+                        trans_b = transform[1].unsqueeze(0) if transform[1].dim() == 2 else transform[1][b:b+1]
+                        intrins_b = transform[2].unsqueeze(0) if transform[2].dim() == 3 else transform[2][b:b+1]
+                        post_rots_b = transform[3].unsqueeze(0) if transform[3].dim() == 3 else transform[3][b:b+1]
+                        post_trans_b = transform[4].unsqueeze(0) if transform[4].dim() == 2 else transform[4][b:b+1]
+                        bda_for_projection = transform[5][None] if transform[5].dim() == 2 else transform[5][b:b+1]
                         
-                        img_uv, img_mask = project_points_on_img(new_coord, rots=batch_rots, trans=batch_trans,
-                                    intrins=batch_intrins, post_rots=batch_post_rots,
-                                    post_trans=batch_post_trans, bda_mat=batch_bda,
-                                    W_img=transform[6][1][b:b+1], H_img=transform[6][0][b:b+1],
-                                    pts_range=self.point_cloud_range, W_occ=W_new, H_occ=H_new, D_occ=D_new)  # 1 N n_cam 2
+                        img_uv, img_mask = project_points_on_img(new_coord, rots=rots_b, trans=trans_b,
+                                    intrins=intrins_b, post_rots=post_rots_b,
+                                    post_trans=post_trans_b, bda_mat=bda_for_projection,
+                                    W_img=W_img_val, H_img=H_img_val,
+                                    pts_range=self.point_cloud_range, W_occ=W_new, H_occ=H_new, D_occ=D_new)  # [n_cam, 1, N, 2], [N, n_cam]
                         for img_feat in img_feats:
-                            # img_feat[b] shape: [n_cam, C, H, W]
-                            # img_uv shape: [n_cam, 1, N, 2]
-                            # Process each camera separately
-                            cam_sampled_feats = []
-                            n_cam = img_feat[b].shape[0]
+                            # img_feat[b]: [n_cam, C, H, W], img_uv: [n_cam, 1, N, 2]
+                            sampled_img_feat = F.grid_sample(img_feat[b].contiguous(), img_uv.contiguous(), align_corners=True, mode='bilinear', padding_mode='zeros')
+                            # sampled_img_feat: [n_cam, C, 1, N]
                             
-                            # Check if img_uv has valid size
-                            if img_uv.shape[0] == 0:
-                                continue
-                                
-                            for cam_idx in range(min(n_cam, img_uv.shape[0])):
-                                # Get single camera feature and uv coordinates
-                                single_cam_feat = img_feat[b][cam_idx:cam_idx+1]  # [1, C, H, W]
-                                single_cam_uv = img_uv[cam_idx:cam_idx+1]  # [1, 1, N, 2]
-                                
-                                sampled_feat = F.grid_sample(single_cam_feat.contiguous(), single_cam_uv.contiguous(), 
-                                                           align_corners=True, mode='bilinear', padding_mode='zeros')
-                                cam_sampled_feats.append(sampled_feat)
+                            # img_mask: [B, N, n_cam] -> [n_cam, B, N] -> squeeze to [n_cam, N]
+                            img_mask_reshaped = img_mask.permute(2, 0, 1).squeeze(1)  # [n_cam, N]
                             
-                            if cam_sampled_feats:
-                                # Concatenate features from all cameras: [n_cam, C, 1, N]
-                                sampled_img_feat = torch.cat(cam_sampled_feats, dim=0)
-                                
-                                # Handle img_mask dimension properly
-                                if img_mask.dim() == 3:
-                                    mask_permuted = img_mask.permute(2,1,0)[:,None]
-                                elif img_mask.dim() == 2:
-                                    mask_permuted = img_mask.permute(1,0)[:,None]
-                                else:
-                                    mask_permuted = img_mask[:,None] if img_mask.dim() == 1 else img_mask
-                                
-                                sampled_img_feat = sampled_img_feat * mask_permuted
-                                sampled_img_feat = self.img_mlp(sampled_img_feat.sum(0)[:,:,0].permute(1,0))
-                                append_feats.append(sampled_img_feat)  # N C
-                                assert torch.isnan(sampled_img_feat).sum().item() == 0
-                        
-                        if append_feats:
-                            output['fine_output'].append(self.fine_mlp(torch.cat(append_feats, dim=1)))
+                            sampled_img_feat = sampled_img_feat * img_mask_reshaped[:, None, None, :]  # [n_cam, C, 1, N] * [n_cam, 1, 1, N]
+                            sampled_img_feat = sampled_img_feat.sum(0)  # [C, 1, N]
+                            sampled_img_feat = sampled_img_feat[:, 0, :]  # [C, N]
+                            sampled_img_feat = self.img_mlp(sampled_img_feat.permute(1, 0))  # [N, C]
+                            
+                            append_feats.append(sampled_img_feat)  # N C
+                            assert torch.isnan(sampled_img_feat).sum().item() == 0
+                    
+                    fine_output = self.fine_mlp(torch.cat(append_feats, dim=1))
+                    output['fine_output'].append(fine_output)
 
         res = {
             'output_voxels': output['occ'],

@@ -62,99 +62,22 @@ class OccNet(BaseModel):
         self.with_img_backbone = img_backbone is not None
         self.with_img_neck = img_neck is not None
         self.with_pts_bbox = pts_bbox_head is not None
-            
-
-    def extract_feat(self, points=None, img=None, img_metas=None):
-        """Extract features from images and/or points."""
-        img_voxel_feats = None
-        pts_voxel_feats = None
-        img_feats = None
-        pts_feats = None
-        depth = None
-        
-        # Extract image features if available
-        if img is not None and self.img_backbone is not None:
-            img_voxel_feats, depth, img_feats = self.extract_img_feat(img, img_metas)
-        
-        # Extract point features if available  
-        if points is not None and self.pts_middle_encoder is not None:
-            pts_feats_dict = self.extract_pts_feat(points)
-            # Handle pts_feats whether it's a tensor or a dict (from SparseLiDAREnc8x)
-            if isinstance(pts_feats_dict, dict):
-                # Check for different possible keys
-                if 'x' in pts_feats_dict:
-                    pts_voxel_feats = pts_feats_dict['x']
-                elif 'voxel_feat' in pts_feats_dict:
-                    pts_voxel_feats = pts_feats_dict['voxel_feat']
-                else:
-                    # If none of the expected keys are found, use the first item
-                    for key, value in pts_feats_dict.items():
-                        if isinstance(value, torch.Tensor):
-                            pts_voxel_feats = value
-                            break
-                    else:
-                        raise ValueError(f"Could not find a suitable tensor in pts_feats. Keys: {list(pts_feats_dict.keys())}")
-                pts_feats = pts_feats_dict  # Keep original dict for later use
-            else:
-                pts_voxel_feats = pts_feats_dict
-                pts_feats = pts_feats_dict
-        
-        # Fuse image and point voxel features if both available
-        if self.occ_fuser is not None and img_voxel_feats is not None and pts_voxel_feats is not None:
-            voxel_feats = self.occ_fuser(img_voxel_feats, pts_voxel_feats)
-        else:
-            # Use whichever is available
-            voxel_feats = img_voxel_feats if pts_voxel_feats is None else pts_voxel_feats
-        
-        # Process through occ_encoder to get multi-level voxel features
-        if voxel_feats is not None:
-            voxel_feats = self.occ_encoder_backbone(voxel_feats)
-            voxel_feats = self.occ_encoder_neck(voxel_feats)
-            # Ensure voxel_feats is a list (as expected by OccHead)
-            if type(voxel_feats) is not list:
-                voxel_feats = [voxel_feats]
-        else:
-            voxel_feats = None
-            
-        return voxel_feats, img_feats, pts_feats, depth
     
-    def extract_img_feat(self, img, img_metas):
-        """Extract features from images."""
-        # Process images through backbone and neck
-        if isinstance(img, (list, tuple)):
-            # img_inputs format [img, rots, trans, ...]
-            imgs = img[0]  # Extract actual image tensor
-            # Handle nested tuple case
-            while isinstance(imgs, (list, tuple)):
-                imgs = imgs[0]
-        else:
-            imgs = img
-            
-        # Ensure imgs is a tensor
-        if not hasattr(imgs, 'shape'):
-            raise ValueError(f"Expected tensor, got {type(imgs)}")
-        
-        # Handle different image tensor shapes
-        if len(imgs.shape) == 4:
-            # Shape: [B*N, C, H, W] or [N, C, H, W]
+    def image_encoder(self, img):
+        """Image encoder (copied from original CONet_ori)."""
+        imgs = img
+        # Handle different input shapes from new mmdet3d version
+        if imgs.dim() == 4:
+            # Shape: [B*N, C, H, W] - already flattened
             BN, C, imH, imW = imgs.shape
-            # Assume 6 cameras if no batch info
-            if BN % 6 == 0:
-                B = BN // 6
-                N = 6
-                imgs = imgs.view(B, N, C, imH, imW)
-            else:
-                # Treat as single batch
-                B = 1
-                N = BN  
-                imgs = imgs.view(B, N, C, imH, imW)
-        elif len(imgs.shape) == 5:
-            # Shape: [B, N, C, H, W]
-            B, N, C, imH, imW = imgs.shape
+            # Assume 6 cameras
+            N = 6
+            B = BN // N
+            imgs_flat = imgs
         else:
-            raise ValueError(f"Unexpected image tensor shape: {imgs.shape}")
-            
-        imgs_flat = imgs.view(B * N, C, imH, imW)
+            # Shape: [B, N, C, H, W] - original format
+            B, N, C, imH, imW = imgs.shape
+            imgs_flat = imgs.view(B * N, C, imH, imW)
         
         # Ensure images are on the same device as the model
         if hasattr(self.img_backbone, 'parameters'):
@@ -167,57 +90,79 @@ class OccNet(BaseModel):
             x = self.img_neck(backbone_feats)
             if type(x) in [list, tuple]:
                 x = x[0]
-        _, output_dim, output_H, output_W = x.shape
-        x = x.view(B, N, output_dim, output_H, output_W)
+        _, output_dim, ouput_H, output_W = x.shape
+        x = x.view(B, N, output_dim, ouput_H, output_W)
         
-        # Save img_feats before view transformation (for OccHead's img sampling)
-        img_feats = [x.clone()]
+        return {'x': x,
+                'img_feats': [x.clone()]}
+    
+    def occ_encoder(self, x):
+        """Encode voxel features through backbone and neck."""
+        x = self.occ_encoder_backbone(x)
+        x = self.occ_encoder_neck(x)
+        return x
+
+    def extract_feat(self, points, img, img_metas):
+        """Extract features from images and points (copied from original CONet_ori)."""
+        img_voxel_feats = None
+        pts_voxel_feats, pts_feats = None, None
+        depth, img_feats = None, None
         
-        # Use view transformer if available, otherwise use simple 2D-to-3D conversion
-        if self.img_view_transformer is not None and isinstance(img, (list, tuple)) and len(img) > 6:
-            # Extract geometric transformation parameters
-            # img format: [imgs, rots, trans, intrins, post_rots, post_trans, bda, ...]
-            # Unpack and handle tuple wrapping from dataloader
-            rots, trans, intrins, post_rots, post_trans, bda = img[1:7]
-            
-            # Unwrap tuple if parameters are wrapped (from mmdet3d dataloader batching)
-            if isinstance(rots, tuple) and len(rots) == 1:
-                rots = rots[0]
-            if isinstance(trans, tuple) and len(trans) == 1:
-                trans = trans[0]
-            if isinstance(intrins, tuple) and len(intrins) == 1:
-                intrins = intrins[0]
-            if isinstance(post_rots, tuple) and len(post_rots) == 1:
-                post_rots = post_rots[0]
-            if isinstance(post_trans, tuple) and len(post_trans) == 1:
-                post_trans = post_trans[0]
-            if isinstance(bda, tuple) and len(bda) == 1:
-                bda = bda[0]
-            
-            # Add batch dimension if needed (single sample case)
-            if rots.dim() == 3:  # [N, 3, 3] -> [1, N, 3, 3]
-                rots = rots.unsqueeze(0)
-            if trans.dim() == 2:  # [N, 3] -> [1, N, 3]
-                trans = trans.unsqueeze(0)
-            if intrins.dim() == 3:  # [N, 3, 3] -> [1, N, 3, 3]
-                intrins = intrins.unsqueeze(0)
-            if post_rots.dim() == 3:  # [N, 3, 3] -> [1, N, 3, 3]
-                post_rots = post_rots.unsqueeze(0)
-            if post_trans.dim() == 2:  # [N, 3] -> [1, N, 3]
-                post_trans = post_trans.unsqueeze(0)
-            if bda is not None and bda.dim() == 2:  # [3, 3] -> [1, 3, 3]
-                bda = bda.unsqueeze(0)
-            
-            # Get MLP input for depth prediction
-            mlp_input = self.img_view_transformer.get_mlp_input(rots, trans, intrins, post_rots, post_trans, bda)
-            geo_inputs = [rots, trans, intrins, post_rots, post_trans, bda, mlp_input]
-            
-            # Apply view transformation
-            x, depth = self.img_view_transformer([x] + geo_inputs)
+        if img is not None:
+            img_voxel_feats, depth, img_feats = self.extract_img_feat(img, img_metas)
+        if points is not None:
+            pts_voxel_feats, pts_feats = self.extract_pts_feat(points)
+
+        if self.occ_fuser is not None:
+            voxel_feats = self.occ_fuser(img_voxel_feats, pts_voxel_feats)
         else:
-            # Fallback to simple conversion
-            depth = None
-            x = self._simple_2d_to_3d_conversion(x)
+            assert (img_voxel_feats is None) or (pts_voxel_feats is None)
+            voxel_feats = img_voxel_feats if pts_voxel_feats is None else pts_voxel_feats
+
+        voxel_feats_enc = self.occ_encoder(voxel_feats)
+        if type(voxel_feats_enc) is not list:
+            voxel_feats_enc = [voxel_feats_enc]
+
+        return (voxel_feats_enc, img_feats, pts_feats, depth)
+    
+    def extract_img_feat(self, img, img_metas):
+        """Extract features of images (copied from original CONet_ori)."""
+        import torch
+        # Note: record_time is not used in re-implementation, but kept for compatibility
+        
+        # Extract components from img tuple/list
+        # Note: DataLoader collation makes img a list where each element is a tuple for batch
+        # For batch_size=1, img[i] is (sample_data,) so we need [0] to extract
+        imgs = img[0][0] if isinstance(img[0], tuple) else img[0]
+        rots = img[1][0] if isinstance(img[1], tuple) else img[1]
+        trans = img[2][0] if isinstance(img[2], tuple) else img[2]
+        intrins = img[3][0] if isinstance(img[3], tuple) else img[3]
+        post_rots = img[4][0] if isinstance(img[4], tuple) else img[4]
+        post_trans = img[5][0] if isinstance(img[5], tuple) else img[5]
+        bda = img[6][0] if isinstance(img[6], tuple) else img[6]
+        
+        # Add batch dimension if missing (for batch_size=1 case)
+        # Expected: rots should be [B, N, 3, 3], but might be [N, 3, 3]
+        if hasattr(rots, 'ndim') and rots.ndim == 3:
+            # Add batch dimension for all transformation matrices
+            rots = rots.unsqueeze(0)  # [N, 3, 3] -> [1, N, 3, 3]
+            trans = trans.unsqueeze(0)  # [N, 3] -> [1, N, 3]
+            intrins = intrins.unsqueeze(0)  # [N, 3, 3] -> [1, N, 3, 3]
+            post_rots = post_rots.unsqueeze(0)  # [N, 3, 3] -> [1, N, 3, 3]
+            post_trans = post_trans.unsqueeze(0)  # [N, 3] -> [1, N, 3]
+            # bda might be [3, 3], should be [B, 3, 3]
+            if bda.ndim == 2:
+                bda = bda.unsqueeze(0)  # [3, 3] -> [1, 3, 3]
+        
+        # Call image_encoder which returns a dict with 'x' and 'img_feats'
+        img_enc_feats = self.image_encoder(imgs)
+        x = img_enc_feats['x']
+        img_feats = img_enc_feats['img_feats']
+        
+        mlp_input = self.img_view_transformer.get_mlp_input(rots, trans, intrins, post_rots, post_trans, bda)
+        geo_inputs = [rots, trans, intrins, post_rots, post_trans, bda, mlp_input]
+        
+        x, depth = self.img_view_transformer([x] + geo_inputs)
         
         return x, depth, img_feats
     
@@ -265,92 +210,28 @@ class OccNet(BaseModel):
         
         return x_3d
     
-    def extract_pts_feat(self, points):
-        """Extract point cloud features."""
-        if self.pts_voxel_encoder is None or self.pts_middle_encoder is None:
-            return None
-        # Handle list of points (batch size 1)
-        if isinstance(points, (list, tuple)):
-            if len(points) > 0:
-                points = points[0]
+    def extract_pts_feat(self, pts):
+        """Extract point cloud features (copied from original CONet_ori)."""
+        # Handle case where pts is a list (from DataLoader collation)
+        if isinstance(pts, list):
+            if len(pts) == 1:
+                pts = pts[0]
             else:
-                return None
-        # Voxelize points
-        voxels, num_points, coors = self.voxelize(points)
-        # Remove empty voxels (num_points == 0)
-        if num_points is not None and voxels is not None and coors is not None:
-            # Ensure we have consistent shapes
-            min_size = min(voxels.shape[0], num_points.shape[0], coors.shape[0])
-            voxels = voxels[:min_size]
-            num_points = num_points[:min_size]
-            coors = coors[:min_size]
-            
-            # Create valid mask based on num_points
-            if num_points.dim() > 1:
-                # If num_points is multi-dimensional, sum across additional dims
-                valid_mask = num_points.sum(dim=tuple(range(1, num_points.dim()))) > 0
-            else:
-                # If num_points is 1D, use directly
-                valid_mask = num_points > 0
-            
-            voxels = voxels[valid_mask]
-            num_points = num_points[valid_mask]
-            coors = coors[valid_mask]
-        # Encode voxel features with safety checks
-        # Ensure consistent shapes between voxels and num_points
-        if voxels.shape[0] != num_points.shape[0]:
-            min_size = min(voxels.shape[0], num_points.shape[0])
-            voxels = voxels[:min_size]
-            num_points = num_points[:min_size]
-            coors = coors[:min_size]
+                # For batch_size > 1, need to handle differently
+                # For now, just use the first sample
+                pts = pts[0]
         
-        # Handle multi-dimensional num_points
-        if num_points.dim() > 1:
-            if num_points.shape[1] == 1:
-                num_points = num_points.squeeze(1)
-            else:
-                num_points = num_points.sum(dim=1)
-        
-        # Ensure num_points is at least 1 to avoid division by zero
-        num_points = torch.clamp(num_points, min=1.0)
-        
+        voxels, num_points, coors = self.voxelize(pts)
         voxel_features = self.pts_voxel_encoder(voxels, num_points, coors)
+        batch_size = coors[-1, 0] + 1
+        pts_enc_feats = self.pts_middle_encoder(voxel_features, coors, batch_size)
         
-        # Ensure all tensors are on CUDA for spconv
-        device = voxel_features.device
-        if not device.type == 'cuda':
-            # Move to CUDA if available
-            if torch.cuda.is_available():
-                device = torch.device('cuda:0')
-                voxel_features = voxel_features.to(device)
-                coors = coors.to(device)
-        
-        # Process through middle encoder
-        # Ensure coors has the right shape for spconv (N, 4): batch_idx, z, y, x
-        if coors.dim() == 1:
-            # If coors is 1D, we need to reconstruct the proper shape
-            # This is a fallback - ideally this shouldn't happen
-            batch_size = 1
-            # Create minimal valid coors for spconv
-            num_voxels = voxel_features.shape[0]
-            new_coors = torch.zeros((num_voxels, 4), dtype=torch.int32, device=device)
-            new_coors[:, 0] = 0  # batch index 
-            # Use simple indexing for spatial coordinates
-            new_coors[:, 1] = torch.arange(num_voxels, device=device) % 10  # z
-            new_coors[:, 2] = torch.arange(num_voxels, device=device) % 10  # y  
-            new_coors[:, 3] = torch.arange(num_voxels, device=device) % 10  # x
-            coors = new_coors
-        elif coors.dim() == 2 and coors.shape[1] >= 4:
-            batch_size = coors[-1, 0] + 1
-        else:
-            batch_size = 1  # Fallback
-            
-        pts_feats = self.pts_middle_encoder(voxel_features, coors, batch_size)
-        
-        return pts_feats
+        pts_feats = pts_enc_feats['pts_feats']
+        return pts_enc_feats['x'], pts_feats
     
     def voxelize(self, points):
         """Convert points to voxels."""
+        import torch
         # Fallback between mmdet3d.ops and mmcv.ops
         try:
             from mmdet3d.ops import Voxelization
@@ -364,10 +245,28 @@ class OccNet(BaseModel):
             pts_input = points.tensor
         elif hasattr(points, 'points'):
             pts_input = points.points
+        
+        # Move points to the same device as the model
+        if pts_input.device.type == 'cpu' and next(self.parameters()).is_cuda:
+            pts_input = pts_input.cuda()
+        
         # Initialize voxelization op
         voxelization = Voxelization(**self.pts_voxel_layer)
         # Apply voxelization on raw point tensor
-        return voxelization(pts_input)
+        # Note: Different versions of mmdetection3d/mmcv return different orders
+        # mmcv returns (voxels, coors, num_points)
+        # We need (voxels, num_points, coors) for compatibility
+        result = voxelization(pts_input)
+        voxels, coors, num_points = result
+        
+        # Add batch index if coors is [N, 3] instead of [N, 4]
+        if coors.shape[1] == 3:
+            # Add batch index column at the beginning
+            # Ensure we use the same device and dtype as coors
+            batch_idx = torch.zeros((coors.shape[0], 1), dtype=coors.dtype, device=coors.device)
+            coors = torch.cat([batch_idx, coors], dim=1)  # [N, 4]: [batch_idx, z, y, x]
+        
+        return voxels, num_points, coors
     
     # @force_fp32()  # Removed for mmengine compatibility
     def occ_encoder(self, x):
@@ -376,7 +275,10 @@ class OccNet(BaseModel):
         return x
     def train_step(self, data, optim_wrapper):
         """Training step for MMEngine compatibility."""
-        # Extract all necessary data from the data dict
+        # Parse inputs from MMDetection3D data structure first
+        data = self._parse_inputs(data)
+        
+        # Extract all necessary data from the parsed dict
         gt_occ = data.get('gt_occ', None)
         points = data.get('points', None)
         img_inputs = data.get('img_inputs', None)
@@ -503,7 +405,18 @@ class OccNet(BaseModel):
         # Current focus: Get occupancy losses (CE, semantic, geometric, lovasz) working correctly
         
         # Get predictions from occupancy head using processed voxel_feats
-        transform = img_inputs[1:8] if img_inputs is not None else None
+        # Extract transform, handling DataLoader collation (tuple wrapping)
+        if img_inputs is not None:
+            transform = []
+            for i in range(1, min(8, len(img_inputs))):
+                item = img_inputs[i]
+                # Handle tuple wrapping from DataLoader collation
+                if isinstance(item, tuple) and len(item) == 1:
+                    transform.append(item[0])
+                else:
+                    transform.append(item)
+        else:
+            transform = None
         
         # Handle pts_feats for pts_bbox_head
         if pts_feats is not None and isinstance(pts_feats, dict):
@@ -664,8 +577,15 @@ class OccNet(BaseModel):
                 # Extract points and img from inputs
                 if 'points' in inputs:
                     kwargs['points'] = inputs['points']
-                if 'img' in inputs:
+                if 'img_inputs' in inputs:
+                    kwargs['img_inputs'] = inputs['img_inputs']
+                elif 'img' in inputs:
                     kwargs['img_inputs'] = inputs['img']
+                # Try alternative keys for images
+                elif 'imgs' in inputs:
+                    kwargs['img_inputs'] = inputs['imgs']
+                elif 'images' in inputs:
+                    kwargs['img_inputs'] = inputs['images']
                 # Check for gt_occ in inputs
                 if 'gt_occ' in inputs:
                     kwargs['gt_occ'] = inputs['gt_occ']
@@ -678,19 +598,35 @@ class OccNet(BaseModel):
         # Extract data_samples info
         if 'data_samples' in kwargs:
             data_samples = kwargs['data_samples']
-            if data_samples and len(data_samples) > 0:
-                # Try to extract gt_occ from data_samples
-                sample = data_samples[0]
+            if data_samples is not None:
+                # Handle single sample or list of samples
+                if not isinstance(data_samples, (list, tuple)):
+                    data_samples = [data_samples]
                 
-                # Check various possible attribute names
-                for attr in ['gt_occ', 'gt_occ_1_1', 'gt_occupancy', 'occ_gt', 'gt_seg_3d']:
-                    if hasattr(sample, attr):
-                        val = getattr(sample, attr)
-                        if kwargs.get('gt_occ') is None:
-                            kwargs['gt_occ'] = val
-                            
-                if hasattr(sample, 'metainfo'):
-                    kwargs['img_metas'] = [sample.metainfo]
+                if len(data_samples) > 0:
+                    sample = data_samples[0]
+                    
+                    # Check for img_inputs in data_samples
+                    for attr in ['img_inputs', 'img', 'imgs', 'images']:
+                        if hasattr(sample, attr):
+                            val = getattr(sample, attr)
+                            if val is not None and kwargs.get('img_inputs') is None:
+                                kwargs['img_inputs'] = val
+                                break
+                    
+                    # Check various possible attribute names
+                    for attr in ['gt_occ', 'gt_occ_1_1', 'gt_occupancy', 'occ_gt', 'gt_seg_3d']:
+                        if hasattr(sample, attr):
+                            val = getattr(sample, attr)
+                            if kwargs.get('gt_occ') is None:
+                                kwargs['gt_occ'] = val
+                    
+                    # Check for visible_mask
+                    if hasattr(sample, 'visible_mask'):
+                        kwargs['visible_mask'] = sample.visible_mask
+                                
+                    if hasattr(sample, 'metainfo'):
+                        kwargs['img_metas'] = [sample.metainfo]
                     
         # Check for gt_occ directly in kwargs (this is where it should be in MMDetection3D)
         if 'gt_occ' in kwargs:
@@ -748,13 +684,23 @@ class OccNet(BaseModel):
     
     def predict(self, data_dict, **extra_kwargs):
         """Predict forward function."""
+        # Parse inputs from MMDetection3D data structure
+        if 'img_inputs' not in data_dict or 'inputs' in data_dict:
+            data_dict = self._parse_inputs(data_dict)
+        
         # Extract data from inputs dict
         img_inputs = data_dict.get('img_inputs')
+        points = data_dict.get('points')
+        gt_occ = data_dict.get('gt_occ')
+        visible_mask = data_dict.get('visible_mask')
         img_metas = data_dict.get('img_metas', [{}] * len(img_inputs) if img_inputs is not None else [{}])
         
         return self.forward_test(
+            points=points,
             img_inputs=img_inputs,
             img_metas=img_metas,
+            gt_occ=gt_occ,
+            visible_mask=visible_mask,
             **extra_kwargs
         )
     
@@ -768,3 +714,172 @@ class OccNet(BaseModel):
         voxel_feats, img_feats, pts_feats, depth = self.extract_feat(
             points=None, img=img_inputs, img_metas=img_metas)
         return [voxel_feats], depth
+    
+    def forward_test(self,
+            points=None,
+            img_metas=None,
+            img_inputs=None,
+            gt_occ=None,
+            visible_mask=None,
+            **kwargs,
+        ):
+        return self.simple_test(img_metas, img_inputs, points, gt_occ=gt_occ, visible_mask=visible_mask, **kwargs)
+    
+    def simple_test(self, img_metas, img=None, points=None, rescale=False, points_occ=None, 
+            gt_occ=None, visible_mask=None):
+        
+        # Stats tracking (only first 3 samples)
+        if not hasattr(self, '_sample_count'):
+            self._sample_count = 0
+        
+        should_print = self._sample_count < 3
+        self._sample_count += 1
+        
+        # Debug: Check input data
+        if should_print:
+            print(f"\n[REIMPL] Input Data Statistics (Sample #{self._sample_count-1}):")
+            if img is not None and isinstance(img, (tuple, list)) and len(img) > 0:
+                imgs_tensor = img[0]
+                print(f"  Image tensor shape: {imgs_tensor.shape}")
+                print(f"  Image: mean={imgs_tensor.mean().item():.6f}, std={imgs_tensor.std().item():.6f}")
+                print(f"  Image: min={imgs_tensor.min().item():.6f}, max={imgs_tensor.max().item():.6f}")
+            if points is not None and isinstance(points, list) and len(points) > 0:
+                pts_data = points[0]
+                if hasattr(pts_data, 'tensor'):  # LiDARPoints object
+                    pts_tensor = pts_data.tensor
+                    print(f"  Points shape: {pts_tensor.shape}")
+                    print(f"  Points: mean={pts_tensor[:, :3].mean().item():.6f}, std={pts_tensor[:, :3].std().item():.6f}")
+                elif hasattr(pts_data, 'shape'):  # Tensor
+                    print(f"  Points shape: {pts_data.shape}")
+                    print(f"  Points: mean={pts_data[:, :3].mean().item():.6f}, std={pts_data[:, :3].std().item():.6f}")
+        
+        voxel_feats, img_feats, pts_feats, depth = self.extract_feat(points, img=img, img_metas=img_metas)
+
+        transform = img[1:8] if img is not None else None
+        output = self.pts_bbox_head(
+            voxel_feats=voxel_feats,
+            points=points_occ,
+            img_metas=img_metas,
+            img_feats=img_feats,
+            pts_feats=pts_feats,
+            transform=transform,
+        )
+
+        pred_c = output['output_voxels'][0]
+        
+        # Debug: Check coarse prediction statistics for comparison
+        if should_print:
+            print(f"\n[Sample #{self._sample_count-1}] Feature Statistics:")
+            print(f"  Voxel feats: shape={voxel_feats[0].shape}, mean={voxel_feats[0].mean().item():.6f}, std={voxel_feats[0].std().item():.6f}")
+            if img_feats:
+                print(f"  Image feats: shape={img_feats[0].shape}, mean={img_feats[0].mean().item():.6f}, std={img_feats[0].std().item():.6f}")
+            if pts_feats is not None:
+                pts_feat_item = pts_feats[0] if isinstance(pts_feats, list) else pts_feats
+                if hasattr(pts_feat_item, 'features'):  # SparseConvTensor
+                    print(f"  Points feats (sparse): features_shape={pts_feat_item.features.shape}, mean={pts_feat_item.features.mean().item():.6f}, std={pts_feat_item.features.std().item():.6f}")
+                elif hasattr(pts_feat_item, 'shape'):
+                    print(f"  Points feats: shape={pts_feat_item.shape}, mean={pts_feat_item.mean().item():.6f}, std={pts_feat_item.std().item():.6f}")
+                else:
+                    print(f"  Points feats: type={type(pts_feat_item)}")
+            print(f"  Pred coarse: shape={pred_c.shape}, mean={pred_c.mean().item():.6f}, std={pred_c.std().item():.6f}")
+        
+        SC_metric, _ = self.evaluation_semantic(pred_c, gt_occ, eval_type='SC', visible_mask=visible_mask)
+        SSC_metric, SSC_occ_metric = self.evaluation_semantic(pred_c, gt_occ, eval_type='SSC', visible_mask=visible_mask)
+
+        pred_f = None
+        SSC_metric_fine = None
+        # Check if fine prediction exists (following original code)
+        if output.get('output_voxels_fine') is not None and len(output.get('output_voxels_fine', [])) > 0:
+            if output.get('output_coords_fine') is not None and len(output.get('output_coords_fine', [])) > 0:
+                fine_pred = output['output_voxels_fine'][0]  # [N, ncls]
+                fine_coord = output['output_coords_fine'][0]  # [3, N]
+                
+                # Debug: Check fine prediction statistics
+                if should_print:
+                    print(f"  Pred fine: shape={fine_pred.shape}, mean={fine_pred.mean().item():.6f}, std={fine_pred.std().item():.6f}")
+                    print(f"  Fine points: {fine_pred.shape[0]}, Coverage: {fine_pred.shape[0] / (gt_occ.shape[0] * gt_occ.shape[1] * gt_occ.shape[2]) * 100:.2f}%")
+                
+                # Create pred_f with correct shape: [1, ncls, H, W, D]
+                pred_f = self.empty_idx * torch.ones_like(gt_occ).unsqueeze(0).unsqueeze(0).repeat(1, fine_pred.shape[1], 1, 1, 1).float()
+                
+                # fine_pred: [N, ncls] -> permute: [ncls, N] -> unsqueeze: [1, ncls, N]
+                pred_f[:, :, fine_coord[0], fine_coord[1], fine_coord[2]] = fine_pred.permute(1, 0).unsqueeze(0)
+            else:
+                pred_f = output['output_voxels_fine'][0]
+            SC_metric, _ = self.evaluation_semantic(pred_f, gt_occ, eval_type='SC', visible_mask=visible_mask)
+            SSC_metric_fine, SSC_occ_metric_fine = self.evaluation_semantic(pred_f, gt_occ, eval_type='SSC', visible_mask=visible_mask)
+
+        # Prepare pred_occ for evaluator (interpolate to gt size and take argmax)
+        pred_for_eval = pred_f if pred_f is not None else pred_c
+        # Handle gt with or without batch dimension for shape extraction
+        if gt_occ.dim() == 3:
+            gt_shape = gt_occ.shape
+        else:
+            _, H, W, D = gt_occ.shape
+            gt_shape = (H, W, D)
+        
+        # Interpolate pred to gt size
+        pred_interpolated = F.interpolate(pred_for_eval, size=list(gt_shape), mode='trilinear', align_corners=False).contiguous()
+        # Take argmax to get class indices
+        pred_occ_np = torch.argmax(pred_interpolated[0], dim=0).cpu().numpy()
+        
+        # Get gt as numpy (remove batch dim if present)
+        if gt_occ.dim() == 4:
+            gt_occ_np = gt_occ[0].cpu().numpy()
+        else:
+            gt_occ_np = gt_occ.cpu().numpy()
+
+        test_output = {
+            'SC_metric': SC_metric,
+            'SSC_metric': SSC_metric,
+            'pred_c': pred_c,
+            'pred_f': pred_f,
+            'pred_occ': pred_occ_np,  # For compatibility with occ_metric (numpy array)
+            'gt_occ': gt_occ_np,  # For compatibility with occ_metric (numpy array)
+        }
+
+        if SSC_metric_fine is not None:
+            test_output['SSC_metric_fine'] = SSC_metric_fine
+
+        # Return as list for compatibility with MMDetection3D evaluator
+        return [test_output]
+
+
+    def evaluation_semantic(self, pred, gt, eval_type, visible_mask=None):
+        # Handle gt with or without batch dimension
+        if gt.dim() == 3:
+            # No batch dimension, add it
+            gt = gt.unsqueeze(0)
+        
+        _, H, W, D = gt.shape
+        pred = F.interpolate(pred, size=[H, W, D], mode='trilinear', align_corners=False).contiguous()
+        pred = torch.argmax(pred[0], dim=0).cpu().numpy()
+        gt = gt[0].cpu().numpy()
+        gt = gt.astype(np.int32)
+
+        # ignore noise
+        noise_mask = gt != 255
+
+        if eval_type == 'SC':
+            # 0 1 split
+            gt[gt != self.empty_idx] = 1
+            pred[pred != self.empty_idx] = 1
+            return fast_hist(pred[noise_mask], gt[noise_mask], max_label=2), None
+
+
+        if eval_type == 'SSC':
+            hist_occ = None
+            if visible_mask is not None:
+                visible_mask = visible_mask[0].cpu().numpy()
+                mask = noise_mask & (visible_mask!=0)
+                hist_occ = fast_hist(pred[mask], gt[mask], max_label=17)
+
+            hist = fast_hist(pred[noise_mask], gt[noise_mask], max_label=17)
+            return hist, hist_occ
+
+
+def fast_hist(pred, label, max_label=18):
+    pred = copy.deepcopy(pred.flatten())
+    label = copy.deepcopy(label.flatten())
+    bin_count = np.bincount(max_label * label.astype(int) + pred, minlength=max_label ** 2)
+    return bin_count[:max_label ** 2].reshape(max_label, max_label)
