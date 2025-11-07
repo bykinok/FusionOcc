@@ -340,6 +340,23 @@ default_hooks = dict(
 )
 
 # Pretrained checkpoint - download if needed: https://github.com/open-mmlab/mmdetection3d/tree/master/configs/fcos3d
-load_from = 'pretrain/r101_dcn_fcos3d_pretrain.pth'
+load_from = './projects/BEVFormer/pretrain/r101_dcn_fcos3d_pretrain.pth'
 
 checkpoint_config = dict(interval=1)
+
+# CRITICAL: Environment configuration for distributed training
+env_cfg = dict(
+    cudnn_benchmark=False,
+    mp_cfg=dict(mp_start_method='fork', opencv_num_threads=0),
+    dist_cfg=dict(backend='nccl'),
+)
+
+# CRITICAL: Distributed training configuration for mmengine
+# This ensures proper handling of DDP and gradient synchronization
+# find_unused_parameters=True is needed because obtain_history_bev uses torch.no_grad()
+# which means some parameters don't receive gradients in every iteration
+model_wrapper_cfg = dict(
+    type='MMDistributedDataParallel',
+    find_unused_parameters=True,
+    broadcast_buffers=False,
+)

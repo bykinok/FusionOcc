@@ -156,6 +156,7 @@ class NuSceneOcc(NuScenesDataset):
         return example
 
     def union2one(self, queue):
+        # CRITICAL: Follow original BEVFormer exactly
         imgs_list = [each['img'].data for each in queue]
         metas_map = {}
         prev_scene_token = None
@@ -178,7 +179,9 @@ class NuSceneOcc(NuScenesDataset):
                 metas_map[i]['can_bus'][-1] -= prev_angle
                 prev_pos = copy.deepcopy(tmp_pos)
                 prev_angle = copy.deepcopy(tmp_angle)
-        # Stack images - handle both tensor and list cases
+        
+        # CRITICAL: Stack images AFTER the for loop
+        # Handle both tensor and list cases
         if isinstance(imgs_list[0], list):
             # imgs_list is a list of lists (multi-view images)
             # Convert each list of multi-view images to a stacked tensor
@@ -191,17 +194,17 @@ class NuSceneOcc(NuScenesDataset):
                 else:
                     # Already stacked
                     stacked_imgs.append(img_views)
-            # IMPORTANT: Keep on CPU (cpu_only=True) for DataContainer
-            # Model will move to GPU when needed
-            queue[-1]['img'] = DC(torch.stack(stacked_imgs), cpu_only=True, stack=True)
+            # CRITICAL: Follow original BEVFormer - use cpu_only=False for img
+            # This allows automatic GPU transfer by DataLoader
+            queue[-1]['img'] = DC(torch.stack(stacked_imgs), cpu_only=False, stack=True)
         else:
             # imgs_list is a list of tensors
-            queue[-1]['img'] = DC(torch.stack(imgs_list), cpu_only=True, stack=True)
-        
-        # CRITICAL: Wrap metas_map in a list to match original BEVFormer format
-        # Original forward_train expects: [each[i] for each in img_metas]
-        # which requires img_metas to be a list of dicts: [{0: meta0, 1: meta1, ...}]
-        queue[-1]['img_metas'] = DC([metas_map], cpu_only=True)
+            queue[-1]['img'] = DC(torch.stack(imgs_list), cpu_only=False, stack=True)
+
+        # CRITICAL: Follow original BEVFormer format
+        # Original: queue[-1]['img_metas'] = DC(metas_map, cpu_only=True)
+        # Do NOT wrap in list for train mode compatibility
+        queue[-1]['img_metas'] = DC(metas_map, cpu_only=True)
         queue = queue[-1]
         return queue
 

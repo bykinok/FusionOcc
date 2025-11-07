@@ -216,8 +216,11 @@ class BEVFormerOcc(MVXTwoStageDetector):
     def obtain_history_bev(self, imgs_queue, img_metas_list):
         """Obtain history BEV features iteratively. To save GPU memory, gradients are not calculated.
         """
-        self.eval()
-
+        # CRITICAL: For distributed training (DDP), don't call self.eval() directly
+        # Instead, use a context manager to temporarily disable BN statistics updates
+        # Save the current training mode
+        was_training = self.training
+        
         with torch.no_grad():
             prev_bev = None
             bs, len_queue, num_cams, C, H, W = imgs_queue.shape
@@ -229,14 +232,13 @@ class BEVFormerOcc(MVXTwoStageDetector):
                 imgs_queue = imgs_queue.to(device)
             
             img_feats_list = self.extract_feat(img=imgs_queue, len_queue=len_queue)
-            
+
             # CRITICAL: Follow original BEVFormer's img_metas indexing
-            # img_metas_list is expected to be a list where each element is a list of metas
-            # Format: [[meta0, meta1, ..., metaN], ...] for each batch
+            # img_metas_list is a dict: {0: meta0, 1: meta1, ...}
             for i in range(len_queue):
-                # Original format: img_metas = [each[i] for each in img_metas_list]
-                img_metas = [each[i] for each in img_metas_list]
-                    
+                # Get metadata for frame i from the dict
+                img_metas = [img_metas_list[i]]
+
                 if not img_metas[0]['prev_bev_exists']:
                     prev_bev = None
                 # img_feats = self.extract_feat(img=img, img_metas=img_metas)
@@ -254,8 +256,8 @@ class BEVFormerOcc(MVXTwoStageDetector):
                 if prev_bev is not None and hasattr(self.pts_bbox_head, 'transformer'):
                     device = next(self.pts_bbox_head.transformer.parameters()).device
                     prev_bev = prev_bev.to(device)
-                    
-            self.train()
+            
+            # Restore the original training mode (no need to explicitly call self.train())
             return prev_bev
 
     @auto_fp16(apply_to=('img', 'points'))
@@ -299,8 +301,28 @@ class BEVFormerOcc(MVXTwoStageDetector):
             dict: Losses of different branches.
         """
         
-        # CRITICAL: img is already a tensor from DataContainer unwrapping
-        # No need for special handling - img is [B, queue_length, N_cams, C, H, W]
+        # CRITICAL: Handle img input format for train mode
+        # In train mode, img might come as a list containing DataContainer
+        if isinstance(img, list) and len(img) > 0:
+            # Unwrap DataContainer if present
+            if hasattr(img[0], 'data'):
+                img = img[0].data
+            else:
+                # img is a list of tensors - stack them
+                img = torch.stack(img, dim=0) if len(img) > 1 else img[0]
+        
+        # CRITICAL: Handle different img formats
+        # If img is 5D [queue_length, N_cams, C, H, W], add batch dimension
+        # Expected format: [B, queue_length, N_cams, C, H, W]
+        if img.dim() == 5:
+            # Add batch dimension: [queue_length, N_cams, C, H, W] -> [1, queue_length, N_cams, C, H, W]
+            img = img.unsqueeze(0)
+        
+        # CRITICAL: Unwrap img_metas from DataContainer if needed
+        if isinstance(img_metas, list) and len(img_metas) > 0 and hasattr(img_metas[0], 'data'):
+            img_metas = img_metas[0].data
+        
+        # img should now be a tensor [B, queue_length, N_cams, C, H, W]
         len_queue = img.size(1)
         prev_img = img[:, :-1, ...]
         img = img[:, -1, ...]
@@ -314,10 +336,9 @@ class BEVFormerOcc(MVXTwoStageDetector):
             prev_bev = prev_bev.to(device)
 
         # CRITICAL: Follow original BEVFormer's img_metas indexing
-        # img_metas is expected to be a list where each element is a list of metas
-        # Format: [[meta0, meta1, ..., metaN], ...] for each batch
+        # img_metas is a dict: {0: meta0, 1: meta1, ...}
         # Get metadata for the current (last) frame
-        img_metas = [each[len_queue - 1] for each in img_metas]
+        img_metas = [img_metas[len_queue - 1]]
         if not img_metas[0]['prev_bev_exists']:
             prev_bev = None
         img_feats = self.extract_feat(img=img, img_metas=img_metas)
