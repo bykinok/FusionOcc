@@ -142,9 +142,9 @@ model = dict(
             pc_range=point_cloud_range))))
 
 dataset_type = 'mmdet3d.NuSceneOcc'  # This matches the registered name in datasets/__init__.py
-data_root = 'data/occ3d-nus/'
+data_root = 'data/nuscenes/'
 file_client_args = dict(backend='disk')
-occ_gt_data_root='data/occ3d-nus'
+occ_gt_data_root='data/nuscenes/'
 
 train_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
@@ -161,26 +161,17 @@ train_pipeline = [
 
 test_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
-    dict(type='LoadOccGTFromFile',data_root=occ_gt_data_root),
+    dict(type='LoadOccGTFromFile', data_root=occ_gt_data_root),  # Re-enabled for evaluation
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='PadMultiViewImage', size_divisor=32),
-    dict(
-        type='MultiScaleFlipAug3D',
-        img_scale=(1600, 900),
-        pts_scale_ratio=1,
-        flip=False,
-        transforms=[
-            dict(
-                type='DefaultFormatBundle3D',
-                class_names=class_names,
-                with_label=False),
-            dict(type='CustomCollect3D', keys=['img'])
-        ])
+    # MultiScaleFlipAug3D 제거: CONet/FusionOcc처럼 직접 transforms 사용
+    dict(type='DefaultFormatBundle3D', class_names=class_names, with_label=False),
+    dict(type='CustomCollect3D', keys=['img', 'voxel_semantics', 'mask_lidar', 'mask_camera'])  # Added GT keys for evaluation
 ]
 
 data = dict(
     samples_per_gpu=1,
-    workers_per_gpu=4,
+    workers_per_gpu=4,  # 원본과 동일하게 4로 설정
     train=dict(
         type=dataset_type,
         data_root=data_root,
@@ -197,12 +188,14 @@ data = dict(
              data_root=data_root,
              ann_file='occ_infos_temporal_val.pkl',
              pipeline=test_pipeline,  bev_size=(bev_h_, bev_w_),
-             classes=class_names, modality=input_modality, samples_per_gpu=1),
+             classes=class_names, modality=input_modality, samples_per_gpu=1,
+             test_mode=True),
     test=dict(type=dataset_type,
               data_root=data_root,
               ann_file='occ_infos_temporal_val.pkl',
               pipeline=test_pipeline, bev_size=(bev_h_, bev_w_),
-              classes=class_names, modality=input_modality),
+              classes=class_names, modality=input_modality,
+              test_mode=True),
     shuffler_sampler=dict(type='DistributedGroupSampler'),
     nonshuffler_sampler=dict(type='DistributedSampler')
 )
@@ -232,19 +225,49 @@ evaluation = dict(interval=1, pipeline=test_pipeline)
 runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
 
 # Convert old-style data config to new-style dataloader config for mmengine
+# 원본 BEVFormer와 동일한 설정 사용 (persistent_workers, prefetch_factor 제거)
 train_dataloader = dict(
     batch_size=data['samples_per_gpu'],
     num_workers=data['workers_per_gpu'],
-    persistent_workers=True,
+    persistent_workers=False,  # 원본처럼 False로 설정
     sampler=dict(type='DefaultSampler', shuffle=True),
     dataset=data['train']
 )
 
-# Disable validation and testing for now (OccMetric not registered yet)
-val_dataloader = None
-test_dataloader = None
-val_evaluator = None
-test_evaluator = None
+# Enable validation and testing with OccupancyMetric
+val_dataloader = dict(
+    batch_size=1,
+    num_workers=0,  # Changed from 4 to 0 to match CONet and avoid multiprocessing issues
+    persistent_workers=False,
+    sampler=dict(type='DefaultSampler', shuffle=False),
+    # Removed collate_fn to use default behavior like CONet
+    dataset=data['val']
+)
+
+test_dataloader = dict(
+    batch_size=1,
+    num_workers=0,  # Changed from 4 to 0 to match CONet and avoid multiprocessing issues
+    persistent_workers=False,
+    sampler=dict(type='DefaultSampler', shuffle=False),
+    # Removed collate_fn to use default behavior like CONet
+    dataset=data['test']
+)
+
+val_evaluator = dict(
+    type='mmdet3d.OccupancyMetric',
+    num_classes=18,
+    use_lidar_mask=False,
+    use_image_mask=False,
+    prefix='val'  # prefix 설정하여 경고 제거
+)
+
+test_evaluator = dict(
+    type='mmdet3d.OccupancyMetric',
+    num_classes=18,
+    use_lidar_mask=False,
+    use_image_mask=False,
+    prefix='test'
+)
 
 # Convert old-style optimizer config to new-style optim_wrapper
 optim_wrapper = dict(
@@ -258,15 +281,16 @@ optim_wrapper = dict(
     clip_grad=optimizer_config.get('grad_clip', None)
 )
 
-# Add train_cfg for mmengine (without validation)
+# Add train_cfg for mmengine
 train_cfg = dict(
     by_epoch=True,
-    max_epochs=total_epochs
+    max_epochs=total_epochs,
+    val_interval=1  # Validate every epoch
 )
 
-# Disable val_cfg and test_cfg
-val_cfg = None
-test_cfg = None
+# Enable val_cfg and test_cfg
+val_cfg = dict()
+test_cfg = dict()
 
 # Add param_scheduler for mmengine (from lr_config)
 param_scheduler = [
@@ -285,8 +309,16 @@ param_scheduler = [
         eta_min=lr_config['min_lr_ratio'] * optimizer['lr']
     )
 ]
+# Add default_hooks for mmengine
+default_hooks = dict(
+    timer=dict(type='IterTimerHook'),
+    logger=dict(type='LoggerHook', interval=50),
+    param_scheduler=dict(type='ParamSchedulerHook'),
+    checkpoint=dict(type='CheckpointHook', interval=1, max_keep_ckpts=3),
+    sampler_seed=dict(type='DistSamplerSeedHook'),
+)
+
 # Pretrained checkpoint - download if needed: https://github.com/open-mmlab/mmdetection3d/tree/master/configs/fcos3d
-# load_from = 'ckpts/r101_dcn_fcos3d_pretrain.pth'
-load_from = None  # Train from scratch for now
+load_from = 'pretrain/r101_dcn_fcos3d_pretrain.pth'
 
 checkpoint_config = dict(interval=1)

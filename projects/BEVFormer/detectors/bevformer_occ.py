@@ -126,9 +126,8 @@ class BEVFormerOcc(MVXTwoStageDetector):
             # for img_meta in img_metas:
             #     img_meta.update(input_shape=input_shape)
 
-            if img.dim() == 5 and img.size(0) == 1:
-                img.squeeze_()
-            elif img.dim() == 5 and img.size(0) > 1:
+            # Handle 5D input: (B, N, C, H, W) -> (B*N, C, H, W) for backbone
+            if img.dim() == 5:
                 B, N, C, H, W = img.size()
                 img = img.reshape(B * N, C, H, W)
             if self.use_grid_mask:
@@ -418,7 +417,13 @@ class BEVFormerOcc(MVXTwoStageDetector):
             if not isinstance(var, list):
                 raise TypeError('{} must be a list, but got {}'.format(
                     name, type(var)))
-        img = [img] if img is None else img
+        
+        # forward_test expects img as list[Tensor], so wrap if it's a Tensor
+        if isinstance(img, torch.Tensor):
+            img = [img]
+        elif img is None:
+            img = [img]
+        # else: already a list
 
         if img_metas[0][0]['scene_token'] != self.prev_frame_info['scene_token']:
             # the first sample of each scene is truncated
@@ -468,3 +473,166 @@ class BEVFormerOcc(MVXTwoStageDetector):
         # for result_dict, pts_bbox in zip(bbox_list, bbox_pts):
         #     result_dict['pts_bbox'] = pts_bbox
         return new_prev_bev, occ
+
+    def test_step(self, data):
+        """Test step function for mmengine runner (simplified without MultiScaleFlipAug3D).
+        
+        Args:
+            data (dict or list): The output of dataloader.
+            
+        Returns:
+            list: List of data samples with predictions and ground truth.
+        """
+        import numpy as np
+        
+        # Get device from model parameters
+        device = next(self.parameters()).device
+        
+        # Simple unwrap: dataloader may wrap in list
+        if isinstance(data, list):
+            if len(data) == 0:
+                raise ValueError("Empty data list")
+            data = data[0]
+        
+        if not isinstance(data, dict):
+            raise TypeError(f"Expected data to be dict, got {type(data)}")
+        
+        # Extract data directly from dict (like FusionOcc)
+        img = data.get('img', None)
+        img_metas = data.get('img_metas', None)
+        voxel_semantics = data.get('voxel_semantics', None)
+        mask_camera = data.get('mask_camera', None)
+        mask_lidar = data.get('mask_lidar', None)
+        
+        # Recursive unwrap for DataContainer (handle nested structures)
+        def unwrap(obj, max_depth=10, current_depth=0):
+            # Prevent infinite recursion
+            if current_depth > max_depth:
+                return obj
+            
+            # Unwrap DataContainer
+            if hasattr(obj, 'data'):
+                return unwrap(obj.data, max_depth, current_depth + 1)
+            # Recursively unwrap lists (but limit depth)
+            elif isinstance(obj, list):
+                return [unwrap(item, max_depth, current_depth + 1) for item in obj]
+            else:
+                return obj
+        
+        # Unwrap and get originals for metric
+        voxel_semantics_orig = unwrap(voxel_semantics) if voxel_semantics is not None else None
+        mask_camera_orig = unwrap(mask_camera) if mask_camera is not None else None
+        mask_lidar_orig = unwrap(mask_lidar) if mask_lidar is not None else None
+        
+        # img와 img_metas는 이미 tensor 형태로 올 것임 (DefaultFormatBundle3D 처리됨)
+        img = unwrap(img)
+        img_metas = unwrap(img_metas)
+        
+        # Convert img from list of tensors to single tensor if needed
+        if img is not None and isinstance(img, list):
+            # Check if img is nested list (e.g., [[tensor1, ..., tensor6]])
+            if len(img) > 0 and isinstance(img[0], list):
+                # Flatten one level: [[tensors]] -> [tensors]
+                img = img[0]
+            
+            # Now img should be a list of tensors from different cameras
+            # Stack them into a single tensor [N_cams, C, H, W]
+            if len(img) > 0 and isinstance(img[0], torch.Tensor):
+                img = torch.stack(img)  # [N_cams, C, H, W]
+                # Add batch dimension: [1, N_cams, C, H, W]
+                img = img.unsqueeze(0)
+        
+        # Ensure img_metas is nested list: [[meta]]
+        # forward_test expects img_metas as [[dict]], so we need proper nesting
+        if img_metas is not None:
+            if isinstance(img_metas, dict):
+                # Single dict -> [[dict]]
+                img_metas = [[img_metas]]
+            elif isinstance(img_metas, list):
+                if len(img_metas) > 0 and isinstance(img_metas[0], dict):
+                    # [dict] -> [[dict]]
+                    img_metas = [img_metas]
+                # else: already [[dict]] or [[...]]
+        
+        # Move img to device (should already be tensor from DefaultFormatBundle3D)
+        if img is not None and isinstance(img, torch.Tensor):
+            img = img.to(device)
+        
+        # Forward pass
+        with torch.no_grad():
+            result = self(return_loss=False, rescale=True, img=img, img_metas=img_metas)
+        
+        # Result format from forward_test: could be tensor or list of tensors
+        # Original BEVFormer: result.squeeze(dim=0).cpu().numpy().astype(np.uint8)
+        if isinstance(result, list):
+            # If result is a list, take the first element (batch size = 1)
+            if len(result) > 0:
+                result = result[0]
+        
+        if isinstance(result, torch.Tensor):
+            # Squeeze batch dimension if present and convert to numpy uint8
+            if result.dim() > 3:  # e.g., [1, H, W, D] -> [H, W, D]
+                result = result.squeeze(dim=0)
+            result = result.cpu().numpy().astype(np.uint8)
+        
+        # Format as data_sample for OccupancyMetric
+        data_sample = {
+            'pred_occ': result
+        }
+        
+        # Add ground truth if available
+        if voxel_semantics_orig is not None:
+            # Flatten nested list structure if present
+            if isinstance(voxel_semantics_orig, list):
+                if len(voxel_semantics_orig) > 0:
+                    voxel_semantics_orig = voxel_semantics_orig[0]
+            
+            # Convert to numpy array if needed
+            if isinstance(voxel_semantics_orig, torch.Tensor):
+                data_sample['voxel_semantics'] = voxel_semantics_orig.cpu().numpy()
+            elif isinstance(voxel_semantics_orig, memoryview):
+                # Convert memoryview to numpy array
+                import numpy as np
+                data_sample['voxel_semantics'] = np.array(voxel_semantics_orig)
+            else:
+                data_sample['voxel_semantics'] = voxel_semantics_orig
+        
+        if mask_lidar_orig is not None:
+            if isinstance(mask_lidar_orig, list):
+                if len(mask_lidar_orig) > 0:
+                    mask_lidar_orig = mask_lidar_orig[0]
+            
+            if isinstance(mask_lidar_orig, torch.Tensor):
+                data_sample['mask_lidar'] = mask_lidar_orig.cpu().numpy()
+            elif isinstance(mask_lidar_orig, memoryview):
+                import numpy as np
+                data_sample['mask_lidar'] = np.array(mask_lidar_orig)
+            else:
+                data_sample['mask_lidar'] = mask_lidar_orig
+        
+        if mask_camera_orig is not None:
+            if isinstance(mask_camera_orig, list):
+                if len(mask_camera_orig) > 0:
+                    mask_camera_orig = mask_camera_orig[0]
+            
+            if isinstance(mask_camera_orig, torch.Tensor):
+                data_sample['mask_camera'] = mask_camera_orig.cpu().numpy()
+            elif isinstance(mask_camera_orig, memoryview):
+                import numpy as np
+                data_sample['mask_camera'] = np.array(mask_camera_orig)
+            else:
+                data_sample['mask_camera'] = mask_camera_orig
+        
+        return [data_sample]
+    
+    def val_step(self, data):
+        """Validation step function for mmengine runner.
+        
+        Args:
+            data (dict): The output of dataloader.
+            
+        Returns:
+            list: List of data samples (same as test_step).
+        """
+        # For validation, we use the same logic as test_step
+        return self.test_step(data)

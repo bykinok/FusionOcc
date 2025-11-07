@@ -7,10 +7,11 @@ import datetime
 import sys
 
 from mmengine.config import Config, ConfigDict, DictAction
-from mmengine.registry import RUNNERS
+from mmengine.registry import RUNNERS, DefaultScope
 from mmengine.runner import Runner
 
 from mmdet3d.utils import replace_ceph_backend
+import mmdet3d  # Import to register mmdet3d modules
 
 
 class TeeOutput:
@@ -184,8 +185,18 @@ def main():
         tee_output = setup_logging(args.log_file, args.config, args.checkpoint)
 
     try:
+        # Set default scope to mmdet3d before loading config
+        DefaultScope.get_instance('mmdet3d', scope_name='mmdet3d')
+        
         # load config
         cfg = Config.fromfile(args.config)
+        
+        # Handle custom imports
+        if hasattr(cfg, 'custom_imports') and cfg.custom_imports:
+            import importlib
+            for module_name in cfg.custom_imports.get('imports', []):
+                print(f"Importing custom module: {module_name}")
+                importlib.import_module(module_name)
 
         # TODO: We will unify the ceph support approach with other OpenMMLab repos
         if args.ceph:

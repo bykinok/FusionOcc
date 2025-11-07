@@ -1,10 +1,9 @@
 import numpy as np
 from numpy import random
 import mmcv
-try:
-    from mmdet.datasets.builder import PIPELINES
-except ImportError:
-    from mmdet3d.registry import TRANSFORMS as PIPELINES
+# mmdet3d와 mmengine 모두의 TRANSFORMS에 등록해야 합니다
+from mmdet3d.registry import TRANSFORMS as TRANSFORMS_MMDET3D
+from mmengine.registry import TRANSFORMS as TRANSFORMS_MMENGINE
 try:
     from mmcv.parallel import DataContainer as DC
 except ImportError:
@@ -17,7 +16,8 @@ except ImportError:
             return f'DC({self.data})'
 import os
 
-@PIPELINES.register_module()
+@TRANSFORMS_MMDET3D.register_module()
+@TRANSFORMS_MMENGINE.register_module()
 class LoadOccGTFromFile(object):
     """Load multi channel images from a list of separate channel files.
 

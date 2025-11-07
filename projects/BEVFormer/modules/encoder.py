@@ -128,6 +128,12 @@ class BEVFormerEncoder(TransformerLayerSequence):
             lidar2img.append(img_meta['lidar2img'])
         lidar2img = np.asarray(lidar2img)
         lidar2img = reference_points.new_tensor(lidar2img)  # (B, N, 4, 4)
+        
+        # Handle case where lidar2img might be (N, 4, 4) instead of (B, N, 4, 4)
+        if lidar2img.dim() == 3:
+            # lidar2img is (N, 4, 4), add batch dimension
+            lidar2img = lidar2img.unsqueeze(0)  # (1, N, 4, 4)
+        
         ego2lidar = reference_points.new_tensor(ego2lidar)
         # ego2lidar = ego2lidar.unsqueeze(dim=0).repeat(num_imgs,1,1).unsqueeze(0)
 

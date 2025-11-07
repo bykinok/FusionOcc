@@ -1,10 +1,9 @@
 import numpy as np
 from numpy import random
 import mmcv
-try:
-    from mmdet.datasets.builder import PIPELINES
-except ImportError:
-    from mmdet3d.registry import TRANSFORMS as PIPELINES
+# mmdet3d와 mmengine 모두의 TRANSFORMS에 등록해야 합니다
+from mmdet3d.registry import TRANSFORMS as TRANSFORMS_MMDET3D
+from mmengine.registry import TRANSFORMS as TRANSFORMS_MMENGINE
 try:
     from mmcv.parallel import DataContainer as DC
 except ImportError:
@@ -20,7 +19,8 @@ import os
 
 
 
-@PIPELINES.register_module()
+@TRANSFORMS_MMDET3D.register_module()
+@TRANSFORMS_MMENGINE.register_module()
 class PadMultiViewImage(object):
     """Pad the multi-view image.
     There are two padding modes: (1) pad to a fixed size and (2) pad to the
@@ -74,7 +74,8 @@ class PadMultiViewImage(object):
         return repr_str
 
 
-@PIPELINES.register_module()
+@TRANSFORMS_MMDET3D.register_module()
+@TRANSFORMS_MMENGINE.register_module()
 class NormalizeMultiviewImage(object):
     """Normalize the image.
     Added key is "img_norm_cfg".
@@ -111,7 +112,8 @@ class NormalizeMultiviewImage(object):
         return repr_str
 
 
-@PIPELINES.register_module()
+@TRANSFORMS_MMDET3D.register_module()
+@TRANSFORMS_MMENGINE.register_module()
 class PhotoMetricDistortionMultiViewImage:
     """Apply photometric distortion to image sequentially, every transformation
     is applied with a probability of 0.5. The position of random contrast is in
@@ -212,7 +214,8 @@ class PhotoMetricDistortionMultiViewImage:
 
 
 
-@PIPELINES.register_module()
+@TRANSFORMS_MMDET3D.register_module()
+@TRANSFORMS_MMENGINE.register_module()
 class CustomCollect3D(object):
     """Collect data from the loader relevant to the specific task.
     This is usually the last stage of the data loader pipeline. Typically keys
@@ -301,7 +304,8 @@ class CustomCollect3D(object):
 
 
 
-@PIPELINES.register_module()
+@TRANSFORMS_MMDET3D.register_module()
+@TRANSFORMS_MMENGINE.register_module()
 class RandomScaleImageMultiViewImage(object):
     """Random scale the image
     Args:

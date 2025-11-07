@@ -139,6 +139,21 @@ class NuSceneOcc(NuScenesDataset):
             example = self.pipeline(input_dict)
             queue.append(example)
         return self.union2one(queue)
+    
+    def prepare_test_data(self, index):
+        """
+        Testing data preparation - simplified for faster loading.
+        Args:
+            index (int): Index for accessing the target data.
+        Returns:
+            dict: Testing data dict of the corresponding index.
+        """
+        input_dict = self.get_data_info(index)
+        if input_dict is None:
+            return None
+        self.pre_pipeline(input_dict)
+        example = self.pipeline(input_dict)
+        return example
 
     def union2one(self, queue):
         imgs_list = [each['img'].data for each in queue]

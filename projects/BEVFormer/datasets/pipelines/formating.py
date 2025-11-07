@@ -18,18 +18,19 @@ try:
 except ImportError:
     from mmdet3d.structures.bbox_3d import BaseInstance3DBoxes
     from mmdet3d.structures.points import BasePoints
-try:
-    from mmdet.datasets.builder import PIPELINES
-    from mmdet.datasets.pipelines import to_tensor
-    from mmdet3d.datasets.pipelines import DefaultFormatBundle3D
-except ImportError:
-    from mmdet3d.registry import TRANSFORMS as PIPELINES
-    from mmcv.transforms import to_tensor
-    # DefaultFormatBundle3D is no longer available in new versions, use object as base
-    DefaultFormatBundle3D = object
 
-@PIPELINES.register_module(name='DefaultFormatBundle3D')
-@PIPELINES.register_module()
+# mmdet3d와 mmengine 모두의 TRANSFORMS에 등록해야 합니다
+from mmdet3d.registry import TRANSFORMS as TRANSFORMS_MMDET3D
+from mmengine.registry import TRANSFORMS as TRANSFORMS_MMENGINE
+try:
+    from mmdet.datasets.pipelines import to_tensor
+except ImportError:
+    from mmcv.transforms import to_tensor
+
+@TRANSFORMS_MMDET3D.register_module(name='DefaultFormatBundle3D')
+@TRANSFORMS_MMDET3D.register_module()
+@TRANSFORMS_MMENGINE.register_module(name='DefaultFormatBundle3D')
+@TRANSFORMS_MMENGINE.register_module()
 class CustomDefaultFormatBundle3D:
     """Default formatting bundle.
     It simplifies the pipeline of formatting common fields for voxels,

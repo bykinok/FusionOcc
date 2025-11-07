@@ -9,7 +9,12 @@ except ImportError:
     from mmdet3d.registry import MODELS as POSITIONAL_ENCODING
     from mmengine.model import BaseModule
 
-@POSITIONAL_ENCODING.register_module()
+# mmengine 레지스트리에도 등록
+from mmdet3d.registry import MODELS as MODELS_MMDET3D
+from mmengine.registry import MODELS as MODELS_MMENGINE
+
+@MODELS_MMDET3D.register_module()
+@MODELS_MMENGINE.register_module()
 class LearnedPositionalEncoding(BaseModule):
     """Position embedding with learnable embedding weights (2D version).
 
@@ -69,7 +74,8 @@ class LearnedPositionalEncoding(BaseModule):
         return repr_str
 
 
-@POSITIONAL_ENCODING.register_module()
+@MODELS_MMDET3D.register_module()
+@MODELS_MMENGINE.register_module()
 class LearnedPositionalEncoding3D(BaseModule):
     """Position embedding with learnable embedding weights.
 
