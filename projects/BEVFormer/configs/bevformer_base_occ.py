@@ -13,6 +13,17 @@ custom_imports = dict(
 # Set default scope to mmdet3d for all modules
 default_scope = 'mmdet3d'
 
+# CRITICAL: Configure default_hooks to load checkpoint in test mode
+# mmengine Runner loads checkpoint automatically from cfg.load_from
+# This ensures checkpoint is loaded even in test-only mode
+default_hooks = dict(
+    timer=dict(type='IterTimerHook'),
+    logger=dict(type='LoggerHook', interval=50),
+    param_scheduler=dict(type='ParamSchedulerHook'),
+    checkpoint=dict(type='CheckpointHook', interval=1, max_keep_ckpts=3),
+    sampler_seed=dict(type='DistSamplerSeedHook'),
+)
+
 # If point cloud range is changed, the models should also change their point
 # cloud range accordingly
 point_cloud_range = [-40, -40, -1.0, 40, 40, 5.4]
@@ -45,7 +56,7 @@ queue_length = 4 # each sequence contains `queue_length` frames.
 model = dict(
     type='mmdet3d.BEVFormerOcc',
     use_grid_mask=True,
-    video_test_mode=True,
+    video_test_mode=True,  # 원본과 동일하게 temporal 정보 사용
     img_backbone=dict(
         type='mmdet.ResNet',
         depth=101,
@@ -161,12 +172,22 @@ train_pipeline = [
 
 test_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
-    dict(type='LoadOccGTFromFile', data_root=occ_gt_data_root),  # Re-enabled for evaluation
+    dict(type='LoadOccGTFromFile', data_root=occ_gt_data_root),  # GT 로드 (평가용)
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='PadMultiViewImage', size_divisor=32),
-    # MultiScaleFlipAug3D 제거: CONet/FusionOcc처럼 직접 transforms 사용
-    dict(type='DefaultFormatBundle3D', class_names=class_names, with_label=False),
-    dict(type='CustomCollect3D', keys=['img', 'voxel_semantics', 'mask_lidar', 'mask_camera'])  # Added GT keys for evaluation
+    # CRITICAL: Follow original BEVFormer's test pipeline with MultiScaleFlipAug3D
+    dict(
+        type='MultiScaleFlipAug3D',
+        img_scale=(1600, 900),
+        pts_scale_ratio=1,
+        flip=False,
+        transforms=[
+            dict(
+                type='DefaultFormatBundle3D',
+                class_names=class_names,
+                with_label=False),
+            dict(type='CustomCollect3D', keys=['img', 'voxel_semantics', 'mask_lidar', 'mask_camera'])
+        ])
 ]
 
 data = dict(
@@ -257,7 +278,7 @@ val_evaluator = dict(
     type='mmdet3d.OccupancyMetric',
     num_classes=18,
     use_lidar_mask=False,
-    use_image_mask=False,
+    use_image_mask=True,  # 원본과 동일하게 True로 설정 (mask dtype 수정 완료)
     prefix='val'  # prefix 설정하여 경고 제거
 )
 
@@ -265,7 +286,7 @@ test_evaluator = dict(
     type='mmdet3d.OccupancyMetric',
     num_classes=18,
     use_lidar_mask=False,
-    use_image_mask=False,
+    use_image_mask=True,  # 원본과 동일하게 True로 설정 (mask dtype 수정 완료)
     prefix='test'
 )
 

@@ -115,6 +115,13 @@ class OccupancyMetric(BaseMetric):
             if mask_camera is None:
                 mask_camera = np.ones_like(gt_occ, dtype=bool)
             
+            # CRITICAL: Convert masks to bool dtype for proper boolean indexing
+            # uint8 masks cause fancy indexing which explodes memory
+            if mask_lidar is not None:
+                mask_lidar = mask_lidar.astype(bool)
+            if mask_camera is not None:
+                mask_camera = mask_camera.astype(bool)
+            
             # Add to metric accumulator
             self.miou_metric.add_batch(pred_occ, gt_occ, mask_lidar, mask_camera)
     

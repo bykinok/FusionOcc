@@ -198,7 +198,10 @@ class NuSceneOcc(NuScenesDataset):
             # imgs_list is a list of tensors
             queue[-1]['img'] = DC(torch.stack(imgs_list), cpu_only=True, stack=True)
         
-        queue[-1]['img_metas'] = DC(metas_map, cpu_only=True)
+        # CRITICAL: Wrap metas_map in a list to match original BEVFormer format
+        # Original forward_train expects: [each[i] for each in img_metas]
+        # which requires img_metas to be a list of dicts: [{0: meta0, 1: meta1, ...}]
+        queue[-1]['img_metas'] = DC([metas_map], cpu_only=True)
         queue = queue[-1]
         return queue
 

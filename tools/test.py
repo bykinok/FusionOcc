@@ -298,33 +298,11 @@ def main():
                 #         file_handler.setFormatter(formatter)
                 #         hook.file_handler = file_handler
         
-        # CRITICAL: Explicitly load checkpoint
-        # Use args.checkpoint directly instead of cfg.load_from to avoid path issues
-        # if args.checkpoint:
-        #     import torch
-        #     import os
-        #     from mmengine.runner import load_checkpoint
-            
-        #     # Handle checkpoint path - try multiple possible locations
-        #     checkpoint_path = args.checkpoint
-        #     possible_paths = [
-        #         checkpoint_path,
-        #         os.path.join('projects/FusionOcc', checkpoint_path),
-        #         os.path.join('FusionOcc_ori', checkpoint_path),
-        #     ]
-            
-        #     # Find the actual checkpoint file
-        #     actual_checkpoint_path = None
-        #     for path in possible_paths:
-        #         if os.path.exists(path):
-        #             actual_checkpoint_path = os.path.abspath(path)
-        #             break
-            
-        #     if actual_checkpoint_path is None:
-        #         raise FileNotFoundError(f"Checkpoint not found. Tried: {possible_paths}")
-            
-        #     # Load checkpoint explicitly with strict=False to handle any missing/unexpected keys
-        #     load_checkpoint(runner.model, actual_checkpoint_path, map_location='cpu', strict=False)
+        # CRITICAL: mmengine Runner does not auto-load checkpoint in test mode
+        # Explicitly load checkpoint if cfg.load_from is set (general solution for all models)
+        if hasattr(cfg, 'load_from') and cfg.load_from:
+            from mmengine.runner import load_checkpoint
+            load_checkpoint(runner.model, cfg.load_from, map_location='cpu', strict=False)
 
         # Apply max_samples limit after runner is built
         if args.max_samples is not None and hasattr(cfg, 'max_samples_limit'):
