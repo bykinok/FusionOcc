@@ -17,6 +17,11 @@ from mmengine.model import BaseModule
 from mmcv.cnn import build_conv_layer, build_norm_layer, build_upsample_layer
 from mmengine.model.weight_init import constant_init
 
+try:
+    from projects.SurroundOcc.surroundocc.loss.loss_utils import multiscale_supervision, geo_scal_loss, sem_scal_loss
+except ImportError:
+    from ..loss.loss_utils import multiscale_supervision, geo_scal_loss, sem_scal_loss
+
 
 @DET3D_MODELS.register_module()
 @ENGINE_MODELS.register_module() 
@@ -72,33 +77,55 @@ class OccHead(BaseModule):
         self._init_layers()
 
     def _init_layers(self):
-        """Initialize layers."""
+        """Initialize layers - following original SurroundOcc implementation."""
         # Build transformers for different FPN levels
         self.transformer = nn.ModuleList()
         if self.transformer_template is not None:
             for i in range(self.fpn_level):
                 transformer = copy.deepcopy(self.transformer_template)
                 
-                # Update transformer parameters for current level
-                transformer['embed_dims'] = self.embed_dims[i]
+                # Update transformer embed_dims (must access from template since it's a list)
+                transformer['embed_dims'] = self.transformer_template['embed_dims'][i]
                 
                 # Update encoder parameters
                 if 'encoder' in transformer:
                     encoder_config = transformer['encoder']
+                    
+                    # CRITICAL: Set num_layers for this FPN level (matches original line 90)
+                    # This determines how many OccLayer instances are created
+                    # num_layers = [1, 3, 6] for levels [0, 1, 2]
+                    encoder_config['num_layers'] = self.transformer_template['encoder']['num_layers'][i]
+                    
                     if 'transformerlayers' in encoder_config:
+                        
                         layer_config = encoder_config['transformerlayers']
+                        
+                        # Update layer embed_dims
+                        layer_config['embed_dims'] = self.transformer_template['encoder']['transformerlayers']['embed_dims'][i]
+                        
+                        # Update feedforward_channels (use from template, not embed_dims * 2)
+                        if 'feedforward_channels' in layer_config:
+                            layer_config['feedforward_channels'] = self.transformer_template['encoder']['transformerlayers']['feedforward_channels'][i]
                         
                         # Update attention configs
                         if 'attn_cfgs' in layer_config:
                             for attn_cfg in layer_config['attn_cfgs']:
-                                attn_cfg['embed_dims'] = self.embed_dims[i]
+                                # Update attention embed_dims
+                                if 'embed_dims' in attn_cfg:
+                                    attn_cfg['embed_dims'] = self.transformer_template['encoder']['transformerlayers']['attn_cfgs'][0]['embed_dims'][i]
+                                
+                                # Update deformable attention
                                 if 'deformable_attention' in attn_cfg:
-                                    attn_cfg['deformable_attention']['embed_dims'] = self.embed_dims[i]
-                        
-                        # Update other layer parameters
-                        layer_config['embed_dims'] = self.embed_dims[i]
-                        if 'feedforward_channels' in layer_config:
-                            layer_config['feedforward_channels'] = self.embed_dims[i] * 2
+                                    deform_attn = attn_cfg['deformable_attention']
+                                    template_deform = self.transformer_template['encoder']['transformerlayers']['attn_cfgs'][0]['deformable_attention']
+                                    
+                                    # Update embed_dims
+                                    if 'embed_dims' in deform_attn:
+                                        deform_attn['embed_dims'] = template_deform['embed_dims'][i]
+                                    
+                                    # Update num_points (critical!)
+                                    if 'num_points' in deform_attn:
+                                        deform_attn['num_points'] = template_deform['num_points'][i]
                 
                 transformer_i = ENGINE_MODELS.build(transformer)
                 self.transformer.append(transformer_i)
@@ -207,9 +234,9 @@ class OccHead(BaseModule):
         # Extract volume embeddings at different levels
         volume_embed = []
         for i in range(self.fpn_level):
+            # IMPORTANT: Keep volume_queries as (num_query, embed_dims) without batch dimension
+            # The transformer will handle batching internally
             volume_queries = self.volume_embedding[i].weight.to(dtype)
-            # Add batch dimension: (num_query, embed_dims) -> (1, num_query, embed_dims)
-            volume_queries = volume_queries.unsqueeze(0).repeat(bs, 1, 1)
             
             volume_h = self.volume_h[i] if i < len(self.volume_h) else self.volume_h[-1]
             volume_w = self.volume_w[i] if i < len(self.volume_w) else self.volume_w[-1]
@@ -300,11 +327,13 @@ class OccHead(BaseModule):
             for i in range(len(preds_dicts['occ_preds'])):
                 pred = preds_dicts['occ_preds'][i][:, 0]
                 
-                # Multi-scale supervision
+                # Multi-scale supervision using original implementation
                 ratio = 2 ** (len(preds_dicts['occ_preds']) - 1 - i)
-                gt = self._multiscale_supervision(gt_occ.clone(), ratio, pred.shape)
+                gt = multiscale_supervision(gt_occ.clone(), ratio, preds_dicts['occ_preds'][i].shape)
                 
-                loss_occ_i = F.binary_cross_entropy_with_logits(pred, gt)
+                # Add geo_scal_loss to binary loss (following original implementation)
+                loss_occ_i = (F.binary_cross_entropy_with_logits(pred, gt) + 
+                             geo_scal_loss(pred, gt.long(), semantic=False))
                 loss_weight = (0.5) ** (len(preds_dicts['occ_preds']) - 1 - i)
                 loss_dict[f'loss_occ_{i}'] = loss_occ_i * loss_weight
         else:
@@ -315,33 +344,16 @@ class OccHead(BaseModule):
                 pred = preds_dicts['occ_preds'][i]
                 ratio = 2 ** (len(preds_dicts['occ_preds']) - 1 - i)
                 
-                gt = self._multiscale_supervision(gt_occ.clone(), ratio, pred.shape)
+                # Use original multiscale_supervision implementation
+                gt = multiscale_supervision(gt_occ.clone(), ratio, preds_dicts['occ_preds'][i].shape)
                 
-                loss_occ_i = criterion(pred, gt.long())
+                # CRITICAL FIX: Add sem_scal_loss and geo_scal_loss (matching original line 292)
+                # This is the main difference between original and reimplementation
+                loss_occ_i = (criterion(pred, gt.long()) + 
+                             sem_scal_loss(pred, gt.long()) + 
+                             geo_scal_loss(pred, gt.long()))
+                
                 loss_weight = (0.5) ** (len(preds_dicts['occ_preds']) - 1 - i)
                 loss_dict[f'loss_occ_{i}'] = loss_occ_i * loss_weight
 
         return loss_dict
-
-    def _multiscale_supervision(self, gt_occ: torch.Tensor, ratio: int, pred_shape: tuple) -> torch.Tensor:
-        """Apply multi-scale supervision to ground truth.
-        
-        Args:
-            gt_occ: Ground truth occupancy.
-            ratio: Downsampling ratio.
-            pred_shape: Prediction shape.
-            
-        Returns:
-            torch.Tensor: Resized ground truth.
-        """
-        if ratio == 1:
-            return gt_occ
-        
-        # Downsample ground truth to match prediction resolution
-        gt_resized = F.interpolate(
-            gt_occ.float().unsqueeze(1), 
-            size=pred_shape[-3:], 
-            mode='nearest'
-        ).squeeze(1)
-        
-        return gt_resized

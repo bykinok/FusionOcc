@@ -50,52 +50,39 @@ class LoadOccupancy(BaseTransform):
                 
             if os.path.exists(occ_path):
                 try:
-                    gt_occ_raw = np.load(occ_path)
-                           # GT data loaded successfully
+                    gt_occ = np.load(occ_path)
+                    gt_occ = gt_occ.astype(np.float32)
                     
-                    # Check if data is sparse (N x 4) or dense (H x W x D)
-                    if len(gt_occ_raw.shape) == 2 and gt_occ_raw.shape[1] == 4:
-                        # Sparse format: convert to dense voxel grid
-                        # Converting sparse GT to dense voxel grid
-                        gt_occ = self._sparse_to_dense(gt_occ_raw, occ_size, results.get('pc_range', self.pc_range))
+                    # IMPORTANT: Keep GT in sparse format [N, 4] to match original SurroundOcc
+                    # The first three channels represent xyz voxel coordinate and last channel is semantic class
+                    # 
+                    # CRITICAL FIX: Original GT has classes 1-17 for occupied semantic voxels
+                    # Model predicts classes 0-16 where class 0 = any occupied (geometry)
+                    # So we need to shift GT classes: GT_class - 1 = Model_class
+                    # Example: GT class 1 (barrier) -> Model class 0... WAIT NO!
+                    # 
+                    # Actually: Model class 0 = empty, Model classes 1-16 = semantic
+                    # GT sparse format only has occupied voxels with classes 1-17
+                    # But NuScenes uses class 0 as ignore in original data
+                    # So: GT class 0 -> 255 (ignore), GT classes 1-16 stay the same
+                    if self.use_semantic:
+                        # Convert class 0 (ignore) to 255
+                        gt_occ[..., 3][gt_occ[..., 3] == 0] = 255
                     else:
-                        # Already dense format
-                        gt_occ = gt_occ_raw
-                        
-                        # Resize GT to match occ_size if needed
-                        if list(gt_occ.shape) != occ_size:
-                            try:
-                                from skimage.transform import resize
-                                # Use skimage resize with preserve_range and nearest neighbor
-                                gt_occ_resized = resize(
-                                    gt_occ, 
-                                    occ_size, 
-                                    order=0,  # nearest neighbor
-                                    preserve_range=True, 
-                                    anti_aliasing=False
-                                ).astype(gt_occ.dtype)
-                                gt_occ = gt_occ_resized
-                            except ImportError:
-                                try:
-                                    from scipy.ndimage import zoom
-                                    zoom_factors = [
-                                        occ_size[0] / gt_occ.shape[0],
-                                        occ_size[1] / gt_occ.shape[1], 
-                                        occ_size[2] / gt_occ.shape[2]
-                                    ]
-                                    # Use nearest neighbor interpolation for occupancy labels
-                                    gt_occ = zoom(gt_occ, zoom_factors, order=0).astype(gt_occ.dtype)
-                                except Exception as e:
-                                    # Resize failed, keeping original size
-                                    occ_size = list(gt_occ.shape)
+                        # For non-semantic mode, filter out class 0 and set all to 1
+                        gt_occ = gt_occ[gt_occ[..., 3] > 0]
+                        gt_occ[..., 3] = 1
+                    
+                    # GT data loaded successfully in sparse format
                         
                 except Exception as e:
                     # Error loading occupancy data
+                    print(f"Error loading occupancy data: {e}")
                     gt_occ = None
         
         # If no real data was loaded, raise an error
         if gt_occ is None:
-            raise RuntimeError(f"Failed to load occupancy ground truth data from {occ_path if occ_path else 'unknown path'}")
+            raise RuntimeError(f"Failed to load occupancy ground truth data from {occ_path if 'occ_path' in results else 'unknown path'}")
         
         results['gt_occ'] = gt_occ
         results['occ_size'] = np.array(occ_size)

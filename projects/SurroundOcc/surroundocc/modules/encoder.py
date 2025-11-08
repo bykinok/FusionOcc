@@ -10,95 +10,104 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from mmcv.cnn import build_conv_layer, build_norm_layer
+
+# Import TORCH_VERSION and digit_version with fallback
+try:
+    from mmcv.utils import TORCH_VERSION, digit_version
+except ImportError:
+    # Fallback for newer mmcv versions
+    TORCH_VERSION = torch.__version__
+    def digit_version(version_str):
+        return tuple(map(int, version_str.split('.')[:2]))
+
+# Try to import from mmcv first for compatibility
+try:
+    from mmcv.cnn.bricks.registry import TRANSFORMER_LAYER, TRANSFORMER_LAYER_SEQUENCE
+    from mmcv.cnn.bricks.transformer import TransformerLayerSequence
+    from mmcv.runner import force_fp32, auto_fp16
+except ImportError:
+    # Fallback to mmengine
+    from mmengine.model import BaseModule as TransformerLayerSequence
+    TRANSFORMER_LAYER = None
+    TRANSFORMER_LAYER_SEQUENCE = None
+    force_fp32 = lambda **kwargs: lambda func: func
+    auto_fp16 = lambda **kwargs: lambda func: func
+
+# Import from mmengine for registration
 from mmengine.model import BaseModule
 from mmdet3d.registry import MODELS as DET3D_MODELS
 from mmengine.registry import MODELS as ENGINE_MODELS
-from mmcv.cnn import build_conv_layer, build_norm_layer
+
+# Import custom base transformer layer
+from .custom_base_transformer_layer import MyCustomBaseTransformerLayer
 
 
 @DET3D_MODELS.register_module()
 @ENGINE_MODELS.register_module()
-class OccEncoder(BaseModule):
-    """Occupancy Encoder for SurroundOcc.
-    
-    This encoder processes volume queries using spatial cross-attention to
-    aggregate features from multi-view images.
-    
+class OccEncoder(TransformerLayerSequence if TransformerLayerSequence != BaseModule else BaseModule):
+    """
+    Attention with both self and cross
+    Implements the decoder in DETR transformer.
     Args:
-        num_layers (list): Number of layers at each level.
-        pc_range (list): Point cloud range.
         return_intermediate (bool): Whether to return intermediate outputs.
-        transformerlayers (dict): Config for transformer layers.
+        coder_norm_cfg (dict): Config of last normalization layer. Default：
+            `LN`.
     """
 
-    def __init__(self,
-                 num_layers: list = [1, 3, 6],
-                 pc_range: list = None,
-                 return_intermediate: bool = False,
-                 transformerlayers: dict = None,
-                 init_cfg: dict = None,
-                 **kwargs):
-        super(OccEncoder, self).__init__(init_cfg=init_cfg)
-        
-        self.num_layers = num_layers if isinstance(num_layers, list) else [num_layers]
+    def __init__(self, *args, pc_range=None, return_intermediate=False, dataset_type='nuscenes',
+                 transformerlayers=None, num_layers=None, **kwargs):
+
+        super(OccEncoder, self).__init__(*args, **kwargs)
         self.return_intermediate = return_intermediate
         self.pc_range = pc_range
+        self.fp16_enabled = False
         
-        # Build transformer layers
-        self.layers = nn.ModuleList()
-        if transformerlayers is not None:
-            for i in range(len(self.num_layers)):
-                layer_config = copy.deepcopy(transformerlayers)
-                layer = ENGINE_MODELS.build(layer_config)
-                self.layers.append(layer)
+        # Build layers if not built by parent
+        if not hasattr(self, 'layers') or self.layers is None or len(self.layers) == 0:
+            self.layers = nn.ModuleList()
+            if transformerlayers is not None and num_layers is not None:
+                # Handle num_layers as list or int
+                total_layers = sum(num_layers) if isinstance(num_layers, list) else num_layers
+                for _ in range(total_layers):
+                    layer_cfg = copy.deepcopy(transformerlayers)
+                    self.layers.append(ENGINE_MODELS.build(layer_cfg))
 
     @staticmethod
-    def get_reference_points(H: int, W: int, Z: int, bs: int = 1, 
-                           device: str = 'cuda', dtype: torch.dtype = torch.float):
-        """Get reference points for 3D volume.
-        
+    def get_reference_points(H, W, Z, bs=1, device='cuda', dtype=torch.float):
+        """Get the reference points used in SCA and TSA.
         Args:
-            H: Height of volume.
-            W: Width of volume.
-            Z: Depth of volume.
-            bs: Batch size.
-            device: Device.
-            dtype: Data type.
-            
+            H, W, Z: spatial shape of volume.
+            device (obj:`device`): The device where
+                reference_points should be.
         Returns:
-            torch.Tensor: Reference points with shape (bs, 1, H*W*Z, 3).
+            Tensor: reference points used in decoder, has \
+                shape (bs, num_keys, num_levels, 2).
         """
+        
         zs = torch.linspace(0.5, Z - 0.5, Z, dtype=dtype,
-                          device=device).view(Z, 1, 1).expand(Z, H, W) / Z
+                            device=device).view(Z, 1, 1).expand(Z, H, W) / Z
         xs = torch.linspace(0.5, W - 0.5, W, dtype=dtype,
-                          device=device).view(1, 1, W).expand(Z, H, W) / W
+                            device=device).view(1, 1, W).expand(Z, H, W) / W
         ys = torch.linspace(0.5, H - 0.5, H, dtype=dtype,
-                          device=device).view(1, H, 1).expand(Z, H, W) / H
+                            device=device).view(1, H, 1).expand(Z, H, W) / H
         ref_3d = torch.stack((xs, ys, zs), -1)
         ref_3d = ref_3d.permute(3, 0, 1, 2).flatten(1).permute(1, 0)
         ref_3d = ref_3d[None, None].repeat(bs, 1, 1, 1)
         return ref_3d
 
-    def point_sampling(self, reference_points: torch.Tensor, pc_range: list, img_metas: list):
-        """Sample points in 3D space and project to camera coordinates.
-        
-        Args:
-            reference_points: Reference points in normalized coordinates.
-            pc_range: Point cloud range.
-            img_metas: Image meta information.
-            
-        Returns:
-            tuple: Reference points in camera coordinates and masks.
-        """
+
+    # This function must use fp32!!!
+    @force_fp32(apply_to=('reference_points', 'img_metas'))
+    def point_sampling(self, reference_points, pc_range,  img_metas):
+
         lidar2img = []
         for img_meta in img_metas:
             lidar2img.append(img_meta['lidar2img'])
         lidar2img = np.asarray(lidar2img)
         lidar2img = reference_points.new_tensor(lidar2img)  # (B, N, 4, 4)
-        
         reference_points = reference_points.clone()
 
-        # Convert normalized coordinates to world coordinates
         reference_points[..., 0:1] = reference_points[..., 0:1] * \
             (pc_range[3] - pc_range[0]) + pc_range[0]
         reference_points[..., 1:2] = reference_points[..., 1:2] * \
@@ -111,25 +120,7 @@ class OccEncoder(BaseModule):
 
         reference_points = reference_points.permute(1, 0, 2, 3)
         D, B, num_query = reference_points.size()[:3]
-        
-        # lidar2img should be [batch_size, num_cam, 4, 4]
-        if lidar2img.dim() == 4 and lidar2img.size(0) == 1 and B > 1:
-            # This case should not happen but handle it
-            lidar2img = lidar2img.squeeze(0)
-        elif lidar2img.dim() == 4 and lidar2img.size(0) != B:
-            # lidar2img might be [1, B, num_cam, 4, 4] format, squeeze first dim
-            lidar2img = lidar2img.squeeze(0)
-        
-        # Now lidar2img should be [batch_size, num_cam, 4, 4]
-        if lidar2img.dim() == 3:
-            # Missing batch dimension, add it
-            lidar2img = lidar2img.unsqueeze(0)
-            
-        batch_size = lidar2img.size(0)
         num_cam = lidar2img.size(1)
-        
-        # Ensure B matches batch_size
-        assert B == batch_size, f"Mismatch: reference_points B={B} vs lidar2img batch_size={batch_size}"
 
         reference_points = reference_points.view(
             D, B, 1, num_query, 4).repeat(1, 1, num_cam, 1, 1).unsqueeze(-1)
@@ -138,85 +129,90 @@ class OccEncoder(BaseModule):
             1, B, num_cam, 1, 4, 4).repeat(D, 1, 1, num_query, 1, 1)
 
         reference_points_cam = torch.matmul(lidar2img.to(torch.float32),
-                                          reference_points.to(torch.float32)).squeeze(-1)
+                                            reference_points.to(torch.float32)).squeeze(-1)
         eps = 1e-5
 
-        bev_mask = (reference_points_cam[..., 2:3] > eps)
+        volume_mask = (reference_points_cam[..., 2:3] > eps)
         reference_points_cam = reference_points_cam[..., 0:2] / torch.maximum(
             reference_points_cam[..., 2:3], torch.ones_like(reference_points_cam[..., 2:3]) * eps)
 
         reference_points_cam[..., 0] /= img_metas[0]['img_shape'][0][1]
         reference_points_cam[..., 1] /= img_metas[0]['img_shape'][0][0]
 
-        bev_mask = (bev_mask & (reference_points_cam[..., 1:2] > 0.0)
-                   & (reference_points_cam[..., 1:2] < 1.0)
-                   & (reference_points_cam[..., 0:1] < 1.0)
-                   & (reference_points_cam[..., 0:1] > 0.0))
+        volume_mask = (volume_mask & (reference_points_cam[..., 1:2] > 0.0)
+                    & (reference_points_cam[..., 1:2] < 1.0)
+                    & (reference_points_cam[..., 0:1] < 1.0)
+                    & (reference_points_cam[..., 0:1] > 0.0))
         if digit_version(TORCH_VERSION) >= digit_version('1.8'):
-            bev_mask = torch.nan_to_num(bev_mask)
+            volume_mask = torch.nan_to_num(volume_mask)
+        else:
+            volume_mask = volume_mask.new_tensor(
+                np.nan_to_num(volume_mask.cpu().numpy()))
 
-        reference_points_cam = reference_points_cam.permute(2, 1, 3, 0, 4)
-        bev_mask = bev_mask.permute(2, 1, 3, 0, 4).squeeze(-1)
+        reference_points_cam = reference_points_cam.permute(2, 1, 3, 0, 4) #num_cam, B, num_query, D, 3
+        volume_mask = volume_mask.permute(2, 1, 3, 0, 4).squeeze(-1)
 
-        return reference_points_cam, bev_mask
+        return reference_points_cam, volume_mask
 
+    @auto_fp16()
     def forward(self,
-                bev_query: torch.Tensor,
-                key: torch.Tensor,
-                value: torch.Tensor,
-                volume_h: int,
-                volume_w: int,
-                volume_z: int,
-                spatial_shapes: torch.Tensor = None,
-                level_start_index: torch.Tensor = None,
-                img_metas: list = None,
-                **kwargs) -> torch.Tensor:
-        """Forward function.
-        
-        Args:
-            bev_query: Volume queries.
-            key: Key features.
-            value: Value features.
-            volume_h: Height of volume.
-            volume_w: Width of volume.
-            volume_z: Depth of volume.
-            spatial_shapes: Spatial shapes of features.
-            level_start_index: Start index for each level.
-            img_metas: Image meta information.
-            
-        Returns:
-            torch.Tensor: Encoded volume features.
-        """
-        output = bev_query
-        intermediate = []
-
-        bs, num_query, _ = bev_query.shape
-
-        # Get reference points for 3D volume
-        ref_3d = self.get_reference_points(
-            volume_h, volume_w, volume_z, bs, 
-            device=bev_query.device, dtype=bev_query.dtype)
-
-        reference_points_cam, bev_mask = self.point_sampling(
-            ref_3d, self.pc_range, img_metas)
-
-        # Process through transformer layers
-        for lid, layer in enumerate(self.layers):
-            output = layer(
-                bev_query,
+                volume_query,
                 key,
                 value,
-                bev_pos=None,
-                ref_2d=reference_points_cam,
-                bev_h=volume_h,
-                bev_w=volume_w,
-                bev_z=volume_z,
+                *args,
+                volume_h=None,
+                volume_w=None,
+                volume_z=None,
+                spatial_shapes=None,
+                level_start_index=None,
+                **kwargs):
+        """Forward function for `TransformerDecoder`.
+        Args:
+            volume_query (Tensor): Input 3D volume query with shape
+                `(num_query, bs, embed_dims)`.
+            key & value (Tensor): Input multi-cameta features with shape
+                (num_cam, num_value, bs, embed_dims)
+            reference_points (Tensor): The reference
+                points of offset. has shape
+                (bs, num_query, 4) when as_two_stage,
+                otherwise has shape ((bs, num_query, 2).
+
+        Returns:
+            Tensor: Results with shape [1, num_query, bs, embed_dims] when
+                return_intermediate is `False`, otherwise it has shape
+                [num_layers, num_query, bs, embed_dims].
+        """
+
+        output = volume_query
+        intermediate = []
+
+        ref_3d = self.get_reference_points(
+                    volume_h, volume_w, volume_z, bs=volume_query.size(1),  device=volume_query.device, dtype=volume_query.dtype)
+
+        reference_points_cam, volume_mask = self.point_sampling(
+            ref_3d, self.pc_range, kwargs['img_metas'])
+
+
+        # (num_query, bs, embed_dims) -> (bs, num_query, embed_dims)
+        volume_query = volume_query.permute(1, 0, 2)
+
+        for lid, layer in enumerate(self.layers):
+            output = layer(
+                volume_query,
+                key,
+                value,
+                *args,
+                ref_3d=ref_3d,
+                volume_h=volume_h,
+                volume_w=volume_w,
+                volume_z=volume_z,
                 spatial_shapes=spatial_shapes,
                 level_start_index=level_start_index,
-                bev_mask=bev_mask,
+                reference_points_cam=reference_points_cam,
+                bev_mask=volume_mask,
                 **kwargs)
 
-            bev_query = output
+            volume_query = output
             if self.return_intermediate:
                 intermediate.append(output)
 
@@ -226,118 +222,174 @@ class OccEncoder(BaseModule):
         return output
 
 
-@DET3D_MODELS.register_module() 
+@DET3D_MODELS.register_module()
 @ENGINE_MODELS.register_module()
-class OccLayer(BaseModule):
-    """Occupancy Layer with spatial cross-attention and feed-forward network.
-    
+class OccLayer(MyCustomBaseTransformerLayer if MyCustomBaseTransformerLayer != BaseModule else BaseModule):
+    """Implements decoder layer in DETR transformer.
     Args:
-        attn_cfgs (list): Attention configurations.
-        feedforward_channels (int): Channels of feed-forward network.
-        ffn_dropout (float): Dropout rate for FFN.
-        embed_dims (int): Embedding dimensions.
-        conv_num (int): Number of convolution layers.
-        operation_order (tuple): Order of operations.
+        attn_cfgs (list[`mmcv.ConfigDict`] | list[dict] | dict )):
+            Configs for self_attention or cross_attention, the order
+            should be consistent with it in `operation_order`. If it is
+            a dict, it would be expand to the number of attention in
+            `operation_order`.
+        feedforward_channels (int): The hidden dimension for FFNs.
+        ffn_dropout (float): Probability of an element to be zeroed
+            in ffn. Default 0.0.
+        operation_order (tuple[str]): The execution order of operation
+            in transformer. Such as ('self_attn', 'norm', 'ffn', 'norm').
+            Default：None
+        act_cfg (dict): The activation config for FFNs. Default: `LN`
+        norm_cfg (dict): Config dict for normalization layer.
+            Default: `LN`.
+        ffn_num_fcs (int): The number of fully-connected layers in FFNs.
+            Default：2.
     """
 
     def __init__(self,
-                 attn_cfgs: list = None,
-                 feedforward_channels: int = 512,
-                 ffn_dropout: float = 0.1,
-                 embed_dims: int = 256,
-                 conv_num: int = 2,
-                 operation_order: tuple = ('cross_attn', 'norm', 'ffn', 'norm', 'conv'),
-                 init_cfg: dict = None,
+                 attn_cfgs,
+                 feedforward_channels,
+                 embed_dims,
+                 ffn_dropout=0.0,
+                 operation_order=None,
+                 conv_num=1,
+                 act_cfg=dict(type='ReLU', inplace=True),
+                 norm_cfg=dict(type='LN'),
+                 ffn_num_fcs=2,
                  **kwargs):
-        super(OccLayer, self).__init__(init_cfg=init_cfg)
-        
-        self.operation_order = operation_order
-        self.embed_dims = embed_dims
-        self.conv_num = conv_num
-        
-        # Build attention layers
-        self.attentions = nn.ModuleList()
-        if attn_cfgs is not None:
-            for attn_cfg in attn_cfgs:
-                self.attentions.append(ENGINE_MODELS.build(attn_cfg))
-        
-        # Build normalization layers
-        self.norms = nn.ModuleList()
-        for _ in range(operation_order.count('norm')):
-            self.norms.append(nn.LayerNorm(embed_dims))
-        
-        # Build feed-forward network
-        self.ffn = nn.Sequential(
-            nn.Linear(embed_dims, feedforward_channels),
-            nn.ReLU(inplace=True),
-            nn.Dropout(ffn_dropout),
-            nn.Linear(feedforward_channels, embed_dims),
-            nn.Dropout(ffn_dropout)
-        )
-        
-        # Build convolution layers
-        self.convs = nn.ModuleList()
-        for _ in range(conv_num):
-            conv = nn.Sequential(
-                nn.Conv1d(embed_dims, embed_dims, 1),
-                nn.ReLU(inplace=True)
-            )
-            self.convs.append(conv)
+        super(OccLayer, self).__init__(
+            attn_cfgs=attn_cfgs,
+            feedforward_channels=feedforward_channels,
+            embed_dims=embed_dims,
+            ffn_dropout=ffn_dropout,
+            operation_order=operation_order,
+            act_cfg=act_cfg,
+            norm_cfg=norm_cfg,
+            ffn_num_fcs=ffn_num_fcs,
+            **kwargs)
+        self.fp16_enabled = False
+
+        self.deblock = nn.ModuleList()
+        conv_cfg=dict(type='Conv3d', bias=False)
+        norm_cfg_conv=dict(type='GN', num_groups=16, requires_grad=True)
+        for i in range(conv_num):
+            conv_layer = build_conv_layer(
+                    conv_cfg,
+                    in_channels=embed_dims,
+                    out_channels=embed_dims,
+                    kernel_size=3,
+                    stride=1,
+                    padding=1)
+            deblock = nn.Sequential(conv_layer,
+                                    build_norm_layer(norm_cfg_conv, embed_dims)[1],
+                                    nn.ReLU(inplace=True))
+            self.deblock.append(deblock)
 
     def forward(self,
-                query: torch.Tensor,
-                key: torch.Tensor = None,
-                value: torch.Tensor = None,
-                bev_pos: torch.Tensor = None,
-                ref_2d: torch.Tensor = None,
-                bev_h: int = None,
-                bev_w: int = None,
-                bev_z: int = None,
-                spatial_shapes: torch.Tensor = None,
-                level_start_index: torch.Tensor = None,
-                bev_mask: torch.Tensor = None,
-                **kwargs) -> torch.Tensor:
-        """Forward function."""
+                query,
+                key=None,
+                value=None,
+                query_pos=None,
+                key_pos=None,
+                attn_masks=None,
+                query_key_padding_mask=None,
+                key_padding_mask=None,
+                ref_3d=None,
+                volume_h=None,
+                volume_w=None,
+                volume_z=None,
+                reference_points_cam=None,
+                mask=None,
+                spatial_shapes=None,
+                level_start_index=None,
+                **kwargs):
+        """Forward function for `TransformerDecoderLayer`.
+
+        **kwargs contains some specific arguments of attentions.
+
+        Args:
+            query (Tensor): The input query with shape
+                [num_queries, bs, embed_dims] if
+                self.batch_first is False, else
+                [bs, num_queries embed_dims].
+            key (Tensor): The key tensor with shape [num_keys, bs,
+                embed_dims] if self.batch_first is False, else
+                [bs, num_keys, embed_dims] .
+            value (Tensor): The value tensor with same shape as `key`.
+            query_pos (Tensor): The positional encoding for `query`.
+                Default: None.
+            key_pos (Tensor): The positional encoding for `key`.
+                Default: None.
+            attn_masks (List[Tensor] | None): 2D Tensor used in
+                calculation of corresponding attention. The length of
+                it should equal to the number of `attention` in
+                `operation_order`. Default: None.
+            query_key_padding_mask (Tensor): ByteTensor for `query`, with
+                shape [bs, num_queries]. Only used in `self_attn` layer.
+                Defaults to None.
+            key_padding_mask (Tensor): ByteTensor for `query`, with
+                shape [bs, num_keys]. Default: None.
+
+        Returns:
+            Tensor: forwarded results with shape [num_queries, bs, embed_dims].
+        """
+
         norm_index = 0
         attn_index = 0
-        conv_index = 0
+        ffn_index = 0
         identity = query
-        
-        for op in self.operation_order:
-            if op == 'cross_attn':
-                if attn_index < len(self.attentions):
-                    query = self.attentions[attn_index](
-                        query, key, value,
-                        reference_points=ref_2d,
-                        spatial_shapes=spatial_shapes,
-                        level_start_index=level_start_index,
-                        **kwargs)
-                    attn_index += 1
-                    
-            elif op == 'norm':
-                if norm_index < len(self.norms):
-                    query = self.norms[norm_index](query)
-                    norm_index += 1
-                    
-            elif op == 'ffn':
-                query = self.ffn(query) + query
-                
-            elif op == 'conv':
-                if conv_index < len(self.convs):
-                    bs, num_query, embed_dims = query.shape
-                    query = query.permute(0, 2, 1)  # (bs, embed_dims, num_query)
-                    query = self.convs[conv_index](query)
-                    query = query.permute(0, 2, 1)  # (bs, num_query, embed_dims)
-                    conv_index += 1
+        if attn_masks is None:
+            attn_masks = [None for _ in range(self.num_attn)]
+        elif isinstance(attn_masks, torch.Tensor):
+            attn_masks = [
+                copy.deepcopy(attn_masks) for _ in range(self.num_attn)
+            ]
+            warnings.warn(f'Use same attn_mask in all attentions in '
+                          f'{self.__class__.__name__} ')
+        else:
+            assert len(attn_masks) == self.num_attn, f'The length of ' \
+                                                     f'attn_masks {len(attn_masks)} must be equal ' \
+                                                     f'to the number of attention in ' \
+                f'operation_order {self.num_attn}'
+
+        for layer in self.operation_order:
+            # temporal self attention
+            if layer == 'conv':
+                bs = query.shape[0]
+                identity = query
+                query = query.reshape(bs, volume_z, volume_h, volume_w, -1).permute(0, 4, 3, 2, 1)
+                for i in range(len(self.deblock)):
+                    query = self.deblock[i](query)
+                query = query.permute(0, 4, 3, 2, 1).reshape(bs, volume_z*volume_h*volume_w, -1)
+                query = query + identity
+    
+            elif layer == 'norm':
+                query = self.norms[norm_index](query)
+                norm_index += 1
+
+            # spaital cross attention
+            elif layer == 'cross_attn':
+                query = self.attentions[attn_index](
+                    query,
+                    key,
+                    value,
+                    identity if self.pre_norm else None,
+                    query_pos=query_pos,
+                    key_pos=key_pos,
+                    reference_points=ref_3d,
+                    reference_points_cam=reference_points_cam,
+                    mask=mask,
+                    attn_mask=attn_masks[attn_index],
+                    key_padding_mask=key_padding_mask,
+                    spatial_shapes=spatial_shapes,
+                    level_start_index=level_start_index,
+                    **kwargs)
+                attn_index += 1
+                identity = query
+
+            elif layer == 'ffn':
+                query = self.ffns[ffn_index](
+                    query, identity if self.pre_norm else None)
+                ffn_index += 1
+            
 
         return query
-
-
-# Import required for version checking
-try:
-    from mmcv.utils import TORCH_VERSION, digit_version
-except ImportError:
-    import torch
-    TORCH_VERSION = torch.__version__
-    def digit_version(version_str):
-        return tuple(map(int, version_str.split('.')[:2]))

@@ -13,6 +13,24 @@ from mmdet3d.registry import MODELS as DET3D_MODELS
 from mmengine.registry import MODELS as ENGINE_MODELS
 from torch.nn.init import normal_
 
+try:
+    from mmcv.runner import force_fp32, auto_fp16
+except ImportError:
+    # For mmengine compatibility - use force_fp32 from mmengine if available
+    try:
+        from mmengine.runner import force_fp32, auto_fp16
+    except ImportError:
+        # Fallback: define as no-op decorators
+        def force_fp32(apply_to=None):
+            def decorator(func):
+                return func
+            return decorator if apply_to is not None else lambda f: f
+        
+        def auto_fp16(apply_to=None):
+            def decorator(func):
+                return func
+            return decorator if apply_to is not None else lambda f: f
+
 from .spatial_cross_attention import MSDeformableAttention3D
 
 
@@ -84,6 +102,7 @@ class PerceptionTransformer(BaseModule):
             normal_(self.cams_embeds)
         xavier_init(self.reference_points, distribution='uniform', bias=0.)
 
+    @force_fp32(apply_to=('mlvl_feats', 'volume_queries'))
     def forward(self,
                 mlvl_feats: list,
                 volume_queries: torch.Tensor,
@@ -104,16 +123,9 @@ class PerceptionTransformer(BaseModule):
             torch.Tensor: Volume embeddings.
         """
         bs = mlvl_feats[0].size(0)
-        
-        # Check if volume_queries already has batch dimension
-        if volume_queries.dim() == 2:
-            # volume_queries shape: (num_query, embed_dims) -> (bs, num_query, embed_dims)
-            volume_queries = volume_queries.unsqueeze(0).repeat(bs, 1, 1)
-        elif volume_queries.dim() == 3 and volume_queries.size(0) == bs:
-            # volume_queries already has correct shape: (bs, num_query, embed_dims)
-            pass
-        else:
-            raise ValueError(f"Unexpected volume_queries shape: {volume_queries.shape}, expected batch size: {bs}")
+        # IMPORTANT: Match original SurroundOcc exactly
+        # volume_queries is (num_query, embed_dims), convert to (num_query, bs, embed_dims)
+        volume_queries = volume_queries.unsqueeze(1).repeat(1, bs, 1)
 
         feat_flatten = []
         spatial_shapes = []

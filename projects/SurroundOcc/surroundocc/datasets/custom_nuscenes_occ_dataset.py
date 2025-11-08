@@ -47,39 +47,49 @@ class CustomNuScenesOccDataset(NuScenesDataset):
         # Initialize basic attributes without calling full_init()
         self.serialize_data = kwargs.get('serialize_data', True) 
         self.test_mode = kwargs.get('test_mode', False)
-        self.pipeline = kwargs.get('pipeline', [])
+        pipeline_cfg = kwargs.get('pipeline', [])
         
-        # Build essential pipeline - focus on core transforms for occupancy
-        if self.pipeline:
-            # Import mmdet3d transforms to ensure they are registered
-            import mmdet3d.datasets.transforms
-            from mmdet3d.registry import TRANSFORMS as DET3D_TRANSFORMS
+        # Build pipeline from config, skipping legacy transforms
+        if pipeline_cfg:
             from mmcv.transforms import Compose
+            from mmengine.registry import TRANSFORMS as ENGINE_TRANSFORMS
+            from mmdet3d.registry import TRANSFORMS as DET3D_TRANSFORMS
             
-            # Build core transforms manually
-            pipeline = []
+            # Import transforms to ensure they are registered
+            import mmdet3d.datasets.transforms
+            from projects.SurroundOcc.surroundocc import transforms as custom_transforms
             
-            # 1. LoadMultiViewImageFromFiles - essential for image loading
-            try:
-                load_img_transform = DET3D_TRANSFORMS.build({
-                    'type': 'LoadMultiViewImageFromFiles',
-                    'to_float32': True
-                })
-                pipeline.append(load_img_transform)
-            except Exception as e:
-                # LoadMultiViewImageFromFiles has registry issues, will use dummy images
-                pass
+            # Legacy transforms that should be skipped in mmengine environment
+            SKIP_TRANSFORMS = ['DefaultFormatBundle3D', 'Collect3D']
             
-            # 2. LoadOccupancy - essential for GT loading
-            try:
-                # Find LoadOccupancy in original pipeline config
-                from projects.SurroundOcc.surroundocc.transforms.loading import LoadOccupancy
-                load_occ_transform = LoadOccupancy(use_semantic=True)
-                pipeline.append(load_occ_transform)
-            except Exception as e:
-                print(f"ERROR: Failed to build LoadOccupancy: {e}")
-                
-            self.pipeline = Compose(pipeline) if pipeline else None
+            # Build pipeline from config
+            transforms = []
+            for transform_cfg in pipeline_cfg:
+                if isinstance(transform_cfg, dict):
+                    transform_type = transform_cfg.get('type', '')
+                    
+                    # Skip legacy transforms
+                    if transform_type in SKIP_TRANSFORMS:
+                        print(f"INFO: Skipping legacy transform: {transform_type}")
+                        continue
+                    
+                    # Try ENGINE_TRANSFORMS first, then DET3D_TRANSFORMS
+                    try:
+                        transform = ENGINE_TRANSFORMS.build(transform_cfg)
+                        transforms.append(transform)
+                    except Exception as e1:
+                        try:
+                            transform = DET3D_TRANSFORMS.build(transform_cfg)
+                            transforms.append(transform)
+                        except Exception as e2:
+                            print(f"WARNING: Failed to build transform {transform_type}: {e2}")
+                            continue
+                else:
+                    transforms.append(transform_cfg)
+            
+            self.pipeline = Compose(transforms)
+        else:
+            self.pipeline = None
         
         # Load data directly without parent class filtering
         self._load_data_list_direct()
@@ -209,133 +219,123 @@ class CustomNuScenesOccDataset(NuScenesDataset):
             dict: Data dictionary of the corresponding index.
         """
         try:
-            # Get data from get_data_info to ensure proper format conversion
-            if idx < len(self.data_list):
-                data_info = self.data_list[idx].copy()
-                
-                # Ensure img_filename is available for LoadMultiViewImageFromFiles
-                # Our data already has img_filename as a list, so just verify it's correct
-                if 'img_filename' in data_info and isinstance(data_info['img_filename'], list):
-                    # img_filename already exists and is correct format
-                    pass
-                elif 'cams' in data_info:
-                    # Convert cams format to img_filename list
-                    cam_keys = ['CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_FRONT_LEFT', 'CAM_BACK', 'CAM_BACK_LEFT', 'CAM_BACK_RIGHT']
-                    img_filename = []
-                    for cam_key in cam_keys:
-                        if cam_key in data_info['cams']:
-                            img_filename.append(data_info['cams'][cam_key]['data_path'])
-                    data_info['img_filename'] = img_filename
-                
-                
-                # Add occ_path if missing
-                if 'occ_path' not in data_info:
-                    if 'pts_filename' in data_info:
-                        pts_file = data_info['pts_filename']
-                        if isinstance(pts_file, str) and 'LIDAR_TOP' in pts_file:
-                            import os
-                            base_name = os.path.basename(pts_file).replace('.pcd.bin', '')
-                            data_info['occ_path'] = f'./data/nuscenes_occ/samples/{base_name}.pcd.bin.npy'
-                
-                # Check if this is real data (has required fields)        
-                if 'img_filename' in data_info and 'occ_path' in data_info:
-                    # Process real data through pipeline
-                    if self.pipeline is not None:
-                        try:
-                            result = self.pipeline(data_info)
-                            if result is not None:
-                                # Convert old MMDet3D format to new MMEngine format
-                                if isinstance(result, dict) and 'inputs' not in result:
-                                    # Extract images from result
-                                    imgs = None
+            # CRITICAL: Use get_data_info to properly calculate lidar2img matrices
+            # This is essential for transformer to work correctly
+            data_info = self.get_data_info(idx)
+            
+            if data_info is None:
+                raise RuntimeError(f"get_data_info returned None for index {idx}")
+            
+            # Process data through pipeline
+            if self.pipeline is not None:
+                try:
+                    result = self.pipeline(data_info)
+                    if result is not None:
+                        # Convert old MMDet3D format to new MMEngine format
+                        if isinstance(result, dict) and 'inputs' not in result:
+                            # Extract images from result
+                            imgs = None
+                            
+                            # Check for 'img' key (LoadMultiViewImageFromFiles output)
+                            if 'img' in result and isinstance(result['img'], list):
+                                # Convert list of images to stacked tensor
+                                import torch
+                                import numpy as np
                                 
-                                    # Check for 'img' key (LoadMultiViewImageFromFiles output)
-                                    if 'img' in result and isinstance(result['img'], list):
-                                        # Convert list of images to stacked tensor
-                                        import torch
-                                        import numpy as np
-                                        
-                                        img_list = result['img']
-                                        if len(img_list) > 0 and isinstance(img_list[0], np.ndarray):
-                                            # Convert numpy arrays to tensors and stack
-                                            img_tensors = [torch.from_numpy(img).permute(2, 0, 1) for img in img_list]  # HWC -> CHW
-                                            imgs = torch.stack(img_tensors, dim=0)  # [N, C, H, W]
-                                        else:
-                                            if idx < 3:
-                                                print(f"DEBUG: Unexpected img format in result: {type(img_list[0]) if img_list else 'empty list'}")
-                                    
-                                    # Fallback: try other image keys
-                                    if imgs is None:
-                                        for img_key in ['imgs', 'image', 'images']:
-                                            if img_key in result:
-                                                imgs = result[img_key]
-                                                break
-                                
-                                    # If no images found, create dummy images for now
-                                    if imgs is None:
-                                        # Temporarily use dummy images since LoadMultiViewImageFromFiles has registry issues
-                                        import torch
-                                        dummy_imgs = torch.randn(6, 3, 256, 448, dtype=torch.float32)  # [N, C, H, W]
-                                        imgs = dummy_imgs
-                                    
-                                    # Create data_sample with GT and metadata
-                                    from mmdet3d.structures.det3d_data_sample import Det3DDataSample
-                                    import torch
-                                    import numpy as np
-                                    
-                                    data_sample = Det3DDataSample()
-                                    
-                                    # Add GT occupancy
-                                    if 'gt_occ' in result:
-                                        if isinstance(result['gt_occ'], torch.Tensor):
-                                            data_sample.gt_occ = result['gt_occ']
-                                        else:
-                                            data_sample.gt_occ = torch.from_numpy(result['gt_occ'])
-                                    
-                                    # Add metadata
-                                    metainfo = {}
-                                    for key in ['sample_idx', 'timestamp', 'scene_token', 'pc_range', 'occ_size']:
-                                        if key in result:
-                                            metainfo[key] = result[key]
-                                    
-                                    # Add camera matrices from LoadMultiViewImageFromFiles output
-                                    for matrix_key in ['lidar2img', 'cam2img', 'lidar2cam']:
-                                        if matrix_key in result:
-                                            metainfo[matrix_key] = result[matrix_key]
-                                    
-                                    # If lidar2img not available from transform, get from original data
-                                    if 'lidar2img' not in metainfo:
-                                        if 'lidar2img' in data_info:
-                                            metainfo['lidar2img'] = data_info['lidar2img']
-                                        else:
-                                            # Create dummy lidar2img matrices for 6 cameras
-                                            import numpy as np
-                                            dummy_lidar2img = []
-                                            for i in range(6):
-                                                # Create identity 4x4 matrix as dummy
-                                                dummy_matrix = np.eye(4, dtype=np.float32)
-                                                dummy_lidar2img.append(dummy_matrix)
-                                            metainfo['lidar2img'] = np.array(dummy_lidar2img)
-                                    
-                                    # Add required img_shape metadata (6 cameras, H=256, W=448)
-                                    if 'img_shape' not in metainfo:
-                                        metainfo['img_shape'] = [(256, 448, 3)] * 6
-                                    
-                                    data_sample.set_metainfo(metainfo)
-                                    
-                                    # Convert to new format
-                                    return {
-                                        'inputs': {'imgs': imgs} if imgs is not None else {},
-                                        'data_samples': [data_sample]
-                                    }
+                                img_list = result['img']
+                                if len(img_list) > 0 and isinstance(img_list[0], np.ndarray):
+                                    # Convert numpy arrays to tensors and stack
+                                    img_tensors = [torch.from_numpy(img).permute(2, 0, 1) for img in img_list]  # HWC -> CHW
+                                    imgs = torch.stack(img_tensors, dim=0)  # [N, C, H, W]
                                 else:
-                                    # Already in new format
-                                    return result
-                        except Exception as pipeline_error:
-                            print(f"DEBUG: Pipeline error for idx {idx}: {type(pipeline_error).__name__}: {pipeline_error}")
-                            import traceback
-                            traceback.print_exc()
-                            raise RuntimeError(f"Pipeline failed for index {idx}: {pipeline_error}")
+                                    if idx < 3:
+                                        print(f"DEBUG: Unexpected img format in result: {type(img_list[0]) if img_list else 'empty list'}")
+                            
+                            # Fallback: try other image keys
+                            if imgs is None:
+                                for img_key in ['imgs', 'image', 'images']:
+                                    if img_key in result:
+                                        imgs = result[img_key]
+                                        break
+                            
+                            # If no images found, raise error with debug info
+                            if imgs is None:
+                                error_msg = f"ERROR: Pipeline did not load images properly for sample {idx}\n"
+                                error_msg += f"  Result keys: {list(result.keys())}\n"
+                                if 'img' in result:
+                                    error_msg += f"  'img' type: {type(result['img'])}\n"
+                                    if isinstance(result['img'], list):
+                                        error_msg += f"  'img' length: {len(result['img'])}\n"
+                                        if len(result['img']) > 0:
+                                            error_msg += f"  'img[0]' type: {type(result['img'][0])}\n"
+                                error_msg += f"  Pipeline transforms: {[type(t).__name__ for t in self.pipeline.transforms] if hasattr(self.pipeline, 'transforms') else 'N/A'}\n"
+                                raise ValueError(error_msg)
+                            
+                            # Create data_sample with GT and metadata
+                            from mmdet3d.structures.det3d_data_sample import Det3DDataSample
+                            import torch
+                            import numpy as np
+                            
+                            data_sample = Det3DDataSample()
+                            
+                            # Add GT occupancy
+                            if 'gt_occ' in result:
+                                if isinstance(result['gt_occ'], torch.Tensor):
+                                    data_sample.gt_occ = result['gt_occ']
+                                else:
+                                    data_sample.gt_occ = torch.from_numpy(result['gt_occ'])
+                            
+                            # Add metadata from result or img_metas (CustomCollect3D output)
+                            metainfo = {}
+                            
+                            # Check if CustomCollect3D has wrapped metadata in img_metas
+                            img_metas_dict = None
+                            if 'img_metas' in result:
+                                img_metas = result['img_metas']
+                                # Handle DataContainer wrapper
+                                if hasattr(img_metas, 'data'):
+                                    img_metas_dict = img_metas.data
+                                elif isinstance(img_metas, dict):
+                                    img_metas_dict = img_metas
+                            
+                            # Extract metadata from img_metas or result
+                            for key in ['sample_idx', 'timestamp', 'scene_token', 'pc_range', 'occ_size', 'occ_path']:
+                                if img_metas_dict and key in img_metas_dict:
+                                    metainfo[key] = img_metas_dict[key]
+                                elif key in result:
+                                    metainfo[key] = result[key]
+                            
+                            # Add camera matrices - CRITICAL: lidar2img from data_info
+                            for matrix_key in ['lidar2img', 'cam2img', 'lidar2cam']:
+                                if img_metas_dict and matrix_key in img_metas_dict:
+                                    metainfo[matrix_key] = img_metas_dict[matrix_key]
+                                elif matrix_key in result:
+                                    metainfo[matrix_key] = result[matrix_key]
+                                elif matrix_key in data_info:
+                                    # CRITICAL: Get from data_info which was computed by get_data_info
+                                    metainfo[matrix_key] = data_info[matrix_key]
+                            
+                            # Add required img_shape metadata
+                            if 'img_shape' not in metainfo and 'img' in result:
+                                if isinstance(result['img'], list) and len(result['img']) > 0:
+                                    img_shape = result['img'][0].shape
+                                    metainfo['img_shape'] = [img_shape] * len(result['img'])
+                            
+                            data_sample.set_metainfo(metainfo)
+                            
+                            # Return in MMEngine format
+                            return {
+                                'inputs': {'imgs': imgs},
+                                'data_samples': [data_sample]
+                            }
+                        else:
+                            # Already in new format
+                            return result
+                except Exception as pipeline_error:
+                    print(f"DEBUG: Pipeline error for idx {idx}: {type(pipeline_error).__name__}: {pipeline_error}")
+                    import traceback
+                    traceback.print_exc()
+                    raise RuntimeError(f"Pipeline failed for index {idx}: {pipeline_error}")
                 
         except Exception as e:
             # Data loading failed, raise error instead of using dummy data
@@ -404,6 +404,10 @@ class CustomNuScenesOccDataset(NuScenesDataset):
             lidarseg=info.get('lidarseg', None),
             curr=info,
         )
+        
+        # Add occ_path if available in original data
+        if 'occ_path' in info:
+            input_dict['occ_path'] = info['occ_path']
 
         if self.modality.get('use_camera', True):
             image_paths = []

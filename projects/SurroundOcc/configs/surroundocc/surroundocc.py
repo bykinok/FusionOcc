@@ -111,22 +111,20 @@ file_client_args = dict(backend='disk')
 
 
 train_pipeline = [
-    dict(type='LoadMultiViewImageFromFiles', to_float32=True),
+    dict(type='LoadMultiViewImageFromFilesFullRes', to_float32=True),
     dict(type='PhotoMetricDistortionMultiViewImage'),
     dict(type='LoadOccupancy', use_semantic=use_semantic),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='PadMultiViewImage', size_divisor=32),
-    dict(type='DefaultFormatBundle3D', class_names=class_names, with_label=False),
-    dict(type='CustomCollect3D', keys=['img', 'gt_occ'])
+    dict(type='OccDefaultFormatBundle3D')
 ]
 
 test_pipeline = [
-    dict(type='LoadMultiViewImageFromFiles', to_float32=True),
+    dict(type='LoadMultiViewImageFromFilesFullRes', to_float32=True),
     dict(type='LoadOccupancy', use_semantic=use_semantic),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='PadMultiViewImage', size_divisor=32),
-    dict(type='DefaultFormatBundle3D', class_names=class_names, with_label=False),
-    dict(type='CustomCollect3D', keys=['img','gt_occ'])
+    dict(type='OccDefaultFormatBundle3D')
 ]
 
 # New style data loaders

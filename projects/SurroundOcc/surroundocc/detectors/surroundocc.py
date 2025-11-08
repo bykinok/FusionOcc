@@ -12,6 +12,32 @@ import copy
 import os
 from typing import Optional, Union
 
+try:
+    from mmcv.runner import force_fp32, auto_fp16
+except ImportError:
+    # MMEngine/mmcv 2.x doesn't have mmcv.runner
+    # Use mmengine.runner or create dummy decorators
+    try:
+        from mmengine.runner import autocast
+        # Create compatible decorators
+        def force_fp32(apply_to=None):
+            def decorator(func):
+                return func
+            return decorator
+        def auto_fp16(apply_to=None):
+            def decorator(func):
+                return func
+            return decorator
+    except:
+        # Fallback: create dummy decorators
+        def force_fp32(apply_to=None):
+            def decorator(func):
+                return func
+            return decorator
+        def auto_fp16(apply_to=None):
+            def decorator(func):
+                return func
+            return decorator
 from mmdet3d.models.detectors import Base3DDetector
 from mmdet3d.registry import MODELS as DET3D_MODELS  
 from mmengine.registry import MODELS as ENGINE_MODELS
@@ -138,7 +164,7 @@ class SurroundOcc(Base3DDetector):
         """bool: Whether the detector has occupancy head."""
         return hasattr(self, 'pts_bbox_head') and self.pts_bbox_head is not None
 
-
+    @auto_fp16(apply_to=('img',))
     def extract_feat(self, img, img_metas=None, len_queue=None):
         """Extract features of images."""
         # Handle case where img is a dict (MMEngine format)
@@ -328,16 +354,71 @@ class SurroundOcc(Base3DDetector):
             self.generate_output(pred_occ, img_metas)
             return batch_data_samples
         
-        # Process predictions
-        for i, data_sample in enumerate(batch_data_samples):
-            if i < len(pred_occ):
-                if self.use_semantic:
-                    class_num = pred_occ.shape[1]
-                    _, pred_occ_i = torch.max(torch.softmax(pred_occ[i:i+1], dim=1), dim=1)
+        # Use the same evaluation approach as the original SurroundOcc
+        # Import evaluation function
+        from projects.SurroundOcc.surroundocc.evaluation.evaluation_metrics import evaluation_semantic
+        
+        if self.use_semantic:
+            class_num = pred_occ.shape[1]
+            _, pred_occ_class = torch.max(torch.softmax(pred_occ, dim=1), dim=1)
+            
+            # Collect GT occupancy from data samples
+            # Keep as list because sparse GT has different N for each sample
+            gt_occ_list = []
+            for data_sample in batch_data_samples:
+                if hasattr(data_sample, 'gt_occ'):
+                    gt_occ = data_sample.gt_occ
+                    if isinstance(gt_occ, torch.Tensor):
+                        gt_occ_list.append(gt_occ.to(pred_occ.device))
+                    elif isinstance(gt_occ, np.ndarray):
+                        gt_occ_list.append(torch.from_numpy(gt_occ).to(pred_occ.device))
+                    else:
+                        # No valid GT, use empty placeholder
+                        gt_occ_list.append(torch.zeros((0, 4), dtype=torch.float32, device=pred_occ.device))
                 else:
-                    pred_occ_i = torch.sigmoid(pred_occ[i:i+1, 0])
-                
-                data_sample.pred_occ = pred_occ_i
+                    # No GT found, use empty placeholder
+                    gt_occ_list.append(torch.zeros((0, 4), dtype=torch.float32, device=pred_occ.device))
+            
+            # Convert list to tensor batch: pad to max length and stack
+            # Find max N
+            max_n = max([gt.shape[0] for gt in gt_occ_list])
+            gt_occ_padded = []
+            for gt in gt_occ_list:
+                if gt.shape[0] < max_n:
+                    # Pad with zeros
+                    padding = torch.zeros((max_n - gt.shape[0], 4), dtype=torch.float32, device=pred_occ.device)
+                    padding[:, 3] = 255  # Set class to 255 (ignore)
+                    gt_padded = torch.cat([gt, padding], dim=0)
+                else:
+                    gt_padded = gt
+                gt_occ_padded.append(gt_padded)
+            
+            gt_occ = torch.stack(gt_occ_padded, dim=0)
+            
+            # Use the original evaluation_semantic function to compute metrics
+            # This ensures identical evaluation logic to the original SurroundOcc
+            eval_results = evaluation_semantic(pred_occ_class, gt_occ, img_metas[0], class_num)
+            
+            # Store predictions and evaluation results in data samples
+            for i, data_sample in enumerate(batch_data_samples):
+                if i < len(pred_occ_class):
+                    # Store prediction
+                    if isinstance(data_sample, dict):
+                        data_sample['pred_occ'] = pred_occ_class[i]
+                    else:
+                        data_sample.pred_occ = pred_occ_class[i]
+                    
+                    # Store pre-computed evaluation results
+                    if i < len(eval_results):
+                        if isinstance(data_sample, dict):
+                            data_sample['eval_results'] = eval_results[i]
+                        else:
+                            data_sample.eval_results = eval_results[i]
+        else:
+            pred_occ_binary = torch.sigmoid(pred_occ[:, 0])
+            for i, data_sample in enumerate(batch_data_samples):
+                if i < len(pred_occ_binary):
+                    data_sample.pred_occ = pred_occ_binary[i]
         
         return batch_data_samples
 
