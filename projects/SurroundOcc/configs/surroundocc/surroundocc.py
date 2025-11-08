@@ -168,6 +168,7 @@ val_dataloader = dict(
 test_dataloader = val_dataloader
 
 # New style config for MMEngine
+# Use OptimWrapper (FP32 only, no mixed precision)
 optim_wrapper = dict(
     type='OptimWrapper',
     optimizer=dict(
@@ -211,6 +212,11 @@ test_evaluator = val_evaluator
 # load_from = 'ckpts/r101_dcn_fcos3d_pretrain.pth'  # 사전 훈련된 가중치 파일이 없으면 주석 처리
 
 # MMEngine style logging configuration
+# Model wrapper configuration for distributed training
+model_wrapper_cfg = dict(
+    type='MMDistributedDataParallel',
+    find_unused_parameters=True)
+
 default_hooks = dict(
     timer=dict(type='IterTimerHook'),
     logger=dict(type='LoggerHook', interval=50),  # 50개 iteration마다 로그 출력

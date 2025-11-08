@@ -117,7 +117,6 @@ class SpatialCrossAttention(BaseModule):
         """Default initialization for Parameters of Module."""
         xavier_init(self.output_proj, distribution='uniform', bias=0.)
     
-    @force_fp32(apply_to=('query', 'key', 'value', 'query_pos', 'reference_points_cam'))
     def forward(self,
                 query,
                 key,
@@ -203,6 +202,12 @@ class SpatialCrossAttention(BaseModule):
             bs * self.num_cams, l, self.embed_dims)
         value = value.permute(2, 0, 1, 3).reshape(
             bs * self.num_cams, l, self.embed_dims)
+
+        # Ensure spatial_shapes and level_start_index are on the same device as query
+        if spatial_shapes is not None:
+            spatial_shapes = spatial_shapes.to(query.device)
+        if level_start_index is not None:
+            level_start_index = level_start_index.to(query.device)
 
         queries = self.deformable_attention(query=queries_rebatch.view(bs*self.num_cams, max_len, self.embed_dims), key=key, value=value,
                                             reference_points=reference_points_rebatch.view(bs*self.num_cams, max_len, D, 2), spatial_shapes=spatial_shapes,
@@ -375,12 +380,31 @@ class MSDeformableAttention3D(BaseModule):
 
         bs, num_query, _ = query.shape
         bs, num_value, _ = value.shape
+        
+        # Ensure all Linear layers are on the same device as query
+        # This is critical for training with mixed precision or when layers are not properly moved to GPU
+        if self.sampling_offsets.bias is not None and self.sampling_offsets.bias.device != query.device:
+            self.sampling_offsets.bias.data = self.sampling_offsets.bias.data.to(query.device)
+        if self.attention_weights.bias is not None and self.attention_weights.bias.device != query.device:
+            self.attention_weights.bias.data = self.attention_weights.bias.data.to(query.device)
+        if self.value_proj.bias is not None and self.value_proj.bias.device != query.device:
+            self.value_proj.bias.data = self.value_proj.bias.data.to(query.device)
+        if self.output_proj is not None and self.output_proj.bias is not None and self.output_proj.bias.device != query.device:
+            self.output_proj.bias.data = self.output_proj.bias.data.to(query.device)
+        
+        # Ensure spatial_shapes and level_start_index are on the same device as query
+        if spatial_shapes is not None:
+            spatial_shapes = spatial_shapes.to(query.device)
+        if level_start_index is not None:
+            level_start_index = level_start_index.to(query.device)
+        
         assert (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == num_value
 
         value = self.value_proj(value)
         if key_padding_mask is not None:
             value = value.masked_fill(key_padding_mask[..., None], 0.0)
         value = value.view(bs, num_value, self.num_heads, -1)
+        
         sampling_offsets = self.sampling_offsets(query).view(
             bs, num_query, self.num_heads, self.num_levels, self.num_points, 2)
         attention_weights = self.attention_weights(query).view(

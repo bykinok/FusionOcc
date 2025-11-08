@@ -164,7 +164,7 @@ class SurroundOcc(Base3DDetector):
         """bool: Whether the detector has occupancy head."""
         return hasattr(self, 'pts_bbox_head') and self.pts_bbox_head is not None
 
-    @auto_fp16(apply_to=('img',))
+    # @auto_fp16(apply_to=('img',))
     def extract_feat(self, img, img_metas=None, len_queue=None):
         """Extract features of images."""
         # Handle case where img is a dict (MMEngine format)

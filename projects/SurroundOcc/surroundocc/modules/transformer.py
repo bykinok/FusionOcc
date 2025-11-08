@@ -102,7 +102,7 @@ class PerceptionTransformer(BaseModule):
             normal_(self.cams_embeds)
         xavier_init(self.reference_points, distribution='uniform', bias=0.)
 
-    @force_fp32(apply_to=('mlvl_feats', 'volume_queries'))
+    # @auto_fp16(apply_to=('mlvl_feats', 'volume_queries'))
     def forward(self,
                 mlvl_feats: list,
                 volume_queries: torch.Tensor,
@@ -143,7 +143,7 @@ class PerceptionTransformer(BaseModule):
             feat_flatten.append(feat)
 
         feat_flatten = torch.cat(feat_flatten, 2)
-        spatial_shapes = torch.as_tensor(
+        spatial_shapes = torch.tensor(
             spatial_shapes, dtype=torch.long, device=feat_flatten.device)
         level_start_index = torch.cat((spatial_shapes.new_zeros(
             (1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))

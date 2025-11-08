@@ -154,7 +154,7 @@ class OccEncoder(TransformerLayerSequence if TransformerLayerSequence != BaseMod
 
         return reference_points_cam, volume_mask
 
-    @auto_fp16()
+    # @auto_fp16()
     def forward(self,
                 volume_query,
                 key,

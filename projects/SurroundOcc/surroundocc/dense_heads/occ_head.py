@@ -236,7 +236,8 @@ class OccHead(BaseModule):
         for i in range(self.fpn_level):
             # IMPORTANT: Keep volume_queries as (num_query, embed_dims) without batch dimension
             # The transformer will handle batching internally
-            volume_queries = self.volume_embedding[i].weight.to(dtype)
+            # Ensure volume_queries is on the same device as input features
+            volume_queries = self.volume_embedding[i].weight.to(dtype=dtype, device=mlvl_feats[i].device)
             
             volume_h = self.volume_h[i] if i < len(self.volume_h) else self.volume_h[-1]
             volume_w = self.volume_w[i] if i < len(self.volume_w) else self.volume_w[-1]
