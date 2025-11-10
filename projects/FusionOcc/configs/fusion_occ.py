@@ -280,7 +280,9 @@ param_scheduler = [
 ]
 
 # MMEngine Training/Validation/Test Configuration
-train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=24, val_interval=0)
+# 원본 설정: evaluation = dict(interval=1) → val_interval=1 (매 epoch마다 검증)
+# val_interval을 0으로 설정하면 ZeroDivisionError 발생 (self._epoch % val_interval)
+train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=24, val_interval=1)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
