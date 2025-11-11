@@ -392,6 +392,15 @@ test_dataloader = dict(
 #     ),
 # ]
 
+# Override default_hooks to enable checkpoint saving
+default_hooks = dict(
+    timer=dict(type='IterTimerHook'),
+    logger=dict(type='LoggerHook', interval=50),
+    param_scheduler=dict(type='ParamSchedulerHook'),
+    checkpoint=dict(type='CheckpointHook', interval=1, max_keep_ckpts=3),  # Save checkpoint every epoch
+    sampler_seed=dict(type='DistSamplerSeedHook'),
+    visualization=dict(type='Det3DVisualizationHook'))
+
 # Visualizer configuration (required by mmengine)
 visualizer = dict(
     type='Det3DLocalVisualizer',

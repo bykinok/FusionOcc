@@ -112,20 +112,15 @@ class PrepareImageSeg(object):
         return img
     
     def get_img_seg(self, img_path):
-        """Load image segmentation."""
-        if self.img_seg_dir is None:
-            return None
+        """Load image segmentation - NO FALLBACK (same as original)."""
         name = img_path.split("samples")[1].replace(".jpg", ".npy")
         seg_path = self.img_seg_dir + name
-        try:
-            seg = np.load(seg_path)
-            seg = np.repeat(seg, self.restore_upsample, axis=1)
-            seg = np.repeat(seg, self.restore_upsample, axis=0)
-            seg = Image.fromarray(seg, mode="L")
-            return seg
-        except:
-            # If seg file doesn't exist, return None
-            return None
+        # Load without try-except - will fail if file doesn't exist (same as original)
+        seg = np.load(seg_path)
+        seg = np.repeat(seg, self.restore_upsample, axis=1)
+        seg = np.repeat(seg, self.restore_upsample, axis=0)
+        seg = Image.fromarray(seg, mode="L")
+        return seg
     
     def format_seg(self, seg):
         """Format segmentation for model input."""
@@ -252,17 +247,10 @@ class PrepareImageSeg(object):
             
             imgs.append(img)  # Add current frame image
             
-            # Load and transform segmentation
+            # Load and transform segmentation (NO FALLBACK - same as original)
             seg = self.get_img_seg(img_path)
-            if seg is not None:
-                seg = self.seg_transform_core(seg, resize_dims, crop, flip_aug, rotate)
-                segs.append(self.format_seg(seg))
-            else:
-                # If no seg, create a dummy seg filled with zeros
-                fH, fW = self.data_config['input_size']
-                seg_h = fH // self.downsample
-                seg_w = fW // self.downsample
-                segs.append(torch.zeros(seg_h, seg_w, dtype=torch.uint8))
+            seg = self.seg_transform_core(seg, resize_dims, crop, flip_aug, rotate)
+            segs.append(self.format_seg(seg))
             
             # IMPORTANT: Process adjacent frames IMMEDIATELY after current frame (interleaved!)
             # Original order: cam0_curr, cam0_adj, cam1_curr, cam1_adj, ...
@@ -300,16 +288,10 @@ class PrepareImageSeg(object):
                     img_adj = torch.tensor(img_adj).float().permute(2, 0, 1).contiguous()
                     imgs.append(img_adj)  # IMMEDIATELY after current frame (interleaved!)
                     
-                    # Load and transform segmentation for adjacent frame
+                    # Load and transform segmentation for adjacent frame (NO FALLBACK - same as original)
                     seg_adj = self.get_img_seg(img_path_adj)
-                    if seg_adj is not None:
-                        seg_adj = self.seg_transform_core(seg_adj, resize_dims, crop, flip_aug, rotate)
-                        segs.append(self.format_seg(seg_adj))
-                    else:
-                        fH, fW = self.data_config['input_size']
-                        seg_h = fH // self.downsample
-                        seg_w = fW // self.downsample
-                        segs.append(torch.zeros(seg_h, seg_w, dtype=torch.uint8))
+                    seg_adj = self.seg_transform_core(seg_adj, resize_dims, crop, flip_aug, rotate)
+                    segs.append(self.format_seg(seg_adj))
             
             # Get intrinsics
             if data_format == 'fusionocc':
@@ -483,14 +465,10 @@ class PrepareImageSeg(object):
         # Pack into img_inputs format
         results['img_inputs'] = (imgs, sensor2egos, ego2globals, intrins, post_rots, post_trans)
         
-        # Load segmentation if available (optional)
-        # segs should have been populated by get_inputs
+        # segs should have been populated by get_inputs (NO FALLBACK - same as original)
+        # If segs is missing, it's a critical error
         if 'segs' not in results:
-            import sys
-            sys.stderr.write("WARNING: segs not in results, using zeros!\n")
-            sys.stderr.flush()
-            num_cams, _, height, width = imgs.shape
-            results['segs'] = torch.zeros(num_cams, 18, height//8, width//8)
+            raise ValueError("'segs' not found in results! Image segmentation files are required.")
         
         return results
 
