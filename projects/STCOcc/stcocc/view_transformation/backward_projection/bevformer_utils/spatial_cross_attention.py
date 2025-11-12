@@ -198,7 +198,9 @@ class OA_SpatialCrossAttention(BaseModule):
         # repeat along the num_cams
         reference_points_occlusion_rebatch = reference_points_occlusion_rebatch.unsqueeze(1).repeat(1, self.num_cams, 1, 1, 1)
 
-        num_cams, l, bs, embed_dims = key.shape
+        # Note: Don't override bs from query.size() - it's already correct for temporal fusion
+        # Just extract num_cams and l from key
+        num_cams_key, l = key.size(0), key.size(1)
         queries = self.deformable_attention(
             query=queries_rebatch.view(bs * self.num_cams, max_len, self.embed_dims),
             key=key.permute(2, 0, 1, 3).reshape(bs * self.num_cams, l, self.embed_dims),
@@ -216,7 +218,7 @@ class OA_SpatialCrossAttention(BaseModule):
 
         # aug the query
         for j in range(bs):
-            for i in range(num_cams):
+            for i in range(num_cam):  # Use num_cam from line 156
                 index_query_per_img = indexes[j][i]
                 slots[j, index_query_per_img] += queries[j, i, :len(index_query_per_img)]
 

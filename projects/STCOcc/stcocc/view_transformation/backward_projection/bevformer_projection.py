@@ -13,6 +13,18 @@ import torch.nn.functional as F
 
 from mmengine.model import BaseModule
 from mmdet3d.registry import MODELS
+
+# Import debug utilities
+import sys
+from pathlib import Path
+debug_path = Path(__file__).parent.parent.parent.parent
+if str(debug_path) not in sys.path:
+    sys.path.insert(0, str(debug_path))
+try:
+    from debug_layer_comparison import log_layer
+except ImportError:
+    def log_layer(*args, **kwargs):
+        pass
 from mmcv.cnn.bricks.transformer import FFN
 # from mmdet.models.utils.builder import build_transformer  # module not available
 from mmcv.cnn.bricks.transformer import build_transformer_layer_sequence as build_transformer
@@ -111,6 +123,9 @@ class BEVFormerBackwardProjection(BaseModule):
         lss_bev = voxel_feats.clone()
         lss_bev = lss_bev.flatten(2).permute(2, 0, 1)
         bev_queries = lss_bev
+        
+        # DEBUG: Log BEVFormer input
+        log_layer("bevformer_attention", inputs={"bev_queries": bev_queries, "voxel_feats": voxel_feats})
 
         # Deal with temporal fusion
         shift = self.obtain_shift_from_ego(bev_queries, img_metas)
@@ -150,6 +165,11 @@ class BEVFormerBackwardProjection(BaseModule):
                     [each['can_bus'] for each in img_metas])  # [:, :]
                 can_bus = self.can_bus_mlp(can_bus)[None, :, :]
                 bev_queries = bev_queries + can_bus * self.use_can_bus
+                
+                # DEBUG: print after can_bus addition
+                if not hasattr(self, '_after_canbus_debug'):
+                    print(f"  After can_bus: Mean={bev_queries.mean().item():.6f}, Std={bev_queries.std().item():.6f}")
+                    self._after_canbus_debug = True
 
         if bev_mask is not None:
             bev_mask = bev_mask.reshape(bs, -1)
@@ -178,6 +198,9 @@ class BEVFormerBackwardProjection(BaseModule):
         )
 
         bev = bev.permute(0, 2, 1).view(bs, -1, self.bev_h, self.bev_w).contiguous()
+
+        # DEBUG: Log BEVFormer output
+        log_layer("bevformer_attention", outputs={"bev": bev, "occ_pred": occ_pred})
 
         return bev, occ_pred
 

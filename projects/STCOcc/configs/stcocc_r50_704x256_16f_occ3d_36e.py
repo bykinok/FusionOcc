@@ -83,7 +83,7 @@ num_iters_per_epoch = int(28130 // (num_gpus * samples_per_gpu))      # total sa
 grid_config = {
     'x': [-40, 40, 0.8],
     'y': [-40, 40, 0.8],
-    'z': [-1, 5.4, 0.8],
+    'z': [-1, 5.4, 0.8],  # Reverted to original range
     'depth': [1.0, 45.0, 0.5],
 }
 
@@ -95,7 +95,7 @@ forward_numC_Trans = 80
 grid_config_bevformer={
     'x': [-40, 40, 0.8],
     'y': [-40, 40, 0.8],
-    'z': [-1, 5.4, 0.8],
+    'z': [-1, 5.4, 0.8],  # Reverted to original
     'depth': [1.0, 45.0, 0.5],
 }
 point_cloud_range = [-40, -40, -1.0, 40, 40, 5.4]
@@ -377,7 +377,13 @@ val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
 val_evaluator = dict(
-    type='OccupancyMetric')
+    type='OccupancyMetric',
+    ann_file='data/nuscenes/stcocc-nuscenes_infos_val.pkl',
+    data_root=data_root,
+    dataset_name=dataset_name,
+    eval_metric=eval_metric,
+    num_classes=18,
+    use_image_mask=True)
 
 test_evaluator = val_evaluator
 
@@ -400,7 +406,7 @@ custom_hooks = [
 ]
 
 # Pretrained weights (temporarily disabled due to compatibility issues)
-# load_from = "projects/STCOcc/pretrained/forward_projection-r50-4d-stereo-pretrained.pth"
+load_from = "projects/STCOcc/pretrained/forward_projection-r50-4d-stereo-pretrained.pth"
 
 # Visualization
 vis_backends = [dict(type='LocalVisBackend')]

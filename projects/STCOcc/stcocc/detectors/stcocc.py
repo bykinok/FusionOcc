@@ -311,21 +311,64 @@ class STCOcc(CenterPoint):
             elif torch.is_tensor(img):
                 device = img.device
             
-            # Handle missing temporal fusion keys with default values
+            # DEBUG: Check if temporal fusion keys exist in img_meta
+            if not hasattr(self, '_img_meta_keys_debug'):
+                print(f"\n[IMG_META_KEYS_DEBUG]")
+                print(f"  Type of img_metas[0]: {type(img_metas[0])}")
+                print(f"  Available keys in img_metas[0]: {list(img_metas[0].keys())[:20]}")
+                # Check if it's a DataContainer
+                if 'data' in img_metas[0]:
+                    meta_data = img_metas[0]['data']
+                    print(f"  Type of img_metas[0]['data']: {type(meta_data)}")
+                    print(f"  Keys in img_metas[0]['data']: {list(meta_data.keys())[:30] if isinstance(meta_data, dict) else 'Not a dict'}")
+                    print(f"  Has 'sequence_group_idx': {'sequence_group_idx' in meta_data if isinstance(meta_data, dict) else False}")
+                    print(f"  Has 'start_of_sequence': {'start_of_sequence' in meta_data if isinstance(meta_data, dict) else False}")
+                    print(f"  Has 'curr_to_prev_ego_rt': {'curr_to_prev_ego_rt' in meta_data if isinstance(meta_data, dict) else False}")
+                    if isinstance(meta_data, dict):
+                        if 'sequence_group_idx' in meta_data:
+                            print(f"  sequence_group_idx value: {meta_data['sequence_group_idx']}")
+                        if 'start_of_sequence' in meta_data:
+                            print(f"  start_of_sequence value: {meta_data['start_of_sequence']}")
+                else:
+                    print(f"  Has 'sequence_group_idx': {'sequence_group_idx' in img_metas[0]}")
+                    print(f"  Has 'start_of_sequence': {'start_of_sequence' in img_metas[0]}")
+                    print(f"  Has 'curr_to_prev_ego_rt': {'curr_to_prev_ego_rt' in img_metas[0]}")
+                self._img_meta_keys_debug = True
+            
+            # Extract temporal fusion keys from img_meta['data'] (DataContainer format)
+            # Handle both direct dict format and DataContainer format
+            def get_meta_value(img_meta, key, default):
+                if 'data' in img_meta and isinstance(img_meta['data'], dict):
+                    # DataContainer format
+                    value = img_meta['data'].get(key, default)
+                else:
+                    # Direct dict format
+                    value = img_meta.get(key, default)
+                # Handle list wrapping (some values might be [value] instead of value)
+                if isinstance(value, (list, tuple)) and len(value) == 1:
+                    value = value[0]
+                return value
+            
             sequence_group_idx = torch.stack([
-                torch.tensor(img_meta.get('sequence_group_idx', 0), device=device) 
+                torch.tensor(get_meta_value(img_meta, 'sequence_group_idx', 0), device=device) 
                 for img_meta in img_metas
             ])
             start_of_sequence = torch.stack([
-                torch.tensor(img_meta.get('start_of_sequence', True), device=device) 
+                torch.tensor(get_meta_value(img_meta, 'start_of_sequence', True), device=device) 
                 for img_meta in img_metas
             ])
             # Use identity matrix as default for curr_to_prev_ego_rt
             default_ego_rt = np.eye(4, dtype=np.float32)
-            curr_to_prev_ego_rt = torch.stack([
-                torch.tensor(np.array(img_meta.get('curr_to_prev_ego_rt', default_ego_rt)), device=device) 
-                for img_meta in img_metas
-            ])
+            curr_to_prev_ego_rt_list = []
+            for img_meta in img_metas:
+                value = get_meta_value(img_meta, 'curr_to_prev_ego_rt', default_ego_rt)
+                # Convert to tensor, handle both numpy array and tensor input
+                if torch.is_tensor(value):
+                    tensor_value = value.to(device=device, dtype=torch.float32)
+                else:
+                    tensor_value = torch.tensor(np.array(value), device=device, dtype=torch.float32)
+                curr_to_prev_ego_rt_list.append(tensor_value)
+            curr_to_prev_ego_rt = torch.stack(curr_to_prev_ego_rt_list)
             history_fusion_params = {
                 'sequence_group_idx': sequence_group_idx,
                 'start_of_sequence': start_of_sequence,
@@ -387,9 +430,26 @@ class STCOcc(CenterPoint):
         intermediate_occ_pred_dict = {}
         intermediate_voxel_feat = []
         for i in range(len(self.backward_projection_list)-1, -1, -1):
-            voxel_feat = voxel_feats[voxel_feats_index]
+            voxel_feat_raw = voxel_feats[voxel_feats_index]
+            
+            # DEBUG: print raw voxel_feat before adding last_voxel_feat
+            if not hasattr(self, f'_voxel_feat_raw_stage{i}_debug'):
+                print(f"\n[VOXEL_FEAT_RAW] Stage {i}:")
+                print(f"  Shape: {voxel_feat_raw.shape}")
+                print(f"  Mean: {voxel_feat_raw.mean().item():.6f}, Std: {voxel_feat_raw.std().item():.6f}")
+                print(f"  Min: {voxel_feat_raw.min().item():.6f}, Max: {voxel_feat_raw.max().item():.6f}")
+                setattr(self, f'_voxel_feat_raw_stage{i}_debug', True)
+            
+            voxel_feat = voxel_feat_raw
 
             if last_voxel_feat is not None:
+                # DEBUG: print voxel_feat after adding last_voxel_feat
+                if not hasattr(self, f'_voxel_feat_combined_stage{i}_debug'):
+                    print(f"\n[VOXEL_FEAT_COMBINED] Stage {i} (after + last_voxel_feat):")
+                    print(f"  last_voxel_feat: Mean={last_voxel_feat.mean().item():.6f}, Std={last_voxel_feat.std().item():.6f}")
+                    combined = last_voxel_feat + voxel_feat
+                    print(f"  Combined: Mean={combined.mean().item():.6f}, Std={combined.std().item():.6f}")
+                    setattr(self, f'_voxel_feat_combined_stage{i}_debug', True)
                 voxel_feat = last_voxel_feat + voxel_feat
 
             # voxel_feats shape: [bs, c, z, h, w]
@@ -404,6 +464,18 @@ class STCOcc(CenterPoint):
                 prev_bev_aug=self.temporal_fusion_list[i].history_forward_augs,
                 history_fusion_params=history_fusion_params,
             )
+            
+            # DEBUG: print BEVFormer output
+            if i == len(self.backward_projection_list)-1 and not hasattr(self, '_bevformer_output_debug'):
+                print(f"\n[BEVFORMER_OUTPUT] Stage {i}:")
+                print(f"  bev_feat.shape={bev_feat.shape}")
+                print(f"  bev_feat: Mean={bev_feat.mean().item():.6f}, Std={bev_feat.std().item():.6f}")
+                print(f"  occ_pred.shape={occ_pred.shape}")
+                print(f"  occ_pred: Mean={occ_pred.mean().item():.6f}, Std={occ_pred.std().item():.6f}")
+                pred_cls = occ_pred.softmax(dim=-1).argmax(dim=-1)
+                unique_cls = pred_cls.unique()
+                print(f"  occ_pred unique classes: {len(unique_cls)}")
+                self._bevformer_output_debug = True
 
             # save for loss
             intermediate_occ_pred_dict['pred_voxel_semantic_1_{}'.format(2 ** (i + 1))] = occ_pred
@@ -417,6 +489,11 @@ class STCOcc(CenterPoint):
             else:
                 nonempty_prob = 1 - last_occ_pred.softmax(-1)[..., -1].permute(0, 3, 2, 1)
                 last_voxel_feat = voxel_feat + bev_feat * nonempty_prob.unsqueeze(1)
+                
+            # DEBUG: print after adding BEV refinement
+            if i == len(self.backward_projection_list)-1 and not hasattr(self, '_after_bev_refine_debug'):
+                print(f"  last_voxel_feat (after BEV refine): Mean={last_voxel_feat.mean().item():.6f}, Std={last_voxel_feat.std().item():.6f}")
+                self._after_bev_refine_debug = True
 
             # Option: temporal fusion
             if self.with_specific_component('temporal_fusion_list'):
@@ -426,6 +503,11 @@ class STCOcc(CenterPoint):
                     last_occ_pred=last_occ_pred,
                     nonempty_prob=nonempty_prob,
                 )
+                
+                # DEBUG: print after temporal fusion
+                if i == len(self.backward_projection_list)-1 and not hasattr(self, '_after_temporal_fusion_debug'):
+                    print(f"  last_voxel_feat (after temporal fusion): Mean={last_voxel_feat.mean().item():.6f}, Std={last_voxel_feat.std().item():.6f}")
+                    self._after_temporal_fusion_debug = True
 
             # output stage don't need to upsample
             if i != 0:
@@ -451,8 +533,34 @@ class STCOcc(CenterPoint):
                     img=None,
                     img_inputs=None,
                     **kwargs):
+        # ---------------------- normalize img_inputs to original format -----------------------------
+        # mmengine format: img_inputs = [[(imgs,), (sensor2egos,), (ego2globals,), (cam2imgs,), (post_augs,)]]
+        # original format: img_inputs = (imgs, sensor2egos, ego2globals, cam2imgs, post_augs)
+        # where imgs = tensor([6, 3, 256, 704])
+        
+        if img_inputs is not None and isinstance(img_inputs, list) and len(img_inputs) > 0:
+            if isinstance(img_inputs[0], list) and len(img_inputs[0]) > 0:
+                # Extract all elements from the wrapped structure
+                unwrapped_elements = []
+                for item in img_inputs[0]:
+                    if isinstance(item, tuple) and len(item) > 0:
+                        unwrapped_elements.append(item[0])
+                
+                # Convert back to original tuple format
+                if unwrapped_elements:
+                    img_inputs = tuple(unwrapped_elements)
+        
+        # DEBUG: Print input stats once
+        if not hasattr(self, '_input_stats_debug') and torch.is_tensor(img_inputs[0]):
+            print(f"\n[INPUT] img_inputs[0] (images):")
+            print(f"  Shape: {img_inputs[0].shape}")
+            print(f"  Mean: {img_inputs[0].mean().item():.6f}, Std: {img_inputs[0].std().item():.6f}")
+            print(f"  Min: {img_inputs[0].min().item():.6f}, Max: {img_inputs[0].max().item():.6f}")
+            self._input_stats_debug = True
+        
         # ---------------------- obtain feats from images -----------------------------
-        return_dict = self.obtain_feats_from_images(points, img=img_inputs[0], img_metas=img_metas, **kwargs)
+        # Pass entire img_inputs tuple, not just img_inputs[0]
+        return_dict = self.obtain_feats_from_images(points, img=img_inputs, img_metas=img_metas, **kwargs)
         voxel_feat = return_dict['voxel_feats']
         last_occ_pred = return_dict['last_occ_pred']
 
@@ -469,9 +577,9 @@ class STCOcc(CenterPoint):
         return_dict = dict()
         return_dict['occ_results'] = pred_voxel_semantic_cls.cpu().numpy().astype(np.uint8)
         return_dict['flow_results'] = return_pred_voxel_flows.cpu().numpy().astype(np.float16)
-        return_dict['index'] = [img_meta['index'] for img_meta in img_metas]
+        return_dict['index'] = [img_meta.get('index', i) for i, img_meta in enumerate(img_metas)]
         if self.save_results:
-            sample_idx = [img_meta['sample_idx'] for img_meta in img_metas]
+            sample_idx = [img_meta.get('sample_idx', i) for i, img_meta in enumerate(img_metas)]
             scene_name = [img_meta['scene_name'] for img_meta in img_metas]
             # check save_dir
             for name in scene_name:
@@ -647,11 +755,14 @@ class STCOcc(CenterPoint):
             else:
                 img_metas = kwargs.get('img_metas', None)
             
+            # Remove img_metas from kwargs to avoid duplicate argument
+            kwargs_filtered = {k: v for k, v in kwargs.items() if k != 'img_metas'}
+            
             return self.simple_test(
                 points=points,
                 img_metas=img_metas,
                 img_inputs=img_inputs,
-                **kwargs
+                **kwargs_filtered
             )
         
         else:  # mode == 'tensor'
@@ -664,9 +775,12 @@ class STCOcc(CenterPoint):
             else:
                 img_metas = kwargs.get('img_metas', None)
             
+            # Remove img_metas from kwargs to avoid duplicate argument
+            kwargs_filtered = {k: v for k, v in kwargs.items() if k != 'img_metas'}
+            
             return self.simple_test(
                 points=points,
                 img_metas=img_metas,
                 img_inputs=img_inputs,
-                **kwargs
+                **kwargs_filtered
             )

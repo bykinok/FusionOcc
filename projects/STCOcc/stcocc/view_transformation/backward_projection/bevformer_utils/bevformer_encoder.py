@@ -78,6 +78,30 @@ class OccPredictor(nn.Module):
 
     # @force_fp32  # deprecated decorator()
     def forward(self, bev_query_feats, last_occ_pred=None, layer_num=None):
+        # DEBUG: Check OccPredictor weights (first call only)
+        if not hasattr(self, '_weights_checked'):
+            print(f"\n[OCCPREDICTOR_WEIGHTS]:")
+            # Check bev_conv weights
+            if hasattr(self.bev_conv, 'weight'):
+                w = self.bev_conv.weight
+                print(f"  bev_conv.weight: shape={w.shape}, mean={w.mean().item():.6f}, std={w.std().item():.6f}")
+            # Check predicter weights
+            for name, param in self.predicter.named_parameters():
+                if 'weight' in name:
+                    print(f"  predicter.{name}: shape={param.shape}, mean={param.mean().item():.6f}, std={param.std().item():.6f}")
+            # Check alpha_list
+            if hasattr(self, 'alpha_list') and len(self.alpha_list) > 0:
+                print(f"  alpha_list: {[a.item() for a in self.alpha_list]}")
+            self._weights_checked = True
+        
+        # DEBUG: Check input bev_query_feats
+        if not hasattr(self, '_bev_query_input_debug'):
+            print(f"\n[BEV_QUERY_INPUT] layer_num={layer_num}:")
+            print(f"  Shape: {bev_query_feats.shape}")
+            print(f"  Mean: {bev_query_feats.mean().item():.6f}, Std: {bev_query_feats.std().item():.6f}")
+            print(f"  Min: {bev_query_feats.min().item():.6f}, Max: {bev_query_feats.max().item():.6f}")
+            self._bev_query_input_debug = True
+        
         # required [bs, h*w, c] bev query
         # shape check
         bs, hw, c = bev_query_feats.shape
@@ -96,6 +120,33 @@ class OccPredictor(nn.Module):
             else:
                 occ_pred = occ_pred + last_occ_pred * self.alpha_list[layer_num]
 
+        # DEBUG: BEVFormer OccPredictor output
+        if not hasattr(self, '_bevformer_pred_debug'):
+            print(f"\n[BEVFORMER_OCC_PRED]:")
+            print(f"  occ_pred.shape={occ_pred.shape}")
+            print(f"  Mean={occ_pred.mean().item():.6f}, Std={occ_pred.std().item():.6f}")
+            print(f"  Min={occ_pred.min().item():.6f}, Max={occ_pred.max().item():.6f}")
+            
+            # Check negative values
+            neg_count = (occ_pred < 0).sum().item()
+            total_count = occ_pred.numel()
+            print(f"  Negative values: {neg_count}/{total_count} ({100*neg_count/total_count:.2f}%)")
+            
+            # After softmax
+            occ_softmax = occ_pred.softmax(-1)
+            occ_argmax = occ_softmax.argmax(-1)
+            print(f"\n  After softmax:")
+            print(f"    Mean={occ_softmax.mean().item():.6f}, Std={occ_softmax.std().item():.6f}")
+            
+            # Class distribution
+            print(f"\n  Class distribution (argmax):")
+            for cls in range(18):
+                count = (occ_argmax == cls).sum().item()
+                if count > 0:
+                    print(f"    Class {cls}: {count} ({100*count/occ_argmax.numel():.2f}%)")
+            
+            self._bevformer_pred_debug = True
+        
         # parse occ_pred
         occ_logits = occ_pred.softmax(-1).clone().detach()
         empty_occ_logits = occ_logits[..., -1].unsqueeze(-1)
@@ -196,68 +247,129 @@ class BEVFormerEncoder(TransformerLayerSequence):
         # prepare for point sampling
         lidar2img = []
         ego2lidar = []
-        for img_meta in img_metas:
-            # Safely convert lidar2img to tensor
-            l2i = img_meta['lidar2img']
-            if not torch.is_tensor(l2i):
-                try:
-                    l2i = torch.tensor(l2i, dtype=torch.float32)
-                except (ValueError, TypeError):
-                    # Handle nested lists or complex structures
-                    import numpy as np
-                    if torch.is_tensor(l2i):
-                        # If it's already a tensor, just convert dtype and ensure it's on CPU for numpy conversion
-                        l2i = l2i.cpu().float()
-                    else:
-                        # For non-tensor data, convert to numpy array first
-                        try:
-                            l2i = torch.tensor(np.array(l2i), dtype=torch.float32)
-                        except TypeError:
-                            # Handle case where l2i might contain CUDA tensors
-                            if hasattr(l2i, '__iter__'):
-                                cpu_l2i = []
-                                for item in l2i:
-                                    if torch.is_tensor(item):
-                                        cpu_l2i.append(item.cpu().numpy())
-                                    else:
-                                        cpu_l2i.append(item)
-                                l2i = torch.tensor(np.array(cpu_l2i), dtype=torch.float32)
-                            else:
-                                l2i = torch.tensor(float(l2i), dtype=torch.float32)
-            lidar2img.append(l2i)
+        
+        # If cam_params is provided, use dummy values for lidar2img and ego2lidar
+        # They will be computed from cam_params later in the function
+        if cam_params is not None:
+            sensor2keyegos, ego2globals, intrins, post_augs, bda = cam_params
+            num_cam = sensor2keyegos.shape[0] if sensor2keyegos.dim() == 3 else sensor2keyegos.shape[1]
+            device = sensor2keyegos.device
+            dtype = sensor2keyegos.dtype
             
-            # Safely convert ego2lidar to tensor  
-            e2l = img_meta['ego2lidar']
-            if not torch.is_tensor(e2l):
-                try:
-                    e2l = torch.tensor(e2l, dtype=torch.float32)
-                except (ValueError, TypeError):
-                    # Handle nested lists or complex structures
-                    import numpy as np
-                    if torch.is_tensor(e2l):
-                        # If it's already a tensor, just convert dtype and ensure it's on CPU for numpy conversion
-                        e2l = e2l.cpu().float()
+            # Create dummy lidar2img and ego2lidar for each batch in img_metas
+            for _ in img_metas:
+                # Compute lidar2img for each camera
+                l2i_list = []
+                for cam_idx in range(num_cam):
+                        # Get intrinsic and sensor2keyego for this camera
+                    if sensor2keyegos.dim() == 3:
+                        intrin = intrins[cam_idx]  
+                        sensor2keyego = sensor2keyegos[cam_idx]  
                     else:
-                        # For non-tensor data, convert to numpy array first
-                        try:
-                            e2l = torch.tensor(np.array(e2l), dtype=torch.float32)
-                        except TypeError:
-                            # Handle case where e2l might contain CUDA tensors
-                            if hasattr(e2l, '__iter__'):
-                                cpu_e2l = []
-                                for item in e2l:
-                                    if torch.is_tensor(item):
-                                        cpu_e2l.append(item.cpu().numpy())
-                                    else:
-                                        cpu_e2l.append(item)
-                                e2l = torch.tensor(np.array(cpu_e2l), dtype=torch.float32)
-                            else:
-                                e2l = torch.tensor(float(e2l), dtype=torch.float32)
-            ego2lidar.append(e2l)
+                        intrin = intrins[0, cam_idx]
+                        sensor2keyego = sensor2keyegos[0, cam_idx]
+                    
+                    # Create 4x4 intrinsic matrix if needed
+                    if intrin.shape[-1] == 3:
+                        intrin_4x4 = torch.eye(4, device=device, dtype=dtype)
+                        intrin_4x4[:3, :3] = intrin
+                    else:
+                        intrin_4x4 = intrin
+                    
+                    # lidar2img = intrin @ sensor2keyego
+                    l2i = intrin_4x4 @ sensor2keyego
+                    l2i_list.append(l2i)
+                
+                lidar2img.append(torch.stack(l2i_list, dim=0))
+                ego2lidar.append(torch.eye(4, device=device, dtype=dtype))
+        else:
+            # Original logic: get from img_metas
+            for img_meta in img_metas:
+                # Safely convert lidar2img to tensor
+                # If lidar2img is not in img_meta, compute it from cam2img and lidar2cam
+                if 'lidar2img' not in img_meta:
+                    # Check if cam2img exists, if not skip
+                    if 'cam2img' not in img_meta or 'lidar2cam' not in img_meta:
+                        # Cannot compute lidar2img, use identity matrix as fallback
+                        l2i = torch.eye(4, device=reference_points.device, dtype=reference_points.dtype).unsqueeze(0).repeat(6, 1, 1)
+                    else:
+                        # Compute lidar2img from cam2img and lidar2cam
+                        l2i_list = []
+                        for i in range(len(img_meta['cam2img'])):
+                            c2i = torch.tensor(img_meta['cam2img'][i]).double()
+                            l2c = torch.tensor(img_meta['lidar2cam'][i]).double()
+                            l2i_mat = c2i @ l2c
+                            l2i_list.append(l2i_mat.float())
+                        l2i = torch.stack(l2i_list, dim=0)
+                else:
+                    l2i = img_meta['lidar2img']
+                
+                if not torch.is_tensor(l2i):
+                    try:
+                        l2i = torch.tensor(l2i, dtype=torch.float32)
+                    except (ValueError, TypeError):
+                        # Handle nested lists or complex structures
+                        import numpy as np
+                        if torch.is_tensor(l2i):
+                            # If it's already a tensor, just convert dtype and ensure it's on CPU for numpy conversion
+                            l2i = l2i.cpu().float()
+                        else:
+                            # For non-tensor data, convert to numpy array first
+                            try:
+                                l2i = torch.tensor(np.array(l2i), dtype=torch.float32)
+                            except TypeError:
+                                # Handle case where l2i might contain CUDA tensors
+                                if hasattr(l2i, '__iter__'):
+                                    cpu_l2i = []
+                                    for item in l2i:
+                                        if torch.is_tensor(item):
+                                            cpu_l2i.append(item.cpu().numpy())
+                                        else:
+                                            cpu_l2i.append(item)
+                                    l2i = torch.tensor(np.array(cpu_l2i), dtype=torch.float32)
+                                else:
+                                    l2i = torch.tensor(float(l2i), dtype=torch.float32)
+                lidar2img.append(l2i)
+                
+                # Safely convert ego2lidar to tensor  
+                e2l = img_meta.get('ego2lidar', torch.eye(4))
+                if not torch.is_tensor(e2l):
+                    try:
+                        e2l = torch.tensor(e2l, dtype=torch.float32)
+                    except (ValueError, TypeError):
+                        # Handle nested lists or complex structures
+                        import numpy as np
+                        if torch.is_tensor(e2l):
+                            # If it's already a tensor, just convert dtype and ensure it's on CPU for numpy conversion
+                            e2l = e2l.cpu().float()
+                        else:
+                            # For non-tensor data, convert to numpy array first
+                            try:
+                                e2l = torch.tensor(np.array(e2l), dtype=torch.float32)
+                            except TypeError:
+                                # Handle case where e2l might contain CUDA tensors
+                                if hasattr(e2l, '__iter__'):
+                                    cpu_e2l = []
+                                    for item in e2l:
+                                        if torch.is_tensor(item):
+                                            cpu_e2l.append(item.cpu().numpy())
+                                        else:
+                                            cpu_e2l.append(item)
+                                    e2l = torch.tensor(np.array(cpu_e2l), dtype=torch.float32)
+                                else:
+                                    e2l = torch.tensor(float(e2l), dtype=torch.float32)
+                ego2lidar.append(e2l)
         
         lidar2img = torch.stack(lidar2img, dim=0).to(reference_points.device)
         ego2lidar = torch.stack(ego2lidar, dim=0).to(reference_points.device)
         
+        # CRITICAL FIX: Ensure lidar2img and ego2lidar have correct batch dimension
+        # Expected shape: (B, num_cam, 4, 4) for lidar2img and (B, 4, 4) for ego2lidar
+        # But sometimes we get: (num_cam, 4, 4) and (4, 4) when batch size is 1
+        if lidar2img.dim() == 3:  # (num_cam, 4, 4) -> add batch dim
+            lidar2img = lidar2img.unsqueeze(0)  # (1, num_cam, 4, 4)
+        if ego2lidar.dim() == 2:  # (4, 4) -> add batch dim
+            ego2lidar = ego2lidar.unsqueeze(0)  # (1, 4, 4)
         
         # Handle ego2lidar shape mismatch - take only the first ego2lidar for each batch
         if ego2lidar.dim() == 5 and ego2lidar.size(2) > 1:
@@ -283,8 +395,17 @@ class BEVFormerEncoder(TransformerLayerSequence):
         reference_points = reference_points.permute(1, 0, 2, 3)  # shape: (num_points_in_pillar,bs,h*w,4)
         D, B, num_query = reference_points.size()[:3]  # D=num_points_in_pillar , num_query=h*w
         
-        
         reference_points = reference_points.view(D, B, 1, num_query, 4).repeat(1, 1, num_cam, 1, 1).unsqueeze(-1)  # shape: (num_points_in_pillar,bs,num_cam,h*w,4)
+        
+        # Handle batch size mismatch: if lidar2img/ego2lidar/bda_mat have batch size 1 but B > 1,
+        # expand them to match B
+        if lidar2img.size(0) == 1 and B > 1:
+            lidar2img = lidar2img.repeat(B, 1, 1, 1)
+        if ego2lidar.size(0) == 1 and B > 1:
+            ego2lidar = ego2lidar.repeat(B, 1, 1)
+        if bda_mat.size(0) == 1 and B > 1:
+            bda_mat = bda_mat.repeat(B, 1, 1)
+        
         lidar2img = lidar2img.view(1, B, num_cam, 1, 4, 4).repeat(D, 1, 1, num_query, 1, 1)
         ego2lidar = ego2lidar.view(1, B, 1, 1, 4, 4).repeat(D, 1, num_cam, num_query, 1, 1)
         inverse_bda = bda_mat.view(1, B, 1, 1, 4, 4).repeat(D, 1, num_cam, num_query, 1, 1)
@@ -386,10 +507,22 @@ class BEVFormerEncoder(TransformerLayerSequence):
             else:
                 hybird_ref_2d = torch.stack([ref_2d, ref_2d], 1).reshape(
                     bs * 2, len_bev, num_bev_level, 2)
+            
+            # Note: reference_points_cam and reference_points_depth are NOT expanded for temporal fusion
+            # They remain at their original batch size (bs, not bs*2)
+            # This is intentional and matches the original STCOcc_ori implementation
         else:
             hybird_ref_2d = shift_ref_2d
 
         for lid, layer in enumerate(self.layers):
+            # DEBUG: Query before layer
+            if lid == 0 and not hasattr(self, f'_query_before_layer_{bev_h}_{bev_w}_debug'):
+                print(f"\n[QUERY_BEFORE_LAYER] bev_size={bev_h}x{bev_w}, layer={lid}:")
+                print(f"  Shape: {bev_query.shape}")
+                print(f"  Mean: {bev_query.mean().item():.6f}, Std: {bev_query.std().item():.6f}")
+                print(f"  Min: {bev_query.min().item():.6f}, Max: {bev_query.max().item():.6f}")
+                setattr(self, f'_query_before_layer_{bev_h}_{bev_w}_debug', True)
+            
             output, occ_pred = layer(
                 bev_query,
                 key,
@@ -415,6 +548,14 @@ class BEVFormerEncoder(TransformerLayerSequence):
 
             bev_query = output
             last_occ_pred = occ_pred
+            
+            # DEBUG: Query after layer
+            if lid == 0 and not hasattr(self, f'_query_after_layer_{bev_h}_{bev_w}_debug'):
+                print(f"\n[QUERY_AFTER_LAYER] bev_size={bev_h}x{bev_w}, layer={lid}:")
+                print(f"  Shape: {bev_query.shape}")
+                print(f"  Mean: {bev_query.mean().item():.6f}, Std: {bev_query.std().item():.6f}")
+                print(f"  Min: {bev_query.min().item():.6f}, Max: {bev_query.max().item():.6f}")
+                setattr(self, f'_query_after_layer_{bev_h}_{bev_w}_debug', True)
             if self.return_intermediate:
                 intermediate.append(output)
 
@@ -572,7 +713,24 @@ class BEVFormerEncoderLayer(MyCustomBaseTransformerLayer):
                 norm_index += 1
 
             elif layer == 'predictor':
+                # DEBUG: print query before OccPredictor
+                if layer_num == 0 and not hasattr(self, '_query_before_occ_debug'):
+                    print(f"\n[QUERY_BEFORE_OCC] layer_num={layer_num}:")
+                    print(f"  query.shape={query.shape}")
+                    print(f"  Mean={query.mean().item():.6f}, Std={query.std().item():.6f}")
+                    print(f"  Min={query.min().item():.6f}, Max={query.max().item():.6f}")
+                    self._query_before_occ_debug = True
+                
                 occ_pred, nonempty_voxel_logits = occ_predictor(query, last_occ_pred, layer_num=layer_num)
+                
+                # DEBUG: print occ_pred after OccPredictor
+                if layer_num == 0 and not hasattr(self, '_occ_pred_after_occ_debug'):
+                    print(f"  occ_pred.shape={occ_pred.shape}")
+                    print(f"  Mean={occ_pred.mean().item():.6f}, Std={occ_pred.std().item():.6f}")
+                    pred_cls = occ_pred.softmax(dim=-1).argmax(dim=-1)
+                    unique_cls = pred_cls.unique()
+                    print(f"  Unique classes: {len(unique_cls)}")
+                    self._occ_pred_after_occ_debug = True
 
             # spaital cross attention
             elif layer == 'cross_attn':

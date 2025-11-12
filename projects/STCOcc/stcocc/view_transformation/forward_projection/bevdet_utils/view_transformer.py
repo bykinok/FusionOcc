@@ -9,6 +9,18 @@ from mmengine.model import BaseModule
 from torch.cuda.amp.autocast_mode import autocast
 from torch.utils.checkpoint import checkpoint
 
+# Import debug utilities
+import sys
+from pathlib import Path
+debug_path = Path(__file__).parent.parent.parent.parent.parent.parent
+if str(debug_path) not in sys.path:
+    sys.path.insert(0, str(debug_path))
+try:
+    from debug_layer_comparison import log_layer
+except ImportError:
+    def log_layer(*args, **kwargs):
+        pass  # Fallback if not available
+
 # Try to import bev_pool_v2, fallback if not available
 try:
     from mmdet3d.ops.bev_pool_v2.bev_pool import bev_pool_v2
@@ -170,6 +182,17 @@ class LSSViewTransformer(BaseModule):
             torch.tensor: Point coordinates in shape
                 (B, N_cams, D, ownsample, 3)
         """
+        # DEBUG: Check input parameters
+        if not hasattr(self, '_get_lidar_coor_input_debug'):
+            print(f"\n[GET_LIDAR_COOR_INPUT]:")
+            print(f"  frustum: Mean={self.frustum.mean().item():.6f}, Std={self.frustum.std().item():.6f}")
+            print(f"  sensor2ego[0,0]: \n{sensor2ego[0,0]}")
+            print(f"  cam2imgs[0,0]: \n{cam2imgs[0,0]}")
+            print(f"  post_rots[0,0]: \n{post_rots[0,0]}")
+            print(f"  post_trans[0,0]: {post_trans[0,0]}")
+            print(f"  bda[0]: \n{bda[0]}")
+            self._get_lidar_coor_input_debug = True
+        
         B, N, _, _ = sensor2ego.shape
 
         # post-transformation
@@ -212,8 +235,12 @@ class LSSViewTransformer(BaseModule):
         self.interval_lengths = interval_lengths.int().contiguous()
 
     def voxel_pooling_v2(self, coor, depth, feat):
+        # DEBUG: Log voxel pooling input
+        log_layer("voxel_pooling", inputs={"coor": coor, "depth": depth, "feat": feat})
+        
         # prepare for BEVPooling
         ranks_bev, ranks_depth, ranks_feat, interval_starts, interval_lengths = self.voxel_pooling_prepare_v2(coor)
+        
         # no points within the predefined bev receptive field
         if ranks_feat is None:
             print('warning ---> no points within the predefined '
@@ -294,32 +321,15 @@ class LSSViewTransformer(BaseModule):
                 feat_size = min(spatial_size, Y * X)
                 bev_feat[:, z, :feat_size, :] = feat_pooled[:, :feat_size, :]
 
-        # collapse Z and reshape for conv3d
+        # collapse Z
+        # bev_feat shape after bev_pool_v2: (B, Z, Y, X, C) - NOT permuted yet!
+        # Original STCOcc_ori uses dim=2 to unbind, which means collapse along dimension 2
         if self.collapse_z:
-            bev_feat = torch.cat(bev_feat.unbind(dim=1), 1)  # (B, Z*Y*X, C)
-            # Reshape to (B, C, 1, H, W) for conv3d
-            B = bev_feat.shape[0]
-            C = bev_feat.shape[2]
-            spatial_size = bev_feat.shape[1]
-            # Assume square spatial dimensions
-            H = W = int(spatial_size ** 0.5)
-            if H * W != spatial_size:
-                # If not square, use reasonable dimensions
-                H = int((spatial_size / Z) ** 0.5)
-                W = spatial_size // (H * Z) if H > 0 else 100
-                H = max(H, 1)
-                W = max(W, 1)
-            bev_feat = bev_feat.view(B, H * W * Z, C).permute(0, 2, 1)  # (B, C, H*W*Z)
-            bev_feat = bev_feat.view(B, C, Z, H, W)  # (B, C, Z, H, W)
-        else:
-            # Reshape (B, Z, Y*X, C) to (B, C, Z, Y, X)
-            B, Z_dim, YX, C = bev_feat.shape
-            Y = X = int(YX ** 0.5)
-            if Y * X != YX:
-                Y = 100  # fallback
-                X = YX // Y
-            bev_feat = bev_feat.view(B, Z_dim, Y, X, C).permute(0, 4, 1, 2, 3)  # (B, C, Z, Y, X)
-
+            bev_feat = torch.cat(bev_feat.unbind(dim=2), 1)
+        
+        # DEBUG: Log voxel pooling output
+        log_layer("voxel_pooling", outputs={"bev_feat": bev_feat})
+        
         return bev_feat
 
     def voxel_pooling_prepare_v2(self, coor):
@@ -337,6 +347,16 @@ class LSSViewTransformer(BaseModule):
         """
         B, N, D, H, W, _ = coor.shape
         num_points = B * N * D * H * W
+        
+        # DEBUG: print grid parameters once
+        if not hasattr(self, '_grid_params_debug'):
+            print(f"\n[GRID_PARAMS]:")
+            print(f"  grid_size: {self.grid_size}")
+            print(f"  grid_lower_bound: {self.grid_lower_bound}")
+            print(f"  grid_interval: {self.grid_interval}")
+            print(f"  num_points: {num_points}")
+            self._grid_params_debug = True
+        
         # record the index of selected points for acceleration purpose
         ranks_depth = torch.arange(
             0, num_points, dtype=torch.int, device=coor.device)
@@ -345,6 +365,7 @@ class LSSViewTransformer(BaseModule):
         ranks_feat = ranks_feat.reshape(B, N, 1, H, W)
         ranks_feat = ranks_feat.expand(B, N, D, H, W).flatten()
         # convert coordinate into the voxel space
+        coor_orig = coor.clone()
         coor = ((coor - self.grid_lower_bound.to(coor)) /
                 self.grid_interval.to(coor))
         coor = coor.long().view(num_points, 3)
@@ -356,6 +377,21 @@ class LSSViewTransformer(BaseModule):
         kept = (coor[:, 0] >= 0) & (coor[:, 0] < self.grid_size[0]) & \
                (coor[:, 1] >= 0) & (coor[:, 1] < self.grid_size[1]) & \
                (coor[:, 2] >= 0) & (coor[:, 2] < self.grid_size[2])
+        
+        # DEBUG: print filtering statistics once
+        if not hasattr(self, '_kept_stats_debug'):
+            print(f"[KEPT_FILTER]:")
+            print(f"  Total points: {num_points}")
+            print(f"  Kept points: {kept.sum().item()}")
+            print(f"  Filtered out: {(~kept).sum().item()} ({100*(~kept).sum().item()/num_points:.2f}%)")
+            # Check which condition filters most
+            x_out = (coor[:, 0] < 0) | (coor[:, 0] >= self.grid_size[0])
+            y_out = (coor[:, 1] < 0) | (coor[:, 1] >= self.grid_size[1])
+            z_out = (coor[:, 2] < 0) | (coor[:, 2] >= self.grid_size[2])
+            print(f"  X out of bound: {x_out.sum().item()}")
+            print(f"  Y out of bound: {y_out.sum().item()}")
+            print(f"  Z out of bound: {z_out.sum().item()}")
+            self._kept_stats_debug = True
         if len(kept) == 0:
             return None, None, None, None, None
         coor, ranks_depth, ranks_feat = \
@@ -756,8 +792,12 @@ class DepthNet(nn.Module):
         return cost_volumn
 
     def forward(self, x, mlp_input, stereo_metas=None):
+        # DEBUG: Log DepthNet input
+        log_layer("depthnet", inputs={"x": x, "mlp_input": mlp_input})
+        
         mlp_input = self.bn(mlp_input.reshape(-1, mlp_input.shape[-1]))
         x = self.reduce_conv(x)
+        
         context_se = self.context_mlp(mlp_input)[..., None, None]
         context = self.context_se(x, context_se)
         context = self.context_conv(context)
@@ -784,7 +824,13 @@ class DepthNet(nn.Module):
             depth = checkpoint(self.depth_conv, depth)
         else:
             depth = self.depth_conv(depth)
-        return torch.cat([depth, context], dim=1)
+        
+        output = torch.cat([depth, context], dim=1)
+        
+        # DEBUG: Log DepthNet output
+        log_layer("depthnet", outputs={"depth_context": output, "depth": depth, "context": context})
+        
+        return output
 
 
 class DepthAggregation(nn.Module):

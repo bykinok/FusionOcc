@@ -10,7 +10,10 @@ from mmengine.config import Config, ConfigDict, DictAction
 from mmengine.registry import RUNNERS, DefaultScope
 from mmengine.runner import Runner
 
-from mmdet3d.utils import replace_ceph_backend
+try:
+    from mmdet3d.utils import replace_ceph_backend
+except ImportError:
+    replace_ceph_backend = None
 import mmdet3d  # Import to register mmdet3d modules
 
 
@@ -200,7 +203,10 @@ def main():
 
         # TODO: We will unify the ceph support approach with other OpenMMLab repos
         if args.ceph:
-            cfg = replace_ceph_backend(cfg)
+            if replace_ceph_backend is not None:
+                cfg = replace_ceph_backend(cfg)
+            else:
+                print("Warning: replace_ceph_backend not available, skipping ceph backend replacement")
 
         cfg.launcher = args.launcher
         if args.cfg_options is not None:

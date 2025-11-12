@@ -555,6 +555,8 @@ class PrepareImageInputs(object):
 
     def img_transform_core(self, img, resize_dims, crop, flip, rotate):
         # adjust image
+        # CRITICAL: Use default interpolation (BICUBIC) to match original implementation
+        # DO NOT specify interpolation method explicitly - use PIL default
         img = img.resize(resize_dims)
         img = img.crop(crop)
         if flip:
@@ -710,6 +712,14 @@ class PrepareImageInputs(object):
         return Image.fromarray(img.astype(np.uint8))
 
     def get_inputs(self, results, flip=None, scale=None):
+        # DEBUG: print results keys once
+        if not hasattr(self, '_get_inputs_debug'):
+            print(f"DEBUG get_inputs: results keys = {list(results.keys())[:15]}")
+            print(f"  'adjacent' in results: {'adjacent' in results}")
+            if 'adjacent' in results:
+                print(f"  len(results['adjacent']): {len(results['adjacent'])}")
+            self._get_inputs_debug = True
+        
         # get cam_names
         cam_names = self.data_config['cams']
 
@@ -759,6 +769,18 @@ class PrepareImageInputs(object):
                 continue
                 
             img = Image.open(filename)
+            
+            # DEBUG: print raw image stats before any processing
+            if not hasattr(self, '_raw_img_debug'):
+                import numpy as np
+                raw_arr = np.array(img)
+                print(f"\n[RAW_IMG] After loading:")
+                print(f"  File: {filename}")
+                print(f"  Shape: {raw_arr.shape}")
+                print(f"  Mean: {raw_arr.mean():.2f}, Std: {raw_arr.std():.2f}")
+                print(f"  Min: {raw_arr.min()}, Max: {raw_arr.max()}")
+                print(f"  Dtype: {raw_arr.dtype}")
+                self._raw_img_debug = True
 
             post_rot = torch.eye(2)
             post_tran = torch.zeros(2)
@@ -771,6 +793,16 @@ class PrepareImageInputs(object):
             # image view augmentation (resize, crop, horizontal flip, rotate)
             img_augs = self.sample_augmentation(H=img.height, W=img.width, flip=flip, scale=scale)
             resize, resize_dims, crop, flip, rotate = img_augs
+            
+            # DEBUG: print augmentation parameters
+            if not hasattr(self, '_aug_params_debug'):
+                print(f"\n[AUG_PARAMS]:")
+                print(f"  resize={resize:.4f}, resize_dims={resize_dims}")
+                print(f"  crop={crop}")
+                print(f"  flip={flip}, rotate={rotate}")
+                print(f"  post_rot (before)={post_rot}")
+                print(f"  post_tran (before)={post_tran}")
+                self._aug_params_debug = True
             img, post_rot2, post_tran2, invalid_index = \
                 self.img_transform(img, post_rot,
                                    post_tran,
@@ -779,6 +811,13 @@ class PrepareImageInputs(object):
                                    crop=crop,
                                    flip=flip,
                                    rotate=rotate)
+
+            # DEBUG: print post_tran after transform
+            if not hasattr(self, '_post_tran_after_debug'):
+                print(f"\n[POST_AUG_AFTER]:")
+                print(f"  post_rot2={post_rot2}")
+                print(f"  post_tran2={post_tran2}")
+                self._post_tran_after_debug = True
 
             # for convenience, make augmentation matrices 4x4
             post_aug = torch.eye(4)
@@ -792,7 +831,31 @@ class PrepareImageInputs(object):
             if self.is_train and self.data_config.get('pmd', None) is not None:
                 img = self.photo_metric_distortion(img, self.data_config['pmd'])
 
-            imgs.append(self.normalize_img(img))
+            # DEBUG: print image stats before normalization and save first image
+            if not hasattr(self, '_before_norm_debug'):
+                import numpy as np
+                img_arr = np.array(img)
+                print(f"\n[BEFORE_NORM] Before normalize_img:")
+                print(f"  Shape: {img_arr.shape}")
+                print(f"  Mean: {img_arr.mean():.2f}, Std: {img_arr.std():.2f}")
+                print(f"  Min: {img_arr.min()}, Max: {img_arr.max()}")
+                print(f"  Dtype: {img_arr.dtype}")
+                # Save first cropped image for comparison
+                img.save('/tmp/reimpl_cropped_img.jpg')
+                print(f"  Saved to: /tmp/reimpl_cropped_img.jpg")
+                self._before_norm_debug = True
+            
+            normalized = self.normalize_img(img)
+            
+            # DEBUG: print normalized stats
+            if not hasattr(self, '_after_norm_debug'):
+                print(f"\n[AFTER_NORM] After normalize_img:")
+                print(f"  Shape: {normalized.shape}")
+                print(f"  Mean: {normalized.mean().item():.6f}, Std: {normalized.std().item():.6f}")
+                print(f"  Min: {normalized.min().item():.6f}, Max: {normalized.max().item():.6f}")
+                self._after_norm_debug = True
+            
+            imgs.append(normalized)
 
             # adjacent frame use the same aug with current frame
             if self.sequential:
@@ -831,12 +894,18 @@ class PrepareImageInputs(object):
         ego2lidars.append(lidarego2lidar)
 
         if self.sequential and 'adjacent' in results:
+            # DEBUG: print once
+            if not hasattr(self, '_seq_adj_debug'):
+                print(f"DEBUG get_inputs: sequential=True, len(adjacent)={len(results['adjacent'])}")
+                print(f"  Before extend: len(cam2imgs)={len(cam2imgs)}, len(post_augs)={len(post_augs)}")
+                self._seq_adj_debug = True
+                
             for adj_info in results['adjacent']:
-                # for convenience
+                # for convenience - extend cam2imgs and post_augs with CURRENT frame values
                 cam2imgs.extend(cam2imgs[:len(cam_names)])
                 post_augs.extend(post_augs[:len(cam_names)])
 
-                # align
+                # align - add sensor transformations for adjacent frame
                 for cam_name in cam_names:
                     sensor2ego, ego2global, ego2sensor, global2ego = \
                         self.get_sensor_transforms(adj_info, cam_name)
@@ -844,6 +913,12 @@ class PrepareImageInputs(object):
                     ego2globals.append(ego2global)
                     ego2sensors.append(ego2sensor)
                     global2egos.append(global2ego)
+            
+            # DEBUG: print once
+            if not hasattr(self, '_seq_adj_after_debug'):
+                print(f"DEBUG get_inputs: After extend: len(cam2imgs)={len(cam2imgs)}, len(post_augs)={len(post_augs)}")
+                print(f"  len(sensor2egos)={len(sensor2egos)}, len(ego2globals)={len(ego2globals)}")
+                self._seq_adj_after_debug = True
 
         # Safety check: ensure we have at least some images
         if len(imgs) == 0:
@@ -878,17 +953,27 @@ class PrepareImageInputs(object):
                 self._dummy_data_warned = True
         
         imgs = torch.stack(imgs)
-        # sensor2egos and ego2globals containes current and adjacent frame information
+        # sensor2egos and ego2globals contains current and adjacent frame information
         sensor2egos = torch.stack(sensor2egos)
         ego2globals = torch.stack(ego2globals)
         ego2sensors = torch.stack(ego2sensors)
         global2egos = torch.stack(global2egos)
-        # cam2imgs and post_augs only contain current frame information
+        # cam2imgs and post_augs are extended for adjacent frames (replicated from current frame)
         cam2imgs = torch.stack(cam2imgs)
         post_augs = torch.stack(post_augs)
         # lidar2imgs and ego2lidars only contain current frame information
         lidar2imgs = torch.stack(lidar2imgs)
         ego2lidars = torch.stack(ego2lidars)
+        
+        # DEBUG: print once
+        if not hasattr(self, '_stack_shapes_debug'):
+            print(f"DEBUG get_inputs: After stacking:")
+            print(f"  imgs.shape={imgs.shape}")
+            print(f"  sensor2egos.shape={sensor2egos.shape}")
+            print(f"  ego2globals.shape={ego2globals.shape}")
+            print(f"  cam2imgs.shape={cam2imgs.shape}")
+            print(f"  post_augs.shape={post_augs.shape}")
+            self._stack_shapes_debug = True
 
         # store
         results['cam_names'] = cam_names
@@ -903,6 +988,14 @@ class PrepareImageInputs(object):
 
     def __call__(self, results):
         results['img_inputs'] = self.get_inputs(results)
+        
+        # CRITICAL: Preserve temporal fusion information
+        # These keys are added by dataset.prepare_data() and must be preserved
+        # through the pipeline for temporal fusion to work
+        temporal_keys = ['sequence_group_idx', 'start_of_sequence', 'curr_to_prev_ego_rt', 'sample_index']
+        # Keep these keys in results so they can be collected by Collect3D
+        # (Collect3D meta_keys already includes these - line 149 in formating.py)
+        
         return results
 
 

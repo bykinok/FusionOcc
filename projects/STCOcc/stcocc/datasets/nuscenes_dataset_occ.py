@@ -3,13 +3,19 @@ import os
 import mmcv
 import torch
 import cv2
+import math
 import numpy as np
 from tqdm import tqdm
+from typing import Any
 
 from nuscenes.nuscenes import NuScenes
 
 from mmdet3d.registry import DATASETS
 from mmdet3d.datasets.nuscenes_dataset import NuScenesDataset
+from .nuscenes_ego_pose_loader import nuScenesDataset
+from .nuscenes_utils import nuscenes_get_rt_matrix
+from .ray_metrics_occ3d import main as ray_based_miou_occ3d
+from .ray_metrics_openocc import main as ray_based_miou_openocc
 
 occ3d_colors_map = np.array(
     [
@@ -122,22 +128,55 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         if not original_lazy_init:
             self._calculate_num_ins_per_cat()
             self._show_correct_statistics()
+        
+        # CRITICAL: After parent __init__, self.data_infos may be empty, reload it!
+        if not hasattr(self, 'data_infos') or len(self.data_infos) == 0:
+            import mmengine
+            raw_data = mmengine.load(self.ann_file)
+            if isinstance(raw_data, dict) and 'data_list' in raw_data:
+                self.data_infos = raw_data['data_list']
+            elif isinstance(raw_data, dict) and 'infos' in raw_data:
+                self.data_infos = raw_data['infos']
+            elif isinstance(raw_data, list):
+                self.data_infos = raw_data
+            else:
+                self.data_infos = []
+            print(f"DEBUG __init__ end: reloaded data_infos, len={len(self.data_infos)}")
+        
+        # CRITICAL: Set sequence group flag for temporal fusion
+        if self.use_sequence_group_flag:
+            self._set_sequence_group_flag()
+            print(f"DEBUG: Sequence group flag set, flag shape: {self.flag.shape}, unique values: {np.unique(self.flag)}")
 
     def load_data_list(self):
         """Load annotations from file.
         
         Adapts the old format STCOcc annotations to the new mmengine format.
+        CRITICAL: This method MUST return the data_list AND set self.data_infos
         """
         import mmengine
         
         # Load the original annotation file
         raw_data = mmengine.load(self.ann_file)
         
+        # DEBUG: print to verify loading
+        if not hasattr(self, '_load_debug'):
+            print(f"DEBUG load_data_list: type(raw_data)={type(raw_data)}")
+            if isinstance(raw_data, dict):
+                print(f"  dict keys={list(raw_data.keys())[:5]}")
+                if 'infos' in raw_data and len(raw_data['infos']) > 0:
+                    print(f"  first info keys: {list(raw_data['infos'][0].keys())[:10]}")
+            elif isinstance(raw_data, list) and len(raw_data) > 0:
+                print(f"  list len={len(raw_data)}")
+                print(f"  first item keys: {list(raw_data[0].keys())[:10]}")
+            self._load_debug = True
+        
         # Check if it's already in the new format
         if isinstance(raw_data, dict) and 'data_list' in raw_data and 'metainfo' in raw_data:
             data_list = raw_data['data_list']
             # CRITICAL: Set data_infos for backward compatibility
             self.data_infos = data_list
+            print(f"DEBUG: Loaded data_list format, len={len(data_list)}")
             return data_list
         
         # Convert old format to new format
@@ -145,16 +184,19 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         if isinstance(raw_data, list):
             # Store the data_infos for backward compatibility
             self.data_infos = raw_data
+            print(f"DEBUG: Loaded list format, len={len(raw_data)}")
             return raw_data
         elif isinstance(raw_data, dict) and 'infos' in raw_data:
             # Some formats have 'infos' key
             # Store the data_infos for backward compatibility
             self.data_infos = raw_data['infos']
+            print(f"DEBUG: Loaded infos format, len={len(raw_data['infos'])}")
             return raw_data['infos']
         else:
             # Fallback: treat the whole data as data_list
             self.data_infos = raw_data if isinstance(raw_data, list) else [raw_data]
-            return raw_data
+            print(f"DEBUG: Loaded fallback format, len={len(self.data_infos)}")
+            return self.data_infos
 
     def get_data_info(self, index):
         """Get data info according to the given index.
@@ -193,24 +235,129 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
                 input_dict['pts_filename'] = data_info['lidar_path']
         
         # Handle multi-frame adjacency if needed (STCOcc specific)
-        if self.multi_adj_frame_id_cfg and hasattr(self, 'data_infos') and index < len(self.data_infos):
-            start_id, end_id, step = self.multi_adj_frame_id_cfg
+        # This follows the original STCOcc_ori implementation
+        # Use self.data_infos for adjacent frame loading
+        # DEBUG: print conditions once
+        if not hasattr(self, '_adj_cond_debug'):
+            print(f"DEBUG get_data_info adjacency conditions:")
+            print(f"  multi_adj_frame_id_cfg: {self.multi_adj_frame_id_cfg}")
+            print(f"  hasattr(data_infos): {hasattr(self, 'data_infos')}")
+            if hasattr(self, 'data_infos'):
+                print(f"  len(data_infos): {len(self.data_infos)}")
+                print(f"  index: {index}, index < len: {index < len(self.data_infos)}")
+            print(f"  stereo: {self.stereo}")
+            self._adj_cond_debug = True
+        
+        if self.multi_adj_frame_id_cfg and hasattr(self, 'data_infos') and len(self.data_infos) > 0 and index < len(self.data_infos):
+            info = self.data_infos[index]
             adjacent_list = []
-            for adj_idx in range(start_id, end_id, step):
-                adj_data_idx = index + adj_idx
-                if 0 <= adj_data_idx < len(self.data_infos) and adj_data_idx != index:
-                    adj_info = self.data_infos[adj_data_idx]
-                    adjacent_list.append(adj_info)
+            
+            # Build adjacent frame id list
+            adj_id_list = list(range(*self.multi_adj_frame_id_cfg))
+            
+            # For stereo mode, add an additional frame
+            if self.stereo:
+                assert self.multi_adj_frame_id_cfg[0] == 1
+                assert self.multi_adj_frame_id_cfg[2] == 1
+                adj_id_list.append(self.multi_adj_frame_id_cfg[1])
+            
+            # Get adjacent frames (PAST frames, not future!)
+            for select_id in adj_id_list:
+                # Use PAST frame: index - select_id
+                adj_data_idx = max(index - select_id, 0)
+                
+                # Check if it's the same scene, otherwise use current frame
+                if 'scene_token' in info and 'scene_token' in self.data_infos[adj_data_idx]:
+                    if not self.data_infos[adj_data_idx]['scene_token'] == info['scene_token']:
+                        # Different scene, use current frame instead
+                        adjacent_list.append(info)
+                    else:
+                        # Same scene, use the adjacent frame
+                        adjacent_list.append(self.data_infos[adj_data_idx])
+                else:
+                    # No scene_token info, use the adjacent frame
+                    adjacent_list.append(self.data_infos[adj_data_idx])
+            
             if adjacent_list:
                 input_dict['adjacent'] = adjacent_list
+                # DEBUG: print once
+                if not hasattr(self, '_adj_added_debug'):
+                    print(f"DEBUG get_data_info: added 'adjacent' to input_dict, len={len(adjacent_list)}")
+                    print(f"  input_dict keys: {list(input_dict.keys())[:10]}")
+                    self._adj_added_debug = True
         
         input_dict['seg_label_mapping'] = self.SegLabelMapping
         return input_dict
     
-    def prepare_data(self, idx):
-        """Prepare data for the given index."""
-        # Call parent's prepare_data method 
-        data = super().prepare_data(idx)
+    def _set_sequence_group_flag(self):
+        """
+        Set each sequence to be a different group
+        """
+        res = []
+        curr_sequence = 0
+        for idx in range(len(self.data_infos)):
+            if idx != 0 and len(self.data_infos[idx].get('prev', [])) == 0:
+                # Not first frame and # of sweeps is 0 -> new sequence
+                curr_sequence += 1
+            res.append(curr_sequence)
+
+        self.flag = np.array(res, dtype=np.int64)
+
+        if self.sequences_split_num != 1:
+            if self.sequences_split_num == 'all':
+                self.flag = np.array(range(len(self.data_infos)), dtype=np.int64)
+            else:
+                bin_counts = np.bincount(self.flag)
+                new_flags = []
+                curr_new_flag = 0
+                for curr_flag in range(len(bin_counts)):
+                    curr_sequence_length = np.array(
+                        list(range(0,
+                                   bin_counts[curr_flag],
+                                   math.ceil(bin_counts[curr_flag] / self.sequences_split_num)))
+                        + [bin_counts[curr_flag]])
+                    for sub_seq_idx in (curr_sequence_length[1:] - curr_sequence_length[:-1]):
+                        for _ in range(sub_seq_idx):
+                            new_flags.append(curr_new_flag)
+                        curr_new_flag += 1
+
+                assert len(new_flags) == len(self.flag)
+                assert len(np.bincount(new_flags)) == len(np.bincount(self.flag)) * self.sequences_split_num
+                self.flag = np.array(new_flags, dtype=np.int64)
+
+    def prepare_data(self, idx: int) -> Any:
+        """Prepare data for the given index.
+        
+        CRITICAL: Completely override BaseDataset.prepare_data() to ensure 
+        'adjacent' and temporal information are passed to the pipeline.
+        """
+        # Get data info
+        data_info = self.get_data_info(idx)
+        
+        # Add temporal fusion information
+        if self.use_sequence_group_flag:
+            data_info['sample_index'] = idx
+            data_info['sequence_group_idx'] = int(self.flag[idx])
+            #data_info['start_of_sequence'] = idx == 0 or self.flag[idx - 1] != self.flag[idx]
+            data_info['start_of_sequence'] = True
+            
+            # Get transformation matrix from current to previous frame
+            if not data_info['start_of_sequence']:
+                data_info['curr_to_prev_ego_rt'] = torch.FloatTensor(nuscenes_get_rt_matrix(
+                    self.data_infos[idx], self.data_infos[idx - 1],
+                    "ego", "ego"))
+            else:
+                # Identity matrix for the first frame of a sequence
+                data_info['curr_to_prev_ego_rt'] = torch.eye(4).float()
+        
+        # Apply pipeline transforms
+        # Deepcopy to avoid modifying cached data_info
+        import copy
+        data = copy.deepcopy(data_info)
+        
+        # Execute the pipeline
+        data = self.pipeline(data)
+        
         return data
         
     def get_cat_ids(self, idx):

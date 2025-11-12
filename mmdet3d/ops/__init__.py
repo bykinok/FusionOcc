@@ -19,16 +19,44 @@ from mmcv.ops.three_interpolate import three_interpolate
 from mmcv.ops.three_nn import three_nn
 from mmcv.ops.voxelize import Voxelization, voxelization
 
-from .bev_pool_v2 import bev_pool_v2, TRTBEVPoolv2
-from .dgcnn_modules import DGCNNFAModule, DGCNNFPModule, DGCNNGFModule
-from .norm import NaiveSyncBatchNorm1d, NaiveSyncBatchNorm2d
-from .paconv import PAConv, PAConvCUDA
-from .pointnet_modules import (PAConvCUDASAModule, PAConvCUDASAModuleMSG,
-                               PAConvSAModule, PAConvSAModuleMSG,
-                               PointFPModule, PointSAModule, PointSAModuleMSG,
-                               build_sa_module)
-from .sparse_block import (SparseBasicBlock, SparseBottleneck,
-                           make_sparse_convmodule)
+from .bev_pool_v2.bev_pool import bev_pool_v2, TRTBEVPoolv2
+
+try:
+    from .dgcnn_modules import DGCNNFAModule, DGCNNFPModule, DGCNNGFModule
+except ImportError as e:
+    print(f"Warning: Could not import dgcnn_modules: {e}")
+    DGCNNFAModule = DGCNNFPModule = DGCNNGFModule = None
+
+try:
+    from .norm import NaiveSyncBatchNorm1d, NaiveSyncBatchNorm2d
+except ImportError as e:
+    print(f"Warning: Could not import norm: {e}")
+    NaiveSyncBatchNorm1d = NaiveSyncBatchNorm2d = None
+
+try:
+    from .paconv import PAConv, PAConvCUDA
+except ImportError as e:
+    print(f"Warning: Could not import paconv: {e}")
+    PAConv = PAConvCUDA = None
+
+try:
+    from .pointnet_modules import (PAConvCUDASAModule, PAConvCUDASAModuleMSG,
+                                   PAConvSAModule, PAConvSAModuleMSG,
+                                   PointFPModule, PointSAModule, PointSAModuleMSG,
+                                   build_sa_module)
+except ImportError as e:
+    print(f"Warning: Could not import pointnet_modules: {e}")
+    PAConvCUDASAModule = PAConvCUDASAModuleMSG = None
+    PAConvSAModule = PAConvSAModuleMSG = None
+    PointFPModule = PointSAModule = PointSAModuleMSG = None
+    build_sa_module = None
+
+try:
+    from .sparse_block import (SparseBasicBlock, SparseBottleneck,
+                               make_sparse_convmodule)
+except ImportError as e:
+    print(f"Warning: Could not import sparse_block: {e}")
+    SparseBasicBlock = SparseBottleneck = make_sparse_convmodule = None
 
 __all__ = [
     'nms', 'soft_nms', 'RoIAlign', 'roi_align', 'get_compiler_version',

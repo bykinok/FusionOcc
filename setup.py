@@ -213,6 +213,7 @@ if __name__ == '__main__':
         url='https://github.com/open-mmlab/mmdetection3d',
         packages=find_packages(exclude=('configs', 'tools', 'demo')),
         include_package_data=True,
+        package_data={'mmdet3d.ops': ['*/*.so']},
         classifiers=[
             'Development Status :: 5 - Production/Stable',
             'License :: OSI Approved :: Apache Software License',
@@ -231,6 +232,15 @@ if __name__ == '__main__':
             'optional': parse_requirements('requirements/optional.txt'),
             'mim': parse_requirements('requirements/mminstall.txt'),
         },
-        ext_modules=[],
+        ext_modules=[
+            make_cuda_ext(
+                name='bev_pool_v2_ext',
+                module='mmdet3d.ops.bev_pool_v2',
+                sources=[
+                    'src/bev_pool.cpp',
+                    'src/bev_pool_cuda.cu',
+                ],
+            ),
+        ] if TORCH_AVAILABLE else [],
         cmdclass={'build_ext': BuildExtension} if TORCH_AVAILABLE else {},
         zip_safe=False)

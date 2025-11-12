@@ -216,9 +216,10 @@ class OccupancyMetric(BaseMetric):
             'vegetation'
         ]
         
-        # Compute IoU for each class (exclude ignore_label = 0)
+        # Compute IoU for each class (exclude ignore_label)
         iou_per_class = []
-        valid_classes = list(range(1, self.num_classes))  # Skip class 0 (ignore/noise)
+        # Use class_indices from config (exclude ignore_label)
+        valid_classes = [c for c in self.class_indices if c != self.ignore_label]
         
         for i in valid_classes:
             # True positives
@@ -228,8 +229,14 @@ class OccupancyMetric(BaseMetric):
             # False negatives
             fn = confusion_matrix[i, :].sum() - tp
             
-            # IoU (following original MeanIoU calculation)
-            if tp + fp + fn > 0:
+            # Total GT occurrences of class i
+            total_seen = tp + fn
+            
+            # IoU (following original MeanIoU calculation exactly)
+            if total_seen == 0:
+                # Original logic: if class not in GT, treat as 100% (perfect)
+                iou = 1.0
+            elif tp + fp + fn > 0:
                 iou = tp / (tp + fp + fn)
             else:
                 iou = 0.0

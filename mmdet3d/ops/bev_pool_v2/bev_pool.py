@@ -2,23 +2,8 @@
 
 import numpy as np
 import torch
-import os
-import sys
 
-# Try to import the compiled extension
-try:
-    # First try relative import
-    from . import bev_pool_v2_ext
-except ImportError:
-    # If that fails, try to load it from the same directory
-    import importlib.util
-    ext_path = os.path.join(os.path.dirname(__file__), 'bev_pool_v2_ext.cpython-310-x86_64-linux-gnu.so')
-    if os.path.exists(ext_path):
-        spec = importlib.util.spec_from_file_location("bev_pool_v2_ext", ext_path)
-        bev_pool_v2_ext = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(bev_pool_v2_ext)
-    else:
-        raise ImportError(f"Could not find bev_pool_v2_ext at {ext_path}")
+from . import bev_pool_v2_ext
 
 __all__ = ['bev_pool_v2', 'TRTBEVPoolv2']
 

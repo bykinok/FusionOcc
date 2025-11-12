@@ -72,6 +72,11 @@ class SparseFusion(BaseModule):
     def forward(self, curr_bev, cam_params, history_fusion_params, dx, bx, history_last_bev=None, last_occ_pred=None, nonempty_prob=None):
         # curr_bev: [bs, c, z, h, w]
         # cam_params: dict, contain bda_mat
+        
+        # CRITICAL FIX: Force FP32 precision for temporal fusion (matching original @force_fp32())
+        curr_bev = curr_bev.float()
+        last_occ_pred = last_occ_pred.float()
+        nonempty_prob = nonempty_prob.float()
 
         # 0、check process voxel or bev features
         voxel_feat = True if len(curr_bev.shape) == 5 else False
@@ -82,27 +87,26 @@ class SparseFusion(BaseModule):
             seq_ids = history_fusion_params['sequence_group_idx'][0]
         else:
             seq_ids = history_fusion_params['sequence_group_idx']
-        
-        # Get batch size for consistency checks
-        batch_size = curr_bev.shape[0]
-        
-        # Ensure seq_ids matches batch size
-        if seq_ids.shape[0] != batch_size:
-            seq_ids = seq_ids.expand(batch_size)
         if type(history_fusion_params['start_of_sequence']) is list:
             start_of_sequence = history_fusion_params['start_of_sequence'][0]
         else:
             start_of_sequence = history_fusion_params['start_of_sequence']
-        
-        # Ensure start_of_sequence matches batch size
-        if start_of_sequence.shape[0] != batch_size:
-            # Expand start_of_sequence to match batch size by repeating the value
-            start_of_sequence = start_of_sequence.expand(batch_size)
         if type(history_fusion_params['curr_to_prev_ego_rt']) is list:
             curr_to_prev_ego_rt = history_fusion_params['curr_to_prev_ego_rt'][0]
         else:
             curr_to_prev_ego_rt = history_fusion_params['curr_to_prev_ego_rt']
         forward_augs = cam_params[-1]  # bda
+        
+        # DEBUG: Print temporal fusion inputs
+        if not hasattr(self, '_temporal_fusion_input_debug'):
+            print(f"\n[TEMPORAL_FUSION_INPUT]")
+            print(f"  curr_bev: Mean={curr_bev.mean().item():.6f}, Std={curr_bev.std().item():.6f}")
+            print(f"  seq_ids: {seq_ids}")
+            print(f"  start_of_sequence: {start_of_sequence}")
+            print(f"  curr_to_prev_ego_rt:\n{curr_to_prev_ego_rt}")
+            print(f"  forward_augs:\n{forward_augs}")
+            print(f"  history_bev: {type(self.history_bev)}, {self.history_bev.shape if self.history_bev is not None else None}")
+            self._temporal_fusion_input_debug = True
 
         # check seq_ids > 0
         assert (seq_ids >= 0).all()
