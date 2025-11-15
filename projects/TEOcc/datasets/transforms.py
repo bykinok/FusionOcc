@@ -129,13 +129,41 @@ class PrepareImageInputs:
             rotate = 0
         return resize, resize_dims, crop, flip, rotate
 
-    def get_sensor_transforms(self, cam_info, cam_name):
+    def get_sensor_transforms(self, results, cam_name):
         """Get sensor to ego and ego to global transforms."""
-        # This is simplified version - in practice you'd read from the camera data
-        sensor2ego_rot = np.eye(3)
-        sensor2ego_tran = np.zeros(3)
-        ego2global_rot = np.eye(3)  
-        ego2global_tran = np.zeros(3)
+        from pyquaternion import Quaternion
+        
+        # Get camera data from results
+        cam_data = results.get('images', {}).get(cam_name, {})
+        if not cam_data:
+            # Fallback to cams if images not available
+            cam_data = results.get('cams', {}).get(cam_name, {})
+        
+        # Get sensor2ego transform
+        if 'sensor2ego_rotation' in cam_data and 'sensor2ego_translation' in cam_data:
+            rot = cam_data['sensor2ego_rotation']
+            if len(rot) == 4:  # quaternion [w, x, y, z]
+                w, x, y, z = rot
+                sensor2ego_rot = Quaternion(w, x, y, z).rotation_matrix
+            else:
+                sensor2ego_rot = np.array(rot).reshape(3, 3)
+            sensor2ego_tran = np.array(cam_data['sensor2ego_translation'])
+        else:
+            sensor2ego_rot = np.eye(3)
+            sensor2ego_tran = np.zeros(3)
+        
+        # Get ego2global transform
+        if 'ego2global_rotation' in cam_data and 'ego2global_translation' in cam_data:
+            rot = cam_data['ego2global_rotation']
+            if len(rot) == 4:  # quaternion [w, x, y, z]
+                w, x, y, z = rot
+                ego2global_rot = Quaternion(w, x, y, z).rotation_matrix
+            else:
+                ego2global_rot = np.array(rot).reshape(3, 3)
+            ego2global_tran = np.array(cam_data['ego2global_translation'])
+        else:
+            ego2global_rot = np.eye(3)
+            ego2global_tran = np.zeros(3)
         
         sensor2ego = np.eye(4)
         sensor2ego[:3, :3] = sensor2ego_rot
@@ -354,10 +382,35 @@ class LoadOccGTFromFile:
 
     def __call__(self, results):
         """Load occupancy ground truth."""
-        # Create dummy occupancy data
-        results['voxel_semantics'] = np.zeros((200, 200, 16), dtype=np.uint8)
-        results['mask_lidar'] = np.ones((200, 200, 16), dtype=bool) 
-        results['mask_camera'] = np.ones((200, 200, 16), dtype=bool)
+        # Try to load actual ground truth from file
+        occ_path = results.get('occ_path', None)
+        
+        if occ_path is not None:
+            try:
+                # Load from labels.npz file
+                occ_gt_path = os.path.join(occ_path, 'labels.npz')
+                if os.path.exists(occ_gt_path):
+                    occ_gt = np.load(occ_gt_path)
+                    results['voxel_semantics'] = occ_gt['semantics']
+                    results['mask_lidar'] = occ_gt['mask_lidar'].astype(bool)
+                    results['mask_camera'] = occ_gt['mask_camera'].astype(bool)
+                else:
+                    # Create dummy data if file doesn't exist
+                    results['voxel_semantics'] = np.zeros((200, 200, 16), dtype=np.uint8)
+                    results['mask_lidar'] = np.ones((200, 200, 16), dtype=bool)
+                    results['mask_camera'] = np.ones((200, 200, 16), dtype=bool)
+            except Exception as e:
+                # If loading fails, create dummy data
+                print(f"Warning: Failed to load occupancy GT: {e}")
+                results['voxel_semantics'] = np.zeros((200, 200, 16), dtype=np.uint8)
+                results['mask_lidar'] = np.ones((200, 200, 16), dtype=bool)
+                results['mask_camera'] = np.ones((200, 200, 16), dtype=bool)
+        else:
+            # No occ_path specified, create dummy data
+            results['voxel_semantics'] = np.zeros((200, 200, 16), dtype=np.uint8)
+            results['mask_lidar'] = np.ones((200, 200, 16), dtype=bool)
+            results['mask_camera'] = np.ones((200, 200, 16), dtype=bool)
+        
         return results
 
 
@@ -412,27 +465,46 @@ class DefaultFormatBundle3D:
 
 @TRANSFORMS.register_module()
 class Collect3D:
-    """Collect data for 3D detection."""
+    """Collect data for 3D detection - compatible with mmengine."""
 
     def __init__(self, keys=None, meta_keys=None):
         self.keys = keys or []
         self.meta_keys = meta_keys or []
 
     def __call__(self, results):
-        """Collect specified keys."""
-        data = {}
+        """Collect specified keys and format for mmengine."""
+        # Collect data
+        inputs = {}
         for key in self.keys:
             if key in results:
-                data[key] = results[key]
+                inputs[key] = results[key]
         
         # Add meta info
         img_meta = {}
         for key in self.meta_keys:
             if key in results:
                 img_meta[key] = results[key]
-        data['img_metas'] = img_meta
         
-        return data
+        # mmengine expects dict with 'inputs' and 'data_samples' keys
+        # Pack in the format mmengine expects
+        data_sample_dict = {
+            'metainfo': img_meta
+        }
+        
+        # Add ground truth for evaluation
+        if 'voxel_semantics' in results:
+            data_sample_dict['gt_occ'] = results['voxel_semantics']
+        if 'mask_lidar' in results:
+            data_sample_dict['mask_lidar'] = results['mask_lidar']
+        if 'mask_camera' in results:
+            data_sample_dict['mask_camera'] = results['mask_camera']
+        
+        packed_results = {
+            'inputs': inputs,
+            'data_samples': data_sample_dict
+        }
+        
+        return packed_results
 
 
 # MultiScaleFlipAug3D is already provided by mmdet3d, no need to register again

@@ -49,14 +49,15 @@ voxel_size = [0.1, 0.1, 0.2]
 numC_Trans = 32
 numRadar_Trans = 64
 
-multi_adj_frame_id_cfg = (1, 1+8, 1)
+multi_adj_frame_id_cfg = (1, 1+8, 1)  # 8 adjacent frames like original
 
 with_cp=False
 model = dict(
     type='BEVStereo4DOCCRC',    
     freeze_img=False,
     align_after_view_transfromation=False,
-    num_adj=len(range(*multi_adj_frame_id_cfg)),
+    num_adj=len(range(*multi_adj_frame_id_cfg)),  # 8 adjacent frames
+    # extra_ref_frames=1 by default: num_frame=9, temporal_frame=8, concat 8 frames
     img_backbone=dict(
         _scope_='mmdet',
         type='ResNet',
@@ -91,14 +92,14 @@ model = dict(
         downsample=16),
     img_bev_encoder_backbone=dict(
         type='CustomResNet3D',
-        numC_input=numC_Trans * len(range(*multi_adj_frame_id_cfg)),
+        numC_input=numC_Trans * len(range(*multi_adj_frame_id_cfg)),  # 32 * 8 = 256 (temporal_frame=8)
         num_layer=[1, 2, 4],
         with_cp=False,
         num_channels=[numC_Trans,numC_Trans*2,numC_Trans*4],
         stride=[1,2,2],
         backbone_output_ids=[0,1,2]),
     img_bev_encoder_neck=dict(type='LSSFPN3D',
-                              in_channels=128,
+                              in_channels=numC_Trans*7,  # 32+64+128 = 224 channels from concat
                               out_channels=numC_Trans),
     pre_process=dict(
         type='CustomResNet3D',
@@ -121,7 +122,7 @@ model = dict(
     radar_voxel_encoder=dict(
         type='RadarEncoder',
         in_channels=6+1,
-        feat_channels=[64],
+        feat_channels=[32, 64],
         with_distance=False,
         point_cloud_range=point_cloud_range,
         voxel_size=radar_voxel_size,
@@ -130,7 +131,7 @@ model = dict(
             eps=1.0e-3,
             momentum=0.01),
         with_pos_embed=True,
-        permute_injection_extraction=False,
+        permute_injection_extraction=True,
     ),
     radar_middle_encoder=dict(
         type='PointPillarsScatter',
@@ -216,37 +217,47 @@ train_pipeline = [
 ]
 
 test_pipeline = [
-    dict(type='PrepareImageInputs', data_config=data_config, sequential=True),
+    dict(_scope_='mmdet3d', type='PrepareImageInputs', data_config=data_config, sequential=True),
     dict(
+        _scope_='mmdet3d',
         type='LoadRadarPointsMultiSweeps',
         load_dim=18,
         sweeps_num=8,
         use_dim=radar_use_dims,
         max_num=1200, ),
     dict(
+        _scope_='mmdet3d',
         type='LoadAnnotationsBEVDepth',
         bda_aug_conf=bda_aug_conf,
         classes=class_names,
         is_train=False),
-    dict(type='GlobalRotScaleTrans_radar'),
+    dict(_scope_='mmdet3d', type='GlobalRotScaleTrans_radar'),
     dict(
+        _scope_='mmdet3d',
         type='LoadPointsFromFile',
         coord_type='LIDAR',
         load_dim=5,
         use_dim=5,
         backend_args=file_client_args),
     dict(
-        type='MultiScaleFlipAug3D',
-        img_scale=(1333, 800),
-        pts_scale_ratio=1,
-        flip=False,
-        transforms=[
-            dict(
-                type='DefaultFormatBundle3D',
-                class_names=class_names,
-                with_label=False),
-            dict(type='Collect3D', keys=['points', 'img_inputs','radar'])
-        ])
+        _scope_='mmdet3d',
+        type='DefaultFormatBundle3D',
+        class_names=class_names,
+        with_label=False),
+    dict(_scope_='mmdet3d', type='Collect3D', keys=['img_inputs', 'points', 'radar'],
+            meta_keys=[
+                'filename', 'ori_shape', 'img_shape', 'lidar2img',
+                'depth2img', 'cam2img', 'pad_shape', 'scale_factor',
+                'flip', 'pcd_horizontal_flip', 'pcd_vertical_flip',
+                'box_mode_3d', 'box_type_3d', 'img_norm_cfg', 'pcd_trans',
+                'sample_idx', 'prev_idx', 'next_idx', 'scene_token',
+                'can_bus', 'frame_idx', 'ego_id', 'sweeps_idx',
+                'post_trans', 'post_rots', 'frustum_size', 'bda_rot',
+                'sequence_idx', 'curr2ego_rot', 'curr2ego_tran',
+                'prev2ego_rot', 'prev2ego_tran', 'cam_sweep_ts',
+                'cam_type', 'lidar_path', 'radar_path', 'timestamp',
+                'occ_path'  # Critical for ground truth loading
+            ])
 ]
 
 input_modality = dict(
@@ -302,6 +313,16 @@ val_dataloader = dict(
     dataset=test_data_config)
 
 test_dataloader = val_dataloader
+
+# Evaluator for occupancy prediction
+val_evaluator = dict(
+    type='OccupancyMetric',
+    num_classes=18,
+    use_lidar_mask=False,
+    use_image_mask=True,
+    ann_file='data/nuscenes/teocc-nuscenes_R_infos_val.pkl'
+)
+test_evaluator = val_evaluator
 
 optim_wrapper = dict(
     type='OptimWrapper',

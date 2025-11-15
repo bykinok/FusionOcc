@@ -10,105 +10,54 @@ from timm.models.layers import DropPath, Mlp
 import time
 
 
-@MODELS.register_module()
-class LSSViewTransformerBEVStereo(BaseModule):
-    """LSS View Transformer for BEV Stereo."""
+class BasicBlock3D(nn.Module):
+    """Basic 3D ResNet block."""
     
-    def __init__(self, 
-                 grid_config=None,
-                 input_size=None,
-                 in_channels=256,
-                 out_channels=32,
-                 sid=False,
-                 collapse_z=False,
-                 loss_depth_weight=0.05,
-                 depthnet_cfg=None,
-                 downsample=16,
-                 **kwargs):
-        super().__init__(**kwargs)
-        self.grid_config = grid_config
-        self.input_size = input_size
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.sid = sid
-        self.collapse_z = collapse_z
-        self.loss_depth_weight = loss_depth_weight
-        self.downsample = downsample
-        
-        # Simple depth network
-        self.depth_net = nn.Sequential(
-            ConvModule(in_channels, 256, 3, padding=1),
-            ConvModule(256, 256, 3, padding=1),
-            ConvModule(256, 88, 1)  # Simplified depth channels
+    def __init__(self, inplanes, planes, stride=1, downsample=None):
+        super().__init__()
+        self.conv1 = ConvModule(
+            inplanes,
+            planes,
+            kernel_size=3,
+            stride=stride,
+            padding=1,
+            bias=False,
+            conv_cfg=dict(type='Conv3d'),
+            norm_cfg=dict(type='BN3d'),
+            act_cfg=dict(type='ReLU', inplace=True)
         )
-        
-        # Initialize cv_frustum as a dummy tensor
-        self.cv_frustum = nn.Parameter(torch.randn(1, 6, 88, 16, 44), requires_grad=False)
-        
-    def get_mlp_input(self, *args, **kwargs):
-        """Get MLP input - simplified implementation."""
-        return torch.randn(1, 27)  # Dummy MLP input
+        self.conv2 = ConvModule(
+            planes,
+            planes,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+            conv_cfg=dict(type='Conv3d'),
+            norm_cfg=dict(type='BN3d'),
+            act_cfg=None  # No activation after conv2
+        )
+        self.downsample = downsample
+        self.relu = nn.ReLU(inplace=True)
     
-    def forward(self, input_list, metas=None):
-        """Forward pass."""
-        x = input_list[0]
-        B, N, C, H, W = x.shape
+    def forward(self, x):
+        identity = x
         
-        # Generate depth prediction
-        x_flat = x.view(-1, C, H, W)
-        depth = self.depth_net(x_flat)
-        depth = depth.view(B, N, 88, H, W)
+        out = self.conv1(x)
+        out = self.conv2(out)
         
-        # Create 3D voxel features (B, C, D, H, W) for TEOcc
-        # Based on grid_config in TEOcc: z range [-1, 5.4] with 0.4 resolution = 16 depth levels
-        D = 16  # Depth levels from grid config
-        H, W = 200, 200  # BEV grid size
-        bev_feat = torch.randn(B, self.out_channels, D, H, W).to(x.device)
+        if self.downsample is not None:
+            identity = self.downsample(x)
         
-        return bev_feat, depth
+        out = out + identity
+        out = self.relu(out)
         
-    def get_depth_loss(self, gt_depth, pred_depth):
-        """Get depth loss."""
-        if pred_depth is None or gt_depth is None:
-            return torch.tensor(0.0, requires_grad=True).cuda() if torch.cuda.is_available() else torch.tensor(0.0, requires_grad=True)
-        
-        # Handle list input for gt_depth
-        if isinstance(gt_depth, list):
-            if len(gt_depth) == 0:
-                return torch.tensor(0.0, requires_grad=True, device=pred_depth.device)
-            gt_depth = gt_depth[0]  # Take first element if it's a list
-        
-        # Convert to tensor if not already
-        if not isinstance(gt_depth, torch.Tensor):
-            return torch.tensor(0.0, requires_grad=True, device=pred_depth.device)
-        
-        # Simple L1 loss between prediction and ground truth depth
-        # If dimensions don't match, use interpolation to match sizes
-        try:
-            if pred_depth.shape != gt_depth.shape:
-                # Interpolate pred_depth to match gt_depth dimensions
-                if len(gt_depth.shape) == 4:  # [B, C, H, W]
-                    pred_depth_resized = F.interpolate(pred_depth.view(-1, *pred_depth.shape[2:]), 
-                                                     size=(gt_depth.shape[2], gt_depth.shape[3]), 
-                                                     mode='bilinear', align_corners=False)
-                    pred_depth_resized = pred_depth_resized.view(pred_depth.shape[0], pred_depth.shape[1], 
-                                                               gt_depth.shape[2], gt_depth.shape[3])
-                else:
-                    pred_depth_resized = pred_depth
-            else:
-                pred_depth_resized = pred_depth
-            
-            # Calculate L1 loss with reduction
-            loss = F.l1_loss(pred_depth_resized, gt_depth, reduction='mean')
-            return loss * self.loss_depth_weight
-        except Exception as e:
-            # If any error occurs, return small regularization loss
-            return torch.mean(pred_depth) * 0.001
+        return out
 
 
 @MODELS.register_module()
 class CustomResNet3D(BaseModule):
-    """Custom 3D ResNet for BEV encoding."""
+    """Custom 3D ResNet for BEV encoding with BasicBlock structure."""
     
     def __init__(self, 
                  numC_input=32,
@@ -128,28 +77,41 @@ class CustomResNet3D(BaseModule):
         self.layers = nn.ModuleList()
         in_channels = numC_input
         
-        for i, (layers, channels, s) in enumerate(zip(num_layer, num_channels, stride)):
-            layer = nn.Sequential()
-            for j in range(layers):
-                layer.add_module(f'conv{j}', nn.Conv3d(
+        for i, (num_blocks, channels, s) in enumerate(zip(num_layer, num_channels, stride)):
+            blocks = nn.ModuleList()
+            for j in range(num_blocks):
+                downsample = None
+                # First block of each layer may need downsampling
+                if j == 0 and (in_channels != channels or s != 1):
+                    downsample = ConvModule(
+                        in_channels,
+                        channels,
+                        kernel_size=3,
+                        stride=s,
+                        padding=1,
+                        bias=False,
+                        conv_cfg=dict(type='Conv3d'),
+                        norm_cfg=dict(type='BN3d'),
+                        act_cfg=None
+                    )
+                
+                block = BasicBlock3D(
                     in_channels if j == 0 else channels,
                     channels,
-                    kernel_size=3,
                     stride=s if j == 0 else 1,
-                    padding=1,
-                    bias=False
-                ))
-                layer.add_module(f'bn{j}', nn.BatchNorm3d(channels))
-                layer.add_module(f'relu{j}', nn.ReLU(inplace=True))
-            
-            self.layers.append(layer)
+                    downsample=downsample
+                )
+                blocks.append(block)
+                
+            self.layers.append(blocks)
             in_channels = channels
             
     def forward(self, x):
         """Forward pass."""
         outputs = []
-        for i, layer in enumerate(self.layers):
-            x = layer(x)
+        for i, blocks in enumerate(self.layers):
+            for block in blocks:
+                x = block(x)
             if i in self.backbone_output_ids:
                 outputs.append(x)
         return outputs
@@ -159,20 +121,36 @@ class CustomResNet3D(BaseModule):
 class LSSFPN3D(BaseModule):
     """LSS FPN 3D for feature pyramid network."""
     
-    def __init__(self, in_channels=128, out_channels=32, **kwargs):
+    def __init__(self, in_channels, out_channels, with_cp=False, **kwargs):
         super().__init__(**kwargs)
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        
-        self.conv = nn.Sequential(
-            nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm3d(out_channels),
-            nn.ReLU(inplace=True)
-        )
-        
-    def forward(self, x):
-        """Forward pass."""
-        return self.conv(x)
+        self.up1 = nn.Upsample(
+            scale_factor=2, mode='trilinear', align_corners=True)
+        self.up2 = nn.Upsample(
+            scale_factor=4, mode='trilinear', align_corners=True)
+
+        self.conv = ConvModule(
+            in_channels,
+            out_channels,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=False,
+            conv_cfg=dict(type='Conv3d'),
+            norm_cfg=dict(type='BN3d'),
+            act_cfg=dict(type='ReLU', inplace=True))
+        self.with_cp = with_cp
+
+    def forward(self, feats):
+        """Forward pass with multi-scale features."""
+        x_8, x_16, x_32 = feats
+        x_16 = self.up1(x_16)
+        x_32 = self.up2(x_32)
+        x = torch.cat([x_8, x_16, x_32], dim=1)
+        if self.with_cp:
+            x = checkpoint(self.conv, x)
+        else:
+            x = self.conv(x)
+        return x
 
 
 def get_paddings_indicator(actual_num, max_num, axis=0):
@@ -333,31 +311,74 @@ class Injector(nn.Module):
 
 
 class SelfAttentionBlock(nn.Module):
-    def __init__(self, dim, num_heads=6, cffn_ratio=0.25, drop=0., drop_path=0.,
+    def __init__(self, dim, num_heads=6, n_points=4, n_levels=1, deform_ratio=1.0,
+                 with_cffn=True, cffn_ratio=0.25, drop=0., drop_path=0.,
                  norm_layer=partial(nn.LayerNorm, eps=1e-6), with_cp=False):
         super().__init__()
+        self.query_norm = norm_layer(dim)
+        self.attn = SparseSelfAttention(dim, num_heads, dropout=drop)
+        self.with_cffn = with_cffn
         self.with_cp = with_cp
-        self.norm1 = norm_layer(dim)
-        self.attn = CrossAttention(dim, num_heads, qkv_bias=False, attn_drop=drop, proj_drop=drop)
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-        self.norm2 = norm_layer(dim)
-        self.ffn = Mlp(in_features=dim, hidden_features=int(dim * cffn_ratio), act_layer=nn.GELU, drop=drop)
-        
+        if with_cffn:
+            self.ffn = Mlp(in_features=dim, hidden_features=int(dim * 2), act_layer=nn.GELU, drop=drop)
+            self.ffn_norm = norm_layer(dim)
+            self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+    
     def forward(self, feat, points):
-        def _inner_forward(feat):
-            feat = feat + self.drop_path(self.attn(self.norm1(feat), self.norm1(feat)))
-            feat = feat + self.drop_path(self.ffn(self.norm2(feat)))
+        def _inner_forward(feat, points):
+            identity = feat
+            feat = self.query_norm(feat)
+            feat = self.attn(points, feat)
+            feat = feat + identity
+            
+            feat = self.drop_path(self.ffn(self.ffn_norm(feat)))
             return feat
         
-        query = feat
+        query = _inner_forward(feat, points)
         
-        if self.with_cp and query.requires_grad:
-            import torch.utils.checkpoint as cp
-            query = cp.checkpoint(_inner_forward, query)
-        else:
-            query = _inner_forward(query)
-            
         return query
+
+
+class SparseSelfAttention(nn.Module):
+    def __init__(self, embed_dims=256, num_heads=8, dropout=0.1):
+        super().__init__()
+        from mmcv.cnn.bricks.transformer import MultiheadAttention
+        
+        self.attention = MultiheadAttention(embed_dims, num_heads, dropout, batch_first=True)
+        self.gen_tau = nn.Linear(embed_dims, num_heads)
+
+    @torch.no_grad()
+    def init_weights(self):
+        nn.init.zeros_(self.gen_tau.weight)
+        nn.init.uniform_(self.gen_tau.bias, 0.0, 2.0)
+
+    def inner_forward(self, query_bbox, query_feat, pre_attn_mask):
+        dist = self.calc_bbox_dists(query_bbox)
+        tau = self.gen_tau(query_feat)
+
+        tau = tau.permute(0, 2, 1)
+        attn_mask = dist[:, None, :, :] * tau[..., None]
+        if pre_attn_mask is not None:
+            attn_mask[:, :, pre_attn_mask] = float('-inf')
+        attn_mask = attn_mask.flatten(0, 1)
+        return self.attention(query_feat, attn_mask=attn_mask)
+
+    def forward(self, query_bbox, query_feat, pre_attn_mask=None):
+        return self.inner_forward(query_bbox, query_feat, pre_attn_mask)
+
+    @torch.no_grad()
+    def calc_bbox_dists(self, points):
+        centers = points[..., :2]
+
+        dist = []
+        for b in range(centers.shape[0]):
+            dist_b = torch.norm(centers[b].reshape(-1, 1, 2) - centers[b].reshape(1, -1, 2), dim=-1)
+            dist.append(dist_b[None, ...])
+
+        dist = torch.cat(dist, dim=0)
+        dist = -dist
+
+        return dist
 
 
 @MODELS.register_module()
@@ -441,33 +462,38 @@ class RadarEncoder(nn.Module):
         self.adapterblock = nn.ModuleList(adapterblock)
 
         linear_module = []
-        for i in range(1, len(feat_channels)):
+        for i in range(1, len(feat_channels)-1):
             linear_module.append(
-                nn.Sequential(
-                    nn.Linear(feat_channels[i], feat_channels[i]),
-                    nn.ReLU(inplace=True),
-                    nn.Linear(feat_channels[i], feat_channels[i])
-                )
+                nn.Linear(feat_channels[i], feat_channels[i+1])
             )
         self.linear_module = nn.ModuleList(linear_module)
+
+        self.out_linear = nn.Linear(feat_channels[-1]*2, feat_channels[-1])
 
         # Need pillar (voxel) size and x/y offset in order to calculate pillar offset
         self.vx = voxel_size[0]
         self.vy = voxel_size[1]
-        self.pc_range = point_cloud_range
         self.x_offset = self.vx / 2 + point_cloud_range[0]
         self.y_offset = self.vy / 2 + point_cloud_range[1]
-
-        # point embedding
-        embed_dim = feat_channels[-1]
-        self.point_embed = PointEmbed(in_channels + 2, embed_dim)
+        self.pc_range = point_cloud_range
 
         if with_pos_embed:
-            self.pos_embed = PointEmbed(3, embed_dim)
+            embed_dims = feat_channels[1]
+            self.pos_embed = nn.Sequential(
+                        nn.Linear(3, embed_dims), 
+                        nn.LayerNorm(embed_dims),
+                        nn.ReLU(inplace=True),
+                        nn.Linear(embed_dims, embed_dims),
+                        nn.LayerNorm(embed_dims),
+                        nn.ReLU(inplace=True),
+                    )
         self.with_pos_embed = with_pos_embed
+        
+        self.point_embed = PointEmbed(in_channels+2, feat_channels[1])
     
     def compress(self, x):
         x = x.max(dim=1)[0]
+        x = x.unsqueeze(dim=0)
         return x
 
     def forward(self, features, num_voxels, coors):
@@ -510,18 +536,59 @@ class RadarEncoder(nn.Module):
         points_coors = features[:, :, 0:3].detach()
         
         # Forward pass through PFNLayers
-        for i, rfn in enumerate(self.rfn_layers):
+        batch_size = coors[-1, 0] + 1
+        if batch_size>1:
+            bs_list = [0]
+            bs_info = coors[:, 0]
+            pre = bs_info[0]
+            for i in range(1, len(bs_info)):
+                if pre != bs_info[i]:
+                    bs_list.append(i)
+                    pre = bs_info[i]
+            bs_list.append(len(bs_info))
+            bs_list = [bs_list[i+1]-bs_list[i] for i in range(len(bs_list)-1)]
+        elif batch_size == 1:
+            bs_list = [len(coors[:, 0])]
+        else:
+            assert False
+
+        points_coors_split = torch.split(points_coors, bs_list)
+
+        i = 0
+        
+        for rfn in self.rfn_layers:
             x = rfn(x)
-
-            x = self.extractor[i](c, x)
+            x_split = torch.split(x, bs_list)
+            c_split = torch.split(c, bs_list)
             
-            c = self.injector[i](c, x)
-
-            c = self.adapterblock[i](c, points_coors)
-
-            c = c + self.linear_module[i](c)
-
-        return self.compress(x)
+            x_out_list = []
+            c_out_list = []
+            for bs in range(len(x_split)):
+                c_tmp = c_split[bs]
+                x_tmp = x_split[bs]
+                points_coors_tmp = points_coors_split[bs]
+                
+                c_tmp = c_tmp + self.extractor[i](self.compress(c_tmp), self.compress(x_tmp)).transpose(1, 0).expand_as(c_tmp)
+                x_tmp = x_tmp + self.injector[i](self.compress(x_tmp), self.compress(c_tmp)).transpose(1, 0).expand_as(x_tmp)
+                c_tmp = self.adapterblock[i](self.compress(c_tmp), self.compress(points_coors_tmp)).transpose(1, 0).expand_as(c_tmp)
+                if i < len(self.rfn_layers)-1:
+                    c_tmp = self.linear_module[i](c_tmp)
+                
+                c_out_list.append(c_tmp)
+                x_out_list.append(x_tmp)
+            
+            x = torch.cat(x_out_list, dim=0)
+            c = torch.cat(c_out_list, dim=0)
+            i += 1
+        
+        c = self.out_linear(torch.cat([c, x], dim=-1))
+        c = torch.max(c, dim=1, keepdim=True)[0]
+        
+        if not self.return_rcs:
+            return c.squeeze()
+        else:
+            rcs = (rcs_features*mask).sum(dim=1)/mask.sum(dim=1)
+            return c.squeeze(), rcs.squeeze()
 
 
 @MODELS.register_module()
@@ -542,23 +609,45 @@ class CustomFPN(BaseModule):
         self.start_level = start_level
         self.out_ids = out_ids
         
-        # Lateral convs
+        # Lateral convs (using ConvModule to match checkpoint structure)
         self.lateral_convs = nn.ModuleList()
         for i in range(len(in_channels)):
             self.lateral_convs.append(
-                nn.Conv2d(in_channels[i], out_channels, 1, bias=False)
+                ConvModule(
+                    in_channels[i],
+                    out_channels,
+                    1,
+                    conv_cfg=None,
+                    norm_cfg=None,
+                    act_cfg=None,
+                    inplace=False
+                )
             )
         
-        # FPN convs  
+        # FPN convs (using ConvModule to match checkpoint structure)
         self.fpn_convs = nn.ModuleList()
         for i in range(num_outs):
             self.fpn_convs.append(
-                nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False)
+                ConvModule(
+                    out_channels,
+                    out_channels,
+                    3,
+                    padding=1,
+                    conv_cfg=None,
+                    norm_cfg=None,
+                    act_cfg=None,
+                    inplace=False
+                )
             )
     
     def forward(self, inputs):
         """Forward pass."""
-        # Build laterals
+        # image_encoder already selects the correct features (backbone_feats[-2:])
+        # So inputs already contains the right features for lateral convs
+        # inputs[0]: 1024 channels
+        # inputs[1]: 2048 channels
+        
+        # Build laterals directly from inputs
         laterals = []
         for i, lateral_conv in enumerate(self.lateral_convs):
             laterals.append(lateral_conv(inputs[i]))

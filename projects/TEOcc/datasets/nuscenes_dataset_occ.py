@@ -136,12 +136,18 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
                             'cam_intrinsic': cam_data.get('cam_intrinsic', []),
                             'timestamp': cam_data.get('timestamp', 0),
                             'sensor2ego_rotation': cam_data.get('sensor2ego_rotation', []),
-                            'sensor2ego_translation': cam_data.get('sensor2ego_translation', [])
+                            'sensor2ego_translation': cam_data.get('sensor2ego_translation', []),
+                            'ego2global_rotation': cam_data.get('ego2global_rotation', []),
+                            'ego2global_translation': cam_data.get('ego2global_translation', [])
                         }
                 
                 # Ensure we have all fields needed by get_data_info method
                 if 'with_gt' not in data_info:
                     data_info['with_gt'] = True  # Default value
+                
+                # Add occ_path for ground truth loading
+                if 'occ_path' in info:
+                    data_info['occ_path'] = info['occ_path']
 
                 processed_data_list.append(data_info)
                 

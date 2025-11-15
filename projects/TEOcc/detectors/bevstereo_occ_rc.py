@@ -143,15 +143,14 @@ class BEVStereo4DOCCRC(BEVStereo4D):
         if radar_bev_neck is not None:
             self.radar_bev_neck = MODELS.build(radar_bev_neck)
 
-        # Match img feature channels and depth (imc=32, depth=4)
-        voxel_channel = imc  # 32 channels to match img_feats
-        self.radar_bev_to_voxel_conv = nn.Conv2d(rac, voxel_channel*4, kernel_size=1)
+        # voxel_channel = rac//2*5
+        voxel_channel = imc*2
+        self.radar_bev_to_voxel_conv = nn.Conv2d(rac, voxel_channel*16, kernel_size=1)
 
         if radar_reduc_conv:
-            # 3D concatenation: img (32 channels) + radar (96 channels) = 128 channels
-            # Keep 3D format for 3D convolutions
             self.reduc_conv = ConvModule(
-                    imc + rac//4,  # 32 + 384//4 = 32 + 96 = 128 channels
+                    voxel_channel + imc,
+                    # self.img_view_transformer.out_channels,  #rac change imc
                     imc,
                     kernel_size=3,
                     padding=1,
@@ -209,6 +208,13 @@ class BEVStereo4DOCCRC(BEVStereo4D):
         """
         voxels, coors, num_points = [], [], []
         for res in points:
+            # Skip empty or invalid radar data
+            if res is None:
+                continue
+            if isinstance(res, torch.Tensor):
+                if res.numel() == 0 or len(res.shape) < 2:
+                    continue
+            
             res_voxels, res_coors, res_num_points = self.radar_voxel_layer(res)
             voxels.append(res_voxels)
             coors.append(res_coors)
@@ -229,56 +235,23 @@ class BEVStereo4DOCCRC(BEVStereo4D):
         voxels, num_points, coors = self.radar_voxelize(radar)
 
         voxel_features = self.radar_voxel_encoder(voxels, num_points, coors)
-        batch_size = 1  # All voxels belong to single batch
+        batch_size = coors[-1, 0] + 1
         
         x_before = self.radar_middle_encoder(voxel_features, coors, batch_size)
 
-        x = self.radar_bev_backbone(x_before)
-        x = self.radar_bev_neck(x)
+        x = self.radar_bev_backbone(x_before) # [bs, 64, h/2, w/2]
+        
+        x = self.radar_bev_neck(x) # returns list of features
+        
+        x = torch.nn.functional.interpolate(x[0], scale_factor=2, mode='bilinear')
 
-        # Concatenate all FPN levels to get full 384 channels (128+128+128)
-        x = torch.cat(x, dim=1)  # Concatenate along channel dimension
-        x = torch.nn.functional.interpolate(x, scale_factor=2, mode='bilinear')
-
-        # For fusion, we need to convert 2D BEV (384 channels) to 3D voxel format
-        # but keep all 384 channels for proper fusion
-        bs, c, h, w = x.shape
-        
-        # Resize to match img BEV feature spatial size (50x50)
-        target_h, target_w = 50, 50
-        if h != target_h or w != target_w:
-            x = F.interpolate(x, size=(target_h, target_w), mode='bilinear', align_corners=False)
-        
-        # Convert to voxel format with depth=4 to match img_feats
-        # But preserve all 384 channels
-        target_depth = 4
-        # Expand to 3D: [bs, 384, 50, 50] -> [bs, 96, 4, 50, 50] (384/4=96)
-        x = x.view(bs, c//target_depth, target_depth, target_h, target_w)
-        
+        x = self.radar_bev_to_voxel(x)
         return [x], [x_before]
     
     def radar_bev_to_voxel(self, x):
-        # x now has 384 channels, convert to 128 channels (32*4)
         x = self.radar_bev_to_voxel_conv(x)
         bs, c, h, w = x.shape
-        
-        # Resize to match img BEV feature spatial size (50x50)
-        target_h, target_w = 50, 50
-        if h != target_h or w != target_w:
-            x = F.interpolate(x, size=(target_h, target_w), mode='bilinear', align_corners=False)
-            h, w = target_h, target_w
-        
-        # Reshape to add depth dimension matching img_feats (depth=4)
-        target_depth = 4  # To match img_feats depth dimension
-        voxel_channels = c // target_depth  # 128 // 4 = 32 channels
-        x = x.reshape(bs, voxel_channels, target_depth, h, w)
-        
-        # Return full feature without reducing to match rac=384
-        # We need to return the full 384 channels, not just 32
-        # So expand back to match rac channels
-        x = x.view(bs, -1, h, w)  # Flatten spatial and depth dims: [bs, 32*4*50*50]
-        x = x.view(bs, voxel_channels, target_depth, h, w)  # Restore 3D structure
-        
+        x = x.reshape(bs, c//16, 16, h, w)
         return x
 
     def loss_single(self, voxel_semantics, mask_camera, preds):
@@ -353,7 +326,8 @@ class BEVStereo4DOCCRC(BEVStereo4D):
             inputs = kwargs
         else:
             # Merge kwargs into inputs
-            inputs.update(kwargs)
+            if isinstance(inputs, dict):
+                inputs.update(kwargs)
         
         if mode == 'loss':
             return self.loss(inputs, data_samples)
@@ -414,24 +388,47 @@ class BEVStereo4DOCCRC(BEVStereo4D):
 
     def predict(self, inputs, data_samples):
         """Predict from inputs and data samples."""
-        # For prediction, we can use forward_test if available, or simple_test
-        img_inputs = inputs.get('img_inputs', None)
-        points = inputs.get('points', None)
-        radar = inputs.get('radar', None)
+        if isinstance(inputs, dict):
+            img_inputs = inputs.get('img_inputs', None)
+            points = inputs.get('points', None)
+            radar = inputs.get('radar', None)
+            
+            # Check for 'inputs' key (mmengine might wrap the data)
+            if img_inputs is None and 'inputs' in inputs:
+                inner_inputs = inputs['inputs']
+                if isinstance(inner_inputs, dict):
+                    img_inputs = inner_inputs.get('img_inputs', None)
+                    points = inner_inputs.get('points', None)
+                    radar = inner_inputs.get('radar', None)
+            
+            kwargs = {k: v for k, v in inputs.items() if k not in ['img_inputs', 'points', 'radar', 'inputs']}
+        else:
+            img_inputs = None
+            points = None
+            radar = None
+            kwargs = {}
         
         img_metas = []
         if data_samples is not None:
-            for sample in data_samples:
-                if hasattr(sample, 'metainfo'):
-                    img_metas.append(sample.metainfo)
+            # Check if data_samples is a dict with 'metainfo' key
+            if isinstance(data_samples, dict):
+                metainfo = data_samples.get('metainfo', {})
+                if metainfo:
+                    img_metas.append(metainfo)
+            elif isinstance(data_samples, (list, tuple)):
+                for sample in data_samples:
+                    if hasattr(sample, 'metainfo'):
+                        img_metas.append(sample.metainfo)
+                    elif isinstance(sample, dict) and 'metainfo' in sample:
+                        img_metas.append(sample['metainfo'])
         
-        # Use simple_test method
+        # Use simple_test method - it requires points and img_metas as positional args
         return self.simple_test(
-            points=points,
-            img_metas=img_metas if img_metas else None,
-            img_inputs=img_inputs,
+            points,
+            img_metas if img_metas else None,
+            img=img_inputs,
             radar=radar,
-            **inputs
+            **kwargs
         )
 
     def _forward(self, inputs, data_samples=None):
@@ -525,8 +522,77 @@ class BEVStereo4DOCCRC(BEVStereo4D):
 
     def extract_feat(self, points, img, img_metas, radar, **kwargs):
         """Extract features from images and points."""
-        # Convert img to tensor if it's a list/tuple of tensors
-        if img is not None and isinstance(img, (list, tuple)) and len(img) > 0:
+        # Convert img_inputs tuple to list format expected by prepare_inputs
+        # img_inputs from PrepareImageInputs: (imgs, intrins, post_rots, post_trans, sensor2egos, ego2globals)
+        if img is None:
+            raise ValueError("img cannot be None")
+        
+        # Handle radar data - convert RadarPoints objects to tensors if needed
+        if radar is not None:
+            if isinstance(radar, (list, tuple)):
+                processed_radar = []
+                for r in radar:
+                    if hasattr(r, 'tensor'):
+                        # RadarPoints object
+                        processed_radar.append(r.tensor)
+                    elif isinstance(r, torch.Tensor):
+                        processed_radar.append(r)
+                radar = processed_radar
+            elif hasattr(radar, 'tensor'):
+                # Single RadarPoints object
+                radar = [radar.tensor]
+            elif isinstance(radar, torch.Tensor):
+                radar = [radar]
+        
+        # Handle case where img is a list of tuples (each containing a tensor)
+        # This happens when data comes from Collect3D
+        if isinstance(img, (list, tuple)) and len(img) == 6:
+            # Check if elements are wrapped in tuples
+            if isinstance(img[0], (tuple, list)) and len(img[0]) > 0 and isinstance(img[0][0], torch.Tensor):
+                # Extract tensors from tuples
+                img = tuple(item[0] if isinstance(item, (tuple, list)) else item for item in img)
+        
+        if isinstance(img, tuple) and len(img) == 6:
+            imgs, intrins, post_rots, post_trans, sensor2egos, ego2globals = img
+            
+            # Check if any is None
+            if imgs is None:
+                raise ValueError("imgs cannot be None")
+            
+            # Add batch dimension if needed: [N, C, H, W] -> [B, N, C, H, W]
+            if len(imgs.shape) == 4:
+                imgs = imgs.unsqueeze(0)
+            if len(intrins.shape) == 3:
+                intrins = intrins.unsqueeze(0)
+            if len(post_rots.shape) == 3:
+                post_rots = post_rots.unsqueeze(0)
+            if len(post_trans.shape) == 2:
+                post_trans = post_trans.unsqueeze(0)
+            if len(sensor2egos.shape) == 3:
+                sensor2egos = sensor2egos.unsqueeze(0)
+            if len(ego2globals.shape) == 3:
+                ego2globals = ego2globals.unsqueeze(0)
+            
+            # Replicate single frame to multiple frames if needed
+            # Expected shape: [B, N*num_frame, C, H, W] where N is number of cameras
+            B, N, C, H, W = imgs.shape
+            
+            if N < 6 * self.num_frame:
+                # Assume N is the number of cameras (6) for a single frame
+                # Replicate to num_frame frames
+                imgs = imgs.repeat(1, self.num_frame, 1, 1, 1)
+                intrins = intrins.repeat(1, self.num_frame, 1, 1)
+                post_rots = post_rots.repeat(1, self.num_frame, 1, 1)
+                post_trans = post_trans.repeat(1, self.num_frame, 1)
+                sensor2egos = sensor2egos.repeat(1, self.num_frame, 1, 1)
+                ego2globals = ego2globals.repeat(1, self.num_frame, 1, 1)
+            
+            # Add bda (identity matrix for now)
+            bda = torch.eye(3).to(imgs.device)
+            
+            # Reorder to match original BEVDet format: [imgs, sensor2egos, ego2globals, intrins, post_rots, post_trans, bda]
+            img = [imgs, sensor2egos, ego2globals, intrins, post_rots, post_trans, bda]
+        elif isinstance(img, (list, tuple)) and len(img) > 0:
             # Check if elements are tuples containing tensors
             if isinstance(img[0], (tuple, list)) and len(img[0]) > 0 and isinstance(img[0][0], torch.Tensor):
                 # Take the first tensor from each tuple (should be the image tensor)
@@ -548,14 +614,6 @@ class BEVStereo4DOCCRC(BEVStereo4D):
     def loss(self, batch_inputs, batch_data_samples, **kwargs):
         """Calculate losses from a batch of inputs and data samples."""
         return self.forward_train(**batch_inputs, **kwargs)
-
-    def predict(self, batch_inputs, batch_data_samples, **kwargs):
-        """Predict results from a batch of inputs and data samples."""
-        return self.simple_test(**batch_inputs, **kwargs)
-
-    def _forward(self, batch_inputs, batch_data_samples=None, **kwargs):
-        """Network forward process. Usually includes backbone, neck and head forward without any post-processing."""
-        return self.extract_feat(**batch_inputs, **kwargs)
 
     def extract_img_feat(self,
                          img,

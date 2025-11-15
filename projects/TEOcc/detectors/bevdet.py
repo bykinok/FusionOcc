@@ -31,24 +31,6 @@ class BEVStereo4D(Base3DDetector):
                       if k in ['data_preprocessor', 'init_cfg']}
         super().__init__(**base_kwargs)
         
-        # Store configurations for lazy building
-        self.img_backbone_cfg = img_backbone
-        self.img_neck_cfg = img_neck
-        self.img_view_transformer_cfg = img_view_transformer
-        self.img_bev_encoder_backbone_cfg = img_bev_encoder_backbone
-        self.img_bev_encoder_neck_cfg = img_bev_encoder_neck
-        self.pre_process_cfg = pre_process
-        
-        # Initialize components as None - will be built when needed
-        self._img_backbone = None
-        self._img_neck = None
-        self._img_view_transformer = None
-        self._img_bev_encoder_backbone = None
-        self._img_bev_encoder_neck = None
-        self._pre_process_net = None
-        
-        self.pre_process = pre_process is not None
-            
         # Set num_frame based on num_adj if provided, otherwise use default
         if num_adj is not None:
             self.num_frame = num_adj + 1  # num_adj adjacent frames + 1 current frame
@@ -56,93 +38,53 @@ class BEVStereo4D(Base3DDetector):
             self.num_frame = num_frame
         
         self.extra_ref_frames = extra_ref_frames
-        self.temporal_frame = self.num_frame
-        # Don't add extra_ref_frames again since it's already included in the calculation
+        self.temporal_frame = self.num_frame - self.extra_ref_frames
+        # temporal_frame is the number of frames used for temporal processing
+        # num_frame = temporal_frame + extra_ref_frames
         self.align_after_view_transfromation = align_after_view_transfromation
         self.freeze_img = freeze_img
         self.with_prev = self.num_frame > 1
         
-        # Properties for compatibility
+        # Build modules directly in __init__ to avoid lazy loading prefix issues
         self.with_img_backbone = img_backbone is not None
         self.with_img_neck = img_neck is not None
+        self.pre_process = pre_process is not None
+        
+        # Build modules immediately
+        if img_backbone is not None:
+            self.img_backbone = MODELS.build(img_backbone)
+        else:
+            self.img_backbone = None
+            
+        if img_neck is not None:
+            self.img_neck = MODELS.build(img_neck)
+        else:
+            self.img_neck = None
+            
+        if img_view_transformer is not None:
+            self.img_view_transformer = MODELS.build(img_view_transformer)
+        else:
+            self.img_view_transformer = None
+            
+        if img_bev_encoder_backbone is not None:
+            self.img_bev_encoder_backbone = MODELS.build(img_bev_encoder_backbone)
+        else:
+            self.img_bev_encoder_backbone = None
+            
+        if img_bev_encoder_neck is not None:
+            self.img_bev_encoder_neck = MODELS.build(img_bev_encoder_neck)
+        else:
+            self.img_bev_encoder_neck = None
+            
+        if pre_process is not None:
+            self.pre_process_net = MODELS.build(pre_process)
+        else:
+            self.pre_process_net = None
 
-    @property
-    def img_backbone(self):
-        """Lazy loading for img_backbone."""
-        if self._img_backbone is None and self.img_backbone_cfg is not None:
-            self._img_backbone = MODELS.build(self.img_backbone_cfg)
-            # Ensure the module is on the same device as this model
-            if hasattr(self, '_device'):
-                self._img_backbone = self._img_backbone.to(self._device)
-            elif next(self.parameters(), None) is not None:
-                device = next(self.parameters()).device
-                self._img_backbone = self._img_backbone.to(device)
-        return self._img_backbone
-    
-    @property
-    def img_neck(self):
-        """Lazy loading for img_neck."""
-        if self._img_neck is None and self.img_neck_cfg is not None:
-            self._img_neck = MODELS.build(self.img_neck_cfg)
-            # Ensure the module is on the same device as this model
-            if hasattr(self, '_device'):
-                self._img_neck = self._img_neck.to(self._device)
-            elif next(self.parameters(), None) is not None:
-                device = next(self.parameters()).device
-                self._img_neck = self._img_neck.to(device)
-        return self._img_neck
-    
-    @property
-    def img_view_transformer(self):
-        """Lazy loading for img_view_transformer."""
-        if self._img_view_transformer is None and self.img_view_transformer_cfg is not None:
-            self._img_view_transformer = MODELS.build(self.img_view_transformer_cfg)
-            # Ensure the module is on the same device as this model
-            if hasattr(self, '_device'):
-                self._img_view_transformer = self._img_view_transformer.to(self._device)
-            elif next(self.parameters(), None) is not None:
-                device = next(self.parameters()).device
-                self._img_view_transformer = self._img_view_transformer.to(device)
-        return self._img_view_transformer
-    
-    @property
-    def img_bev_encoder_backbone(self):
-        """Lazy loading for img_bev_encoder_backbone."""
-        if self._img_bev_encoder_backbone is None and self.img_bev_encoder_backbone_cfg is not None:
-            self._img_bev_encoder_backbone = MODELS.build(self.img_bev_encoder_backbone_cfg)
-            # Ensure the module is on the same device as this model
-            if hasattr(self, '_device'):
-                self._img_bev_encoder_backbone = self._img_bev_encoder_backbone.to(self._device)
-            elif next(self.parameters(), None) is not None:
-                device = next(self.parameters()).device
-                self._img_bev_encoder_backbone = self._img_bev_encoder_backbone.to(device)
-        return self._img_bev_encoder_backbone
-    
-    @property
-    def img_bev_encoder_neck(self):
-        """Lazy loading for img_bev_encoder_neck."""
-        if self._img_bev_encoder_neck is None and self.img_bev_encoder_neck_cfg is not None:
-            self._img_bev_encoder_neck = MODELS.build(self.img_bev_encoder_neck_cfg)
-            # Ensure the module is on the same device as this model
-            if hasattr(self, '_device'):
-                self._img_bev_encoder_neck = self._img_bev_encoder_neck.to(self._device)
-            elif next(self.parameters(), None) is not None:
-                device = next(self.parameters()).device
-                self._img_bev_encoder_neck = self._img_bev_encoder_neck.to(device)
-        return self._img_bev_encoder_neck
-    
-    @property
-    def pre_process_net(self):
-        """Lazy loading for pre_process_net."""
-        if self._pre_process_net is None and self.pre_process_cfg is not None:
-            self._pre_process_net = MODELS.build(self.pre_process_cfg)
-            # Ensure the module is on the same device as this model
-            if hasattr(self, '_device'):
-                self._pre_process_net = self._pre_process_net.to(self._device)
-            elif next(self.parameters(), None) is not None:
-                device = next(self.parameters()).device
-                self._pre_process_net = self._pre_process_net.to(device)
-        return self._pre_process_net
+
+    def init_weights(self):
+        """Initialize weights."""
+        super().init_weights()
 
     def image_encoder(self, img, stereo=False):
         """Encode image features."""
@@ -239,22 +181,63 @@ class BEVStereo4D(Base3DDetector):
             
         return bev_feat, depth, stereo_feat
 
-    def prepare_inputs(self, img, stereo=False):
-        """Prepare inputs for processing."""
-        # This is a simplified version - would need full implementation
-        # based on original BEVDet prepare_inputs method
-        B, N, _, H, W = img.shape
+    def prepare_inputs(self, inputs, stereo=False):
+        """Prepare inputs for processing.
         
-        # Create inputs for self.num_frame frames (duplicating current frame if needed)
-        imgs = [img for _ in range(self.num_frame)]
-        sensor2keyegos = [torch.eye(4).unsqueeze(0).repeat(B, N, 1, 1) for _ in range(self.num_frame)]
-        ego2globals = [torch.eye(4).unsqueeze(0).repeat(B, N, 1, 1) for _ in range(self.num_frame)]
-        intrins = [torch.eye(3).unsqueeze(0).repeat(B, N, 1, 1) for _ in range(self.num_frame)]
-        post_rots = [torch.eye(2).unsqueeze(0).repeat(B, N, 1, 1) for _ in range(self.num_frame)]
-        post_trans = [torch.zeros(B, N, 2) for _ in range(self.num_frame)]
-        bda = torch.eye(3)
-        curr2adjsensor = [torch.eye(4).unsqueeze(0).repeat(B, N, 1, 1) for _ in range(self.num_frame)]
-        
+        Args:
+            inputs (list): List of [imgs, sensor2egos, ego2globals, intrins, post_rots, post_trans, bda]
+            stereo (bool): Whether to prepare stereo matching inputs
+            
+        Returns:
+            tuple: Prepared inputs for multiple frames
+        """
+        # Extract inputs
+        B, N, C, H, W = inputs[0].shape
+        N = N // self.num_frame
+        imgs = inputs[0].view(B, N, self.num_frame, C, H, W)
+        imgs = torch.split(imgs, 1, 2)
+        imgs = [t.squeeze(2) for t in imgs]
+        sensor2egos, ego2globals, intrins, post_rots, post_trans, bda = inputs[1:7]
+
+        sensor2egos = sensor2egos.view(B, self.num_frame, N, 4, 4)
+        ego2globals = ego2globals.view(B, self.num_frame, N, 4, 4)
+
+        # calculate the transformation from sweep sensor to key ego
+        keyego2global = ego2globals[:, 0, 0, ...].unsqueeze(1).unsqueeze(1)
+        global2keyego = torch.inverse(keyego2global.double())
+        sensor2keyegos = global2keyego @ ego2globals.double() @ sensor2egos.double()
+        sensor2keyegos = sensor2keyegos.float()
+
+        curr2adjsensor = None
+        if stereo:
+            sensor2egos_cv, ego2globals_cv = sensor2egos, ego2globals
+            sensor2egos_curr = \
+                sensor2egos_cv[:, :self.temporal_frame, ...].double()
+            ego2globals_curr = \
+                ego2globals_cv[:, :self.temporal_frame, ...].double()
+            sensor2egos_adj = \
+                sensor2egos_cv[:, 1:self.temporal_frame + 1, ...].double()
+            ego2globals_adj = \
+                ego2globals_cv[:, 1:self.temporal_frame + 1, ...].double()
+            curr2adjsensor = \
+                torch.inverse(ego2globals_adj @ sensor2egos_adj) \
+                @ ego2globals_curr @ sensor2egos_curr
+            curr2adjsensor = curr2adjsensor.float()
+            curr2adjsensor = torch.split(curr2adjsensor, 1, 1)
+            curr2adjsensor = [p.squeeze(1) for p in curr2adjsensor]
+            curr2adjsensor.extend([None for _ in range(self.extra_ref_frames)])
+            assert len(curr2adjsensor) == self.num_frame
+
+        extra = [
+            sensor2keyegos,
+            ego2globals,
+            intrins.view(B, self.num_frame, N, 3, 3),
+            post_rots.view(B, self.num_frame, N, 3, 3),
+            post_trans.view(B, self.num_frame, N, 3)
+        ]
+        extra = [torch.split(t, 1, 1) for t in extra]
+        extra = [[p.squeeze(1) for p in t] for t in extra]
+        sensor2keyegos, ego2globals, intrins, post_rots, post_trans = extra
         return imgs, sensor2keyegos, ego2globals, intrins, post_rots, post_trans, bda, curr2adjsensor
 
     def shift_feature(self, input, trans, noise):
@@ -265,11 +248,11 @@ class BEVStereo4D(Base3DDetector):
     def bev_encoder(self, x):
         """Encode BEV features."""
         x = self.img_bev_encoder_backbone(x)
-        # CustomResNet3D returns a list of features, take the last one (highest level)
-        if isinstance(x, list):
-            x = x[-1]
+        # CustomResNet3D returns a list of features
+        # LSSFPN3D expects a list of 3 features, so pass the list directly
         if self.img_bev_encoder_neck:
             x = self.img_bev_encoder_neck(x)
+        # After neck, x should be a single feature tensor
         return x
 
     def extract_feat(self, points, img, img_metas, **kwargs):
