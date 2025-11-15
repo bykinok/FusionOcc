@@ -142,11 +142,11 @@ pretrain
 BEVFormer_ori/
 CONet_ori/
 FusionOcc_ori/
-RadarOcc_ori/
 STCOcc_ori/
 SurroundOcc_ori/
 TEOcc_ori/
 TPVFormer_ori/
+Ref/
 
 # debug
 debug_outputs

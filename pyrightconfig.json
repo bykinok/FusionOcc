@@ -1,0 +1,23 @@
+{
+    "exclude": [
+        "data",
+        "mmdet3d.egg-info",
+        ".git",
+        "configs",
+        "**/__pycache__",
+        "**/*.pyc",
+        "**/*.pkl",
+        "**/*.bin",
+        "**/*.npy",
+        "**/*.npz"
+    ],
+    "include": [
+        "mmdet3d",
+        "tools",
+        "setup.py",
+        "requirements.txt"
+    ],
+    "venvPath": ".",
+    "pythonVersion": "3.10",
+    "typeCheckingMode": "basic"
+} 
