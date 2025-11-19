@@ -51,6 +51,11 @@ class OccupancyMetric(BaseMetric):
                     self.data_infos = data
                 else:
                     print(f"Warning: Unknown data format in {ann_file}")
+            
+            # Dataset과 동일하게 timestamp 기준으로 정렬
+            if self.data_infos:
+                self.data_infos = list(sorted(self.data_infos, key=lambda e: e.get('timestamp', 0)))
+            
             print(f"Loaded {len(self.data_infos) if self.data_infos else 0} data_infos")
         
         # Initialize metric calculator
@@ -70,20 +75,25 @@ class OccupancyMetric(BaseMetric):
             data_batch (dict): A batch of data from the dataloader.
             data_samples (Sequence[dict]): A batch of outputs from the model.
         """
-        # data_samples is the output from predict(), which returns [occ_res]
-        # Each sample should be a numpy array of shape [W, H, D] with occupancy labels
-        
-        for i, pred in enumerate(data_samples):
-            # pred is the occupancy prediction (numpy array)
-            if isinstance(pred, np.ndarray):
-                semantics_pred = pred
+        # data_samples는 simple_test의 반환값 [occ_res]가 배치로 묶인 형태
+        # 원본 코드처럼 각 occ_pred를 직접 처리
+        for pred in data_samples:
+            # pred는 [occ_res] 형태의 리스트이거나 occ_res 자체일 수 있음
+            if isinstance(pred, list) and len(pred) > 0:
+                # 리스트인 경우 첫 번째 요소 사용 (simple_test가 [occ_res] 반환)
+                occ_pred = pred[0] if isinstance(pred[0], np.ndarray) else pred
+            elif isinstance(pred, np.ndarray):
+                occ_pred = pred
             else:
                 continue
             
+            # 원본 코드와 동일하게 numpy array인지 확인
+            if not isinstance(occ_pred, np.ndarray):
+                continue
+            
             # Store prediction with current sample index
-            # Ground truth will be loaded in compute_metrics using dataset
             result = {
-                'semantics_pred': semantics_pred,
+                'semantics_pred': occ_pred,
                 'sample_idx': self.sample_idx
             }
             
@@ -106,6 +116,8 @@ class OccupancyMetric(BaseMetric):
         print('\nStarting Evaluation...')
         print(f"Evaluating {len(results)} predictions against ground truth...")
         
+        breakpoint()
+
         # Process all results
         loaded_count = 0
         for idx, result in enumerate(results):
@@ -123,16 +135,22 @@ class OccupancyMetric(BaseMetric):
                     info = self.data_infos[sample_idx]
                     occ_path = info.get('occ_path', None)
                     
-                    if occ_path and os.path.exists(os.path.join(occ_path, 'labels.npz')):
-                        # Load ground truth - following original code exactly
-                        occ_gt = np.load(os.path.join(occ_path, 'labels.npz'))
-                        semantics_gt = occ_gt['semantics']
-                        mask_lidar = occ_gt['mask_lidar'].astype(bool)
-                        mask_camera = occ_gt['mask_camera'].astype(bool)
-                        loaded_count += 1
+                    # 원본 코드와 동일하게 경로 처리
+                    if occ_path:
+                        # 원본 코드와 정확히 동일: os.path.join(info['occ_path'], 'labels.npz')
+                        labels_path = os.path.join(occ_path, 'labels.npz')
+                        if os.path.exists(labels_path):
+                            occ_gt = np.load(labels_path)
+                            semantics_gt = occ_gt['semantics']
+                            mask_lidar = occ_gt['mask_lidar'].astype(bool)
+                            mask_camera = occ_gt['mask_camera'].astype(bool)
+                            loaded_count += 1
+                        else:
+                            if idx < 3:
+                                print(f"Warning: labels.npz not found at {labels_path}")
                     else:
-                        if idx < 3:  # Only print first few warnings
-                            print(f"Warning: occ_path not found for sample {sample_idx}: {occ_path}")
+                        if idx < 3:
+                            print(f"Warning: occ_path not found for sample {sample_idx}")
             except Exception as e:
                 if idx < 3:  # Only print first few errors
                     print(f"Warning: Failed to load ground truth for sample {sample_idx}: {e}")

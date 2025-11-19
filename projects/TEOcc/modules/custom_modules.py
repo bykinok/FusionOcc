@@ -41,18 +41,16 @@ class BasicBlock3D(nn.Module):
         self.relu = nn.ReLU(inplace=True)
     
     def forward(self, x):
-        identity = x
-        
-        out = self.conv1(x)
-        out = self.conv2(out)
-        
+        # 원본 모델과 동일한 순서: downsample을 먼저 확인
         if self.downsample is not None:
             identity = self.downsample(x)
+        else:
+            identity = x
         
-        out = out + identity
-        out = self.relu(out)
-        
-        return out
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = x + identity
+        return self.relu(x)
 
 
 @MODELS.register_module()
@@ -73,48 +71,52 @@ class CustomResNet3D(BaseModule):
         self.stride = stride
         self.backbone_output_ids = backbone_output_ids
         
-        # Build layers
-        self.layers = nn.ModuleList()
-        in_channels = numC_input
+        # 원본 모델과 동일하게: nn.Sequential 사용
+        layers = []
+        curr_numC = numC_input
         
-        for i, (num_blocks, channels, s) in enumerate(zip(num_layer, num_channels, stride)):
-            blocks = nn.ModuleList()
-            for j in range(num_blocks):
-                downsample = None
-                # First block of each layer may need downsampling
-                if j == 0 and (in_channels != channels or s != 1):
-                    downsample = ConvModule(
-                        in_channels,
-                        channels,
+        for i in range(len(num_layer)):
+            layer = [
+                BasicBlock3D(
+                    curr_numC,
+                    num_channels[i],
+                    stride=stride[i],
+                    downsample=ConvModule(
+                        curr_numC,
+                        num_channels[i],
                         kernel_size=3,
-                        stride=s,
+                        stride=stride[i],
                         padding=1,
                         bias=False,
                         conv_cfg=dict(type='Conv3d'),
                         norm_cfg=dict(type='BN3d'),
                         act_cfg=None
                     )
-                
-                block = BasicBlock3D(
-                    in_channels if j == 0 else channels,
-                    channels,
-                    stride=s if j == 0 else 1,
-                    downsample=downsample
                 )
-                blocks.append(block)
-                
-            self.layers.append(blocks)
-            in_channels = channels
+            ]
+            curr_numC = num_channels[i]
+            layer.extend([
+                BasicBlock3D(curr_numC, curr_numC)
+                for _ in range(num_layer[i] - 1)
+            ])
+            layers.append(nn.Sequential(*layer))
+        
+        self.layers = nn.Sequential(*layers)
+        self.with_cp = with_cp
             
     def forward(self, x):
         """Forward pass."""
-        outputs = []
-        for i, blocks in enumerate(self.layers):
-            for block in blocks:
-                x = block(x)
-            if i in self.backbone_output_ids:
-                outputs.append(x)
-        return outputs
+        feats = []
+        x_tmp = x
+        for lid, layer in enumerate(self.layers):
+            if self.with_cp:
+                from torch.utils.checkpoint import checkpoint
+                x_tmp = checkpoint(layer, x_tmp)
+            else:
+                x_tmp = layer(x_tmp)
+            if lid in self.backbone_output_ids:
+                feats.append(x_tmp)
+        return feats
 
 
 @MODELS.register_module()
@@ -274,7 +276,9 @@ class Extractor(nn.Module):
             attn = self.attn(self.query_norm(query), self.feat_norm(feat))
             query = query + attn
             
-            query = query + self.drop_path(self.ffn(self.ffn_norm(query)))
+            # if self.with_cffn:
+                # query = query + self.drop_path(self.ffn(self.ffn_norm(query)))
+            query = self.drop_path(self.ffn(self.ffn_norm(query)))
             return query
         
         if self.with_cp and query.requires_grad:
@@ -298,16 +302,17 @@ class Injector(nn.Module):
         
     def forward(self, query, feat):
         def _inner_forward(query, feat):
-            feat = feat + self.gamma * self.attn(self.feat_norm(feat), self.query_norm(query))
-            return feat
+            attn = self.attn(self.query_norm(query), self.feat_norm(feat))
+            # return query + self.gamma * attn
+            return self.gamma * attn
         
-        if self.with_cp and feat.requires_grad:
+        if self.with_cp and query.requires_grad:
             import torch.utils.checkpoint as cp
-            feat = cp.checkpoint(_inner_forward, query, feat)
+            query = cp.checkpoint(_inner_forward, query, feat)
         else:
-            feat = _inner_forward(query, feat)
-            
-        return feat
+            query = _inner_forward(query, feat)
+        
+        return query
 
 
 class SelfAttentionBlock(nn.Module):

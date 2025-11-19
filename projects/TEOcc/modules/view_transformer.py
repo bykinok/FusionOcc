@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from mmcv.cnn import build_conv_layer
 from mmengine.model import BaseModule
-from torch.amp import autocast
+from torch.cuda.amp.autocast_mode import autocast
 from torch.utils.checkpoint import checkpoint
 
 
@@ -684,14 +684,14 @@ class DepthAggregation(nn.Module):
             # nn.ReLU(inplace=True),
         )
 
+    @autocast(False)
     def forward(self, x):
-        with autocast('cuda', enabled=False):
-            x = checkpoint(self.reduce_conv, x)
-            short_cut = x
-            x = checkpoint(self.conv, x)
-            x = short_cut + x
-            x = self.out_conv(x)
-            return x
+        x = checkpoint(self.reduce_conv, x)
+        short_cut = x
+        x = checkpoint(self.conv, x)
+        x = short_cut + x
+        x = self.out_conv(x)
+        return x
 
 
 @MODELS.register_module()

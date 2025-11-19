@@ -81,14 +81,18 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
                 hop_load_all=False,
                 classes=None,
                 stereo=None,
+                img_info_prototype='bevdet4d',  # 추가
+                multi_adj_frame_id_cfg=None,    # 추가
                 **kwargs):
         # Remove incompatible parameters from kwargs for BaseDataset compatibility
-        for param in ['classes', 'stereo', 'img_info_prototype', 'load_adj_occ_labels', 
-                      'use_valid_flag', 'filter_empty_gt', 'multi_adj_frame_id_cfg', 'modality']:
+        for param in ['classes', 'stereo', 'load_adj_occ_labels', 
+                      'use_valid_flag', 'filter_empty_gt', 'modality']:  # img_info_prototype, multi_adj_frame_id_cfg 제거
             if param in kwargs:
                 kwargs.pop(param)
         self.CLASSES = classes
         self.stereo = stereo
+        self.img_info_prototype = img_info_prototype  # 추가
+        self.multi_adj_frame_id_cfg = multi_adj_frame_id_cfg  # 추가
         super().__init__(**kwargs)
         self.use_rays = use_rays
         self.semantic_gt_path = semantic_gt_path
@@ -115,6 +119,9 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         if isinstance(data, dict) and 'infos' in data:
             # Convert old format to new format
             data_list = data['infos']
+
+            data_list = list(sorted(data_list, key=lambda e: e['timestamp']))
+
             # Store metadata separately instead of setting metainfo directly
             self._metadata = data.get('metadata', {})
             
@@ -253,6 +260,10 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         # Convert to the expected format
         input_dict = dict(data_item)  # Copy all original fields
         
+        # 원본 모델과 동일하게: radar 정보 추가
+        if 'radars' in data_item:
+            input_dict['radar'] = data_item['radars']
+        
         # Map LiDAR information for LoadPointsFromFile compatibility
         if 'lidar_path' in data_item:
             input_dict['lidar_points'] = {
@@ -274,6 +285,13 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
             input_dict['ann_info']['gt_bboxes_3d'] = []
         if 'occ_path' in data_item:
             input_dict['occ_gt_path'] = data_item['occ_path']
+            
+        # Adjacent frames 로딩 추가 (원본 모델과 동일)
+        if hasattr(self, 'img_info_prototype') and 'bevdet' in self.img_info_prototype:
+            input_dict.update(dict(curr=data_item))
+            if '4d' in self.img_info_prototype and self.multi_adj_frame_id_cfg is not None:
+                info_adj_list = self.get_adj_info(data_item, index)
+                input_dict.update(dict(adjacent=info_adj_list))
             
         if self.hop_load_all:    
             adj_occ_path_list=[]
@@ -349,3 +367,22 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
             adj_occ_gt_path.append(occ_gt_path)
         
         return adj_occ_gt_path
+
+    def get_adj_info(self, info, index):
+        """Get adjacent frame information."""
+        info_adj_list = []
+        adj_id_list = list(range(*self.multi_adj_frame_id_cfg))
+        if self.stereo:
+            assert self.multi_adj_frame_id_cfg[0] == 1
+            assert self.multi_adj_frame_id_cfg[2] == 1
+            adj_id_list.append(self.multi_adj_frame_id_cfg[1])
+        
+        for select_id in adj_id_list:
+            select_id = max(index - select_id, 0)
+            if index >= len(self.data_list):
+                info_adj_list.append(info)
+            elif not self.data_list[select_id].get('scene_token') == info.get('scene_token'):
+                info_adj_list.append(info)
+            else:
+                info_adj_list.append(self.data_list[select_id])
+        return info_adj_list

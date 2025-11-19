@@ -92,7 +92,7 @@ model = dict(
         downsample=16),
     img_bev_encoder_backbone=dict(
         type='CustomResNet3D',
-        numC_input=numC_Trans * len(range(*multi_adj_frame_id_cfg)),  # 32 * 8 = 256 (temporal_frame=8)
+        numC_input=numC_Trans * (len(range(*multi_adj_frame_id_cfg))+1),  # 32 * 9 = 288 (원본과 동일)
         num_layer=[1, 2, 4],
         with_cp=False,
         num_channels=[numC_Trans,numC_Trans*2,numC_Trans*4],
@@ -306,8 +306,8 @@ train_dataloader = dict(
 
 val_dataloader = dict(
     batch_size=1,
-    num_workers=4,
-    persistent_workers=True,
+    num_workers=0,#4,
+    persistent_workers=False,#True,
     drop_last=False,
     sampler=dict(type='DefaultSampler', shuffle=False),
     dataset=test_data_config)

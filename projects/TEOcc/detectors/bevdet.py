@@ -38,9 +38,12 @@ class BEVStereo4D(Base3DDetector):
             self.num_frame = num_frame
         
         self.extra_ref_frames = extra_ref_frames
-        self.temporal_frame = self.num_frame - self.extra_ref_frames
+        # 원본 모델과 동일하게: BEVStereo4D에서는 num_frame에 extra_ref_frames를 더함
+        self.temporal_frame = self.num_frame
+        self.num_frame += self.extra_ref_frames  # ← 이 줄 추가!
         # temporal_frame is the number of frames used for temporal processing
         # num_frame = temporal_frame + extra_ref_frames
+        
         self.align_after_view_transfromation = align_after_view_transfromation
         self.freeze_img = freeze_img
         self.with_prev = self.num_frame > 1
@@ -153,6 +156,9 @@ class BEVStereo4D(Base3DDetector):
                          post_rot, post_tran, bda, mlp_input, feat_prev_iv,
                          k2s_sensor, extra_ref_frame):
         """Prepare BEV features from images."""
+
+        # breakpoint()
+
         if extra_ref_frame:
             # Extract stereo reference features for extra reference frame
             stereo_feat = self.extract_stereo_ref_feat(img)
@@ -191,6 +197,9 @@ class BEVStereo4D(Base3DDetector):
         Returns:
             tuple: Prepared inputs for multiple frames
         """
+
+        # breakpoint()
+
         # Extract inputs
         B, N, C, H, W = inputs[0].shape
         N = N // self.num_frame
@@ -247,12 +256,12 @@ class BEVStereo4D(Base3DDetector):
 
     def bev_encoder(self, x):
         """Encode BEV features."""
+        if hasattr(self, 'img_down2top_encoder_backbone'):
+            x = self.img_down2top_encoder_backbone(x)
         x = self.img_bev_encoder_backbone(x)
-        # CustomResNet3D returns a list of features
-        # LSSFPN3D expects a list of 3 features, so pass the list directly
-        if self.img_bev_encoder_neck:
-            x = self.img_bev_encoder_neck(x)
-        # After neck, x should be a single feature tensor
+        x = self.img_bev_encoder_neck(x)
+        if type(x) in [list, tuple]:
+            x = x[0]
         return x
 
     def extract_feat(self, points, img, img_metas, **kwargs):

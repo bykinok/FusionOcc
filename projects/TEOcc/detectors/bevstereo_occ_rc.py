@@ -232,6 +232,9 @@ class BEVStereo4DOCCRC(BEVStereo4D):
     
     def extract_radar_feat(self, radar, img_metas):
         """Extract features of points."""
+
+        # breakpoint()
+
         voxels, num_points, coors = self.radar_voxelize(radar)
 
         voxel_features = self.radar_voxel_encoder(voxels, num_points, coors)
@@ -283,8 +286,32 @@ class BEVStereo4DOCCRC(BEVStereo4D):
                     radar=None,
                     **kwargs):
         """Test function without augmentaiton."""
+        
+        
+        # Convert radar to match original model format: radar[0] should be a list
+        if radar is not None:
+            if isinstance(radar, torch.Tensor):
+                radar = [[radar]]  # [[tensor]] 형태로 변환
+            elif isinstance(radar, (list, tuple)) and len(radar) > 0:
+                # MMEngine batch collation이 tuple로 감싸는 경우: [(tensor,)] -> [[tensor]]
+                if isinstance(radar[0], tuple):
+                    radar = [list(radar[0])]
+                # 이미 리스트인 경우: [tensor] -> [[tensor]]
+                elif isinstance(radar[0], torch.Tensor):
+                    radar = [radar]
+                elif hasattr(radar[0], 'tensor'):  # RadarPoints object
+                    radar = [[r.tensor for r in radar]]
+                else:
+                    # 이미 [[tensor]] 형태인 경우
+                    radar = radar
+        
+        # breakpoint()
+
+        # 원본 모델과 동일하게 radar[0] 사용 (radar[0]는 리스트)
         img_feats, pts_feats, depth, bev_feat_list, radar_feats, prev_radar_feats = self.extract_feat(
-            points, img=img, img_metas=img_metas, radar=radar[0], **kwargs)
+            points, img=img, img_metas=img_metas, radar=radar[0] if radar else None, **kwargs)
+
+        # breakpoint()
         
         # Keep 3D structure for 3D convolutions: concatenate along channel dimension
         # img_feats[0]: [bs, 32, 4, 50, 50] 
@@ -293,15 +320,6 @@ class BEVStereo4DOCCRC(BEVStereo4D):
         fusion_feats = self.reduc_conv(torch.cat((img_feats[0], radar_feats[0]), dim=1))
         occ_pred = self.final_conv(fusion_feats).permute(0, 4, 3, 2, 1)
         # bncdhw->bnwhdc
-        # Upsample prediction to match ground truth resolution
-        # preds: [bs, 50, 50, 4, classes] -> [bs, 200, 200, 16, classes]
-        bs, w, h, d, classes = occ_pred.shape
-        target_w, target_h, target_d = 200, 200, 16
-        
-        # Interpolate each spatial dimension
-        occ_pred = occ_pred.permute(0, 4, 3, 1, 2)  # [bs, classes, d, w, h]
-        occ_pred = F.interpolate(occ_pred, size=(target_d, target_w, target_h), mode='trilinear', align_corners=False)
-        occ_pred = occ_pred.permute(0, 3, 4, 2, 1)  # [bs, w, h, d, classes] -> [bs, 200, 200, 16, classes]
         if self.use_predicter:
             occ_pred = self.predicter(occ_pred)
         occ_score = occ_pred.softmax(-1)
@@ -356,9 +374,14 @@ class BEVStereo4DOCCRC(BEVStereo4D):
         
         # Convert radar to proper format if needed
         if radar is not None:
-            if isinstance(radar, (list, tuple)) and len(radar) > 0:
+            if isinstance(radar, torch.Tensor):
+                radar = [radar]  # Convert tensor to list
+            elif isinstance(radar, (list, tuple)) and len(radar) > 0:
                 if hasattr(radar[0], 'tensor'):  # RadarPoints object
                     radar = [r.tensor for r in radar]
+                # Ensure it's a list of tensors
+                if not isinstance(radar[0], torch.Tensor):
+                    radar = [radar[0]] if len(radar) > 0 else []
         
         # Extract metadata and ground truth from data_samples if available  
         if data_samples is not None:
@@ -388,6 +411,8 @@ class BEVStereo4DOCCRC(BEVStereo4D):
 
     def predict(self, inputs, data_samples):
         """Predict from inputs and data samples."""
+        # breakpoint()
+
         if isinstance(inputs, dict):
             img_inputs = inputs.get('img_inputs', None)
             points = inputs.get('points', None)
@@ -400,6 +425,38 @@ class BEVStereo4DOCCRC(BEVStereo4D):
                     img_inputs = inner_inputs.get('img_inputs', None)
                     points = inner_inputs.get('points', None)
                     radar = inner_inputs.get('radar', None)
+            
+            # Add batch dimension to img_inputs if needed (원본 모델의 DataContainer stack=True 효과)
+            # img_inputs는 tuple 또는 list: (imgs, intrins, post_rots, post_trans, sensor2egos, ego2globals, bda)
+            if img_inputs is not None and isinstance(img_inputs, (tuple, list)) and len(img_inputs) >= 7:
+                # MMEngine batch collation: 각 요소가 tuple로 감싸져 있을 수 있음
+                # Unwrap all elements first
+                unwrapped = []
+                for item in img_inputs:
+                    if isinstance(item, (tuple, list)) and len(item) > 0:
+                        unwrapped.append(item[0])
+                    else:
+                        unwrapped.append(item)
+                
+                # Check if first element (imgs) needs batch dimension
+                imgs = unwrapped[0]
+                if isinstance(imgs, torch.Tensor) and imgs.dim() == 4:  # [N, C, H, W] -> [1, N, C, H, W]
+                    # Add batch dimension to all tensors
+                    img_inputs_list = []
+                    for t in unwrapped:
+                        if isinstance(t, torch.Tensor):
+                            if t.dim() in [2, 3, 4]:
+                                img_inputs_list.append(t.unsqueeze(0))
+                            else:
+                                img_inputs_list.append(t)
+                        else:
+                            img_inputs_list.append(t)
+                    
+                    # Convert back to original type (tuple or list)
+                    if isinstance(img_inputs, tuple):
+                        img_inputs = tuple(img_inputs_list)
+                    else:
+                        img_inputs = img_inputs_list
             
             kwargs = {k: v for k, v in inputs.items() if k not in ['img_inputs', 'points', 'radar', 'inputs']}
         else:
@@ -521,92 +578,24 @@ class BEVStereo4DOCCRC(BEVStereo4D):
         return losses
 
     def extract_feat(self, points, img, img_metas, radar, **kwargs):
-        """Extract features from images and points."""
-        # Convert img_inputs tuple to list format expected by prepare_inputs
-        # img_inputs from PrepareImageInputs: (imgs, intrins, post_rots, post_trans, sensor2egos, ego2globals)
-        if img is None:
-            raise ValueError("img cannot be None")
-        
-        # Handle radar data - convert RadarPoints objects to tensors if needed
-        if radar is not None:
-            if isinstance(radar, (list, tuple)):
-                processed_radar = []
-                for r in radar:
-                    if hasattr(r, 'tensor'):
-                        # RadarPoints object
-                        processed_radar.append(r.tensor)
-                    elif isinstance(r, torch.Tensor):
-                        processed_radar.append(r)
-                radar = processed_radar
-            elif hasattr(radar, 'tensor'):
-                # Single RadarPoints object
-                radar = [radar.tensor]
-            elif isinstance(radar, torch.Tensor):
-                radar = [radar]
-        
-        # Handle case where img is a list of tuples (each containing a tensor)
-        # This happens when data comes from Collect3D
-        if isinstance(img, (list, tuple)) and len(img) == 6:
-            # Check if elements are wrapped in tuples
-            if isinstance(img[0], (tuple, list)) and len(img[0]) > 0 and isinstance(img[0][0], torch.Tensor):
-                # Extract tensors from tuples
-                img = tuple(item[0] if isinstance(item, (tuple, list)) else item for item in img)
-        
-        if isinstance(img, tuple) and len(img) == 6:
-            imgs, intrins, post_rots, post_trans, sensor2egos, ego2globals = img
-            
-            # Check if any is None
-            if imgs is None:
-                raise ValueError("imgs cannot be None")
-            
-            # Add batch dimension if needed: [N, C, H, W] -> [B, N, C, H, W]
-            if len(imgs.shape) == 4:
-                imgs = imgs.unsqueeze(0)
-            if len(intrins.shape) == 3:
-                intrins = intrins.unsqueeze(0)
-            if len(post_rots.shape) == 3:
-                post_rots = post_rots.unsqueeze(0)
-            if len(post_trans.shape) == 2:
-                post_trans = post_trans.unsqueeze(0)
-            if len(sensor2egos.shape) == 3:
-                sensor2egos = sensor2egos.unsqueeze(0)
-            if len(ego2globals.shape) == 3:
-                ego2globals = ego2globals.unsqueeze(0)
-            
-            # Replicate single frame to multiple frames if needed
-            # Expected shape: [B, N*num_frame, C, H, W] where N is number of cameras
-            B, N, C, H, W = imgs.shape
-            
-            if N < 6 * self.num_frame:
-                # Assume N is the number of cameras (6) for a single frame
-                # Replicate to num_frame frames
-                imgs = imgs.repeat(1, self.num_frame, 1, 1, 1)
-                intrins = intrins.repeat(1, self.num_frame, 1, 1)
-                post_rots = post_rots.repeat(1, self.num_frame, 1, 1)
-                post_trans = post_trans.repeat(1, self.num_frame, 1)
-                sensor2egos = sensor2egos.repeat(1, self.num_frame, 1, 1)
-                ego2globals = ego2globals.repeat(1, self.num_frame, 1, 1)
-            
-            # Add bda (identity matrix for now)
-            bda = torch.eye(3).to(imgs.device)
-            
-            # Reorder to match original BEVDet format: [imgs, sensor2egos, ego2globals, intrins, post_rots, post_trans, bda]
-            img = [imgs, sensor2egos, ego2globals, intrins, post_rots, post_trans, bda]
-        elif isinstance(img, (list, tuple)) and len(img) > 0:
-            # Check if elements are tuples containing tensors
-            if isinstance(img[0], (tuple, list)) and len(img[0]) > 0 and isinstance(img[0][0], torch.Tensor):
-                # Take the first tensor from each tuple (should be the image tensor)
-                img = img[0][0]  # Take first tensor from first tuple
-                
-                # Add batch dimension if needed (expected: [B, N, C, H, W])
-                if len(img.shape) == 4:  # [N, C, H, W] -> [B, N, C, H, W]
-                    img = img.unsqueeze(0)
-            elif isinstance(img[0], torch.Tensor):
-                img = torch.stack(img, dim=0)
+        """Extract features from images and points.
+        Return:
+        (BEV Feature, None, depth)
+        """
+        # breakpoint()
         
         img_feats, depth, prev_feats = self.extract_img_feat(img, img_metas, **kwargs)
         pts_feats = None
 
+        # radar should be a list of tensors for radar_voxelize
+        if radar is not None:
+            if isinstance(radar, torch.Tensor):
+                radar = [radar]
+            elif isinstance(radar, (list, tuple)) and len(radar) > 0:
+                if not isinstance(radar[0], torch.Tensor):
+                    if hasattr(radar[0], 'tensor'):  # RadarPoints object
+                        radar = [r.tensor for r in radar]
+        
         radar_feats, prev_radar_feats = self.extract_radar_feat(radar, img_metas)
 
         return (img_feats, pts_feats, depth, prev_feats, radar_feats, prev_radar_feats)
@@ -622,6 +611,9 @@ class BEVStereo4DOCCRC(BEVStereo4D):
                          pred_prev=False,
                          sequential=False,
                          **kwargs):
+        
+        # breakpoint()
+        
         if sequential:
             # Todo
             assert False
@@ -647,6 +639,9 @@ class BEVStereo4DOCCRC(BEVStereo4D):
                                post_rot, post_tran, bda, mlp_input,
                                feat_prev_iv, curr2adjsensor[fid],
                                extra_ref_frame)
+                
+                # breakpoint()
+                
                 if key_frame:
                     bev_feat, depth, feat_curr_iv = \
                         self.prepare_bev_feat(*inputs_curr)
@@ -658,6 +653,9 @@ class BEVStereo4DOCCRC(BEVStereo4D):
                 if not extra_ref_frame:
                     bev_feat_list.append(bev_feat)
                 feat_prev_iv = feat_curr_iv
+
+        # breakpoint()
+
         if pred_prev:
             # Todo
             assert False
@@ -665,20 +663,18 @@ class BEVStereo4DOCCRC(BEVStereo4D):
             bev_feat_key = bev_feat_list[0]
             if len(bev_feat_key.shape) == 4:
                 b, c, h, w = bev_feat_key.shape
-                # Create features for (num_frame-1) adjacent frames + 1 key frame = num_frame total
-                # Total channels should be c * num_frame = 32 * 9 = 288
                 bev_feat_list = \
                     [torch.zeros([b,
-                                  c * (self.num_frame - 1),  # Adjacent frames
-                                  h, w]).to(bev_feat_key), bev_feat_key]  # Key frame
+                                  c * (self.num_frame -
+                                       self.extra_ref_frames - 1),
+                                  h, w]).to(bev_feat_key), bev_feat_key]
             else:
                 b, c, z, h, w = bev_feat_key.shape
-                # Create features for (num_frame-1) adjacent frames + 1 key frame = num_frame total  
-                # Total channels should be c * num_frame = 32 * 9 = 288
                 bev_feat_list = \
                     [torch.zeros([b,
-                                  c * (self.num_frame - 1), z,  # Adjacent frames
-                                  h, w]).to(bev_feat_key), bev_feat_key]  # Key frame
+                                  c * (self.num_frame -
+                                       self.extra_ref_frames - 1), z,
+                                  h, w]).to(bev_feat_key), bev_feat_key]
         if self.align_after_view_transfromation:
             for adj_id in range(self.num_frame - 2):
                 bev_feat_list[adj_id] = \
@@ -687,6 +683,9 @@ class BEVStereo4DOCCRC(BEVStereo4D):
                                         sensor2keyegos[self.num_frame - 2 - adj_id]],
                                        bda)
         bev_feat = torch.cat(bev_feat_list, dim=1)
+
+        # breakpoint() 
+
         if with_bevencoder:
             x = self.bev_encoder(bev_feat)
             return [x], depth_key_frame, bev_feat_list
