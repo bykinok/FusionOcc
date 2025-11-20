@@ -143,21 +143,31 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         
         # CRITICAL: Set sequence group flag for temporal fusion
         # Must be called after load_data_list (which does sorting) - same as original
-        # In mmengine, full_init() calls load_data_list() and stores result in self.data_list
         if self.use_sequence_group_flag:
-            # Ensure data is loaded before setting sequence group flag
-            # If lazy_init=False, parent __init__ already called full_init()
-            # If lazy_init=True, we need to call full_init() manually
+            # CRITICAL: mmengine's BaseDataset uses lazy_init, but we need data NOW
+            # Original model loads data in __init__ immediately, so we must do the same
+            
+            # Force data loading by explicitly calling load_data_list
             if not hasattr(self, 'data_list') or len(self.data_list) == 0:
-                if hasattr(self, 'full_init'):
-                    self.full_init()
+                # Directly call load_data_list to populate data
+                loaded_data = self.load_data_list()
+                if loaded_data and len(loaded_data) > 0:
+                    self.data_list = loaded_data
+                    self.data_infos = loaded_data  # Sync for backward compatibility
+                    print(f"DEBUG: Force-loaded {len(self.data_list)} samples for sequence flag")
             
-            # Sync data_infos for backward compatibility
+            # Double-check data is loaded
             if hasattr(self, 'data_list') and len(self.data_list) > 0:
-                self.data_infos = self.data_list
-            
-            # Now set sequence group flag
-            self._set_sequence_group_flag()
+                # Ensure data_infos is synced
+                if not hasattr(self, 'data_infos') or len(self.data_infos) == 0:
+                    self.data_infos = self.data_list
+                
+                # Now set sequence group flag
+                self._set_sequence_group_flag()
+                print(f"DEBUG: Sequence group flag set, flag shape: {self.flag.shape}")
+            else:
+                print(f"WARNING: Cannot set sequence group flag - data not loaded")
+                self.flag = np.array([], dtype=np.int64)
 
     def load_data_list(self):
         """Load annotations from file.
@@ -401,30 +411,33 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
     def _set_sequence_group_flag(self):
         """
         Set each sequence to be a different group
-        CRITICAL: Use self.data_list (mmengine format) instead of self.data_infos
         """
-        # Use data_list (mmengine format) or data_infos (backward compatibility)
-        data_source = getattr(self, 'data_list', None)
-        if data_source is None or len(data_source) == 0:
-            data_source = getattr(self, 'data_infos', None)
-        if data_source is None or len(data_source) == 0:
-            print(f"WARNING: Both data_list and data_infos are empty, cannot set sequence group flag")
-            self.flag = np.array([], dtype=np.int64)
-            return
+        # CRITICAL: Ensure data_infos is populated (sync from data_list if needed)
+        if not hasattr(self, 'data_infos') or len(self.data_infos) == 0:
+            if hasattr(self, 'data_list') and len(self.data_list) > 0:
+                self.data_infos = self.data_list
+            else:
+                print(f"WARNING: Both data_list and data_infos are empty, cannot set sequence group flag")
+                self.flag = np.array([], dtype=np.int64)
+                return
         
+        # CRITICAL: Match original - use self.data_infos directly (not data_source)
         res = []
         curr_sequence = 0
-        for idx in range(len(data_source)):
-            if idx != 0 and len(data_source[idx].get('prev', [])) == 0:
+        for idx in range(len(self.data_infos)):
+            # CRITICAL: Match original - direct access to 'prev' key (not .get())
+            if idx != 0 and len(self.data_infos[idx]['prev']) == 0:
                 # Not first frame and # of sweeps is 0 -> new sequence
                 curr_sequence += 1
             res.append(curr_sequence)
 
         self.flag = np.array(res, dtype=np.int64)
 
+        # breakpoint()
+
         if self.sequences_split_num != 1:
             if self.sequences_split_num == 'all':
-                self.flag = np.array(range(len(data_source)), dtype=np.int64)
+                self.flag = np.array(range(len(self.data_infos)), dtype=np.int64)
             else:
                 bin_counts = np.bincount(self.flag)
                 new_flags = []
@@ -432,21 +445,19 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
                 for curr_flag in range(len(bin_counts)):
                     curr_sequence_length = np.array(
                         list(range(0,
-                                   bin_counts[curr_flag],
-                                   math.ceil(bin_counts[curr_flag] / self.sequences_split_num)))
+                                bin_counts[curr_flag],
+                                math.ceil(bin_counts[curr_flag] / self.sequences_split_num)))
                         + [bin_counts[curr_flag]])
                     for sub_seq_idx in (curr_sequence_length[1:] - curr_sequence_length[:-1]):
                         for _ in range(sub_seq_idx):
                             new_flags.append(curr_new_flag)
                         curr_new_flag += 1
 
+                # breakpoint()
+
                 assert len(new_flags) == len(self.flag)
                 assert len(np.bincount(new_flags)) == len(np.bincount(self.flag)) * self.sequences_split_num
                 self.flag = np.array(new_flags, dtype=np.int64)
-        
-        # CRITICAL: Sync data_infos for backward compatibility
-        if not hasattr(self, 'data_infos') or len(self.data_infos) == 0:
-            self.data_infos = data_source
 
     def prepare_data(self, idx: int) -> Any:
         """Prepare data for the given index.
@@ -470,6 +481,9 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         
         # Add temporal fusion information
         if self.use_sequence_group_flag:
+            
+            # breakpoint()
+
             # CRITICAL: Ensure flag is set and has correct length
             if not hasattr(self, 'flag') or len(self.flag) == 0:
                 # Flag not set yet, set it now
@@ -493,8 +507,8 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
                 data_info['sample_index'] = idx
                 data_info['sequence_group_idx'] = int(self.flag[idx])
             
-            #data_info['start_of_sequence'] = idx == 0 or self.flag[idx - 1] != self.flag[idx]
-            data_info['start_of_sequence'] = True
+            data_info['start_of_sequence'] = idx == 0 or self.flag[idx - 1] != self.flag[idx]
+            # data_info['start_of_sequence'] = True
             
             # CRITICAL: Get transformation matrices from current to previous frame
             # Match original format: both curr_to_prev_lidar_rt and curr_to_prev_ego_rt
