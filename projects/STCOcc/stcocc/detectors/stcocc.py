@@ -286,136 +286,53 @@ class STCOcc(CenterPoint):
         return loss_dict
 
     def obtain_feats_from_images(self, points, img, img_metas, **kwargs):
-        # Handle img_metas format conversion
-        if img_metas is not None:
-            # If img_metas is a single dict (not a list), wrap it in a list
-            if isinstance(img_metas, dict) and 'data' not in img_metas:
-                # This is a single metadata dict, not a DataContainer
-                img_metas = [img_metas]
-            elif isinstance(img_metas, dict) and 'data' in img_metas:
-                # This is a DataContainer, extract the data
-                img_metas = img_metas['data']
-                if isinstance(img_metas, dict):
-                    img_metas = [img_metas]
+        
         
         # 0、Prepare
         if self.with_specific_component('temporal_fusion_list'):
             use_temporal = True
-            # Safely get device from img
-            device = 'cuda' if torch.cuda.is_available() else 'cpu'
-            if isinstance(img, (list, tuple)) and len(img) > 0:
-                if hasattr(img[0], 'device'):
-                    device = img[0].device
-                elif torch.is_tensor(img[0]):
-                    device = img[0].device
-            elif torch.is_tensor(img):
-                device = img.device
-            
-            # DEBUG: Check if temporal fusion keys exist in img_meta
-            if not hasattr(self, '_img_meta_keys_debug'):
-                print(f"\n[IMG_META_KEYS_DEBUG]")
-                print(f"  Type of img_metas[0]: {type(img_metas[0])}")
-                print(f"  Available keys in img_metas[0]: {list(img_metas[0].keys())[:20]}")
-                # Check if it's a DataContainer
-                if 'data' in img_metas[0]:
-                    meta_data = img_metas[0]['data']
-                    print(f"  Type of img_metas[0]['data']: {type(meta_data)}")
-                    print(f"  Keys in img_metas[0]['data']: {list(meta_data.keys())[:30] if isinstance(meta_data, dict) else 'Not a dict'}")
-                    print(f"  Has 'sequence_group_idx': {'sequence_group_idx' in meta_data if isinstance(meta_data, dict) else False}")
-                    print(f"  Has 'start_of_sequence': {'start_of_sequence' in meta_data if isinstance(meta_data, dict) else False}")
-                    print(f"  Has 'curr_to_prev_ego_rt': {'curr_to_prev_ego_rt' in meta_data if isinstance(meta_data, dict) else False}")
-                    if isinstance(meta_data, dict):
-                        if 'sequence_group_idx' in meta_data:
-                            print(f"  sequence_group_idx value: {meta_data['sequence_group_idx']}")
-                        if 'start_of_sequence' in meta_data:
-                            print(f"  start_of_sequence value: {meta_data['start_of_sequence']}")
-                else:
-                    print(f"  Has 'sequence_group_idx': {'sequence_group_idx' in img_metas[0]}")
-                    print(f"  Has 'start_of_sequence': {'start_of_sequence' in img_metas[0]}")
-                    print(f"  Has 'curr_to_prev_ego_rt': {'curr_to_prev_ego_rt' in img_metas[0]}")
-                self._img_meta_keys_debug = True
-            
-            # Extract temporal fusion keys from img_meta['data'] (DataContainer format)
-            # Handle both direct dict format and DataContainer format
-            def get_meta_value(img_meta, key, default):
-                if 'data' in img_meta and isinstance(img_meta['data'], dict):
-                    # DataContainer format
-                    value = img_meta['data'].get(key, default)
-                else:
-                    # Direct dict format
-                    value = img_meta.get(key, default)
-                # Handle list wrapping (some values might be [value] instead of value)
-                if isinstance(value, (list, tuple)) and len(value) == 1:
-                    value = value[0]
-                return value
-            
-            sequence_group_idx = torch.stack([
-                torch.tensor(get_meta_value(img_meta, 'sequence_group_idx', 0), device=device) 
-                for img_meta in img_metas
-            ])
-            start_of_sequence = torch.stack([
-                torch.tensor(get_meta_value(img_meta, 'start_of_sequence', True), device=device) 
-                for img_meta in img_metas
-            ])
-            # Use identity matrix as default for curr_to_prev_ego_rt
-            default_ego_rt = np.eye(4, dtype=np.float32)
-            curr_to_prev_ego_rt_list = []
-            for img_meta in img_metas:
-                value = get_meta_value(img_meta, 'curr_to_prev_ego_rt', default_ego_rt)
-                # Convert to tensor, handle both numpy array and tensor input
-                if torch.is_tensor(value):
-                    tensor_value = value.to(device=device, dtype=torch.float32)
-                else:
-                    tensor_value = torch.tensor(np.array(value), device=device, dtype=torch.float32)
-                curr_to_prev_ego_rt_list.append(tensor_value)
-            curr_to_prev_ego_rt = torch.stack(curr_to_prev_ego_rt_list)
+            sequence_group_idx = torch.stack(
+                [torch.tensor(img_meta['sequence_group_idx'], device=img[0].device) for img_meta in img_metas])
+            start_of_sequence = torch.stack(
+                [torch.tensor(img_meta['start_of_sequence'], device=img[0].device) for img_meta in img_metas])
+            curr_to_prev_ego_rt = torch.stack(
+                [img_meta['curr_to_prev_ego_rt'].to(img[0].device) if torch.is_tensor(img_meta['curr_to_prev_ego_rt']) else torch.tensor(np.array(img_meta['curr_to_prev_ego_rt']), device=img[0].device) for img_meta in img_metas])
             history_fusion_params = {
                 'sequence_group_idx': sequence_group_idx,
                 'start_of_sequence': start_of_sequence,
                 'curr_to_prev_ego_rt': curr_to_prev_ego_rt
             }
             # process can_bus info
-            for index, start in enumerate(start_of_sequence):
-                # Safely get can_bus, provide default if not available
-                if 'can_bus' in img_metas[index]:
-                    can_bus = copy.deepcopy(img_metas[index]['can_bus'])
-                    # Ensure can_bus is a mutable list or array
-                    if not isinstance(can_bus, (list, np.ndarray)):
-                        can_bus = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # default can_bus
-                    elif len(can_bus) < 4:
-                        can_bus = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # default can_bus
-                else:
-                    can_bus = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # default can_bus
-                
-                # Convert to numpy array for easier manipulation if it's a list
-                if isinstance(can_bus, list):
-                    can_bus = np.array(can_bus, dtype=np.float32)
-                
-                if start:
-                    temp_pose = copy.deepcopy(can_bus[:3])
-                    temp_angle = copy.deepcopy(can_bus[-1])
-                    can_bus[:3] = 0
-                    can_bus[-1] = 0
-                    self.scene_can_bus_info[sequence_group_idx[index].item()] = {
-                        'prev_pose':temp_pose,
-                        'prev_angle':temp_angle
-                    }
-                    img_metas[index]['can_bus'] = can_bus
-                else:
-                    temp_pose = copy.deepcopy(can_bus[:3])
-                    temp_angle = copy.deepcopy(can_bus[-1])
-                    if sequence_group_idx[index].item() in self.scene_can_bus_info:
+            if 'can_bus' in img_metas[0]:
+                for index, start in enumerate(start_of_sequence):
+                    if start:
+                        can_bus = copy.deepcopy(img_metas[index]['can_bus'])
+                        temp_pose = copy.deepcopy(can_bus[:3])
+                        temp_angle = copy.deepcopy(can_bus[-1])
+                        can_bus[:3] = 0
+                        can_bus[-1] = 0
+                        self.scene_can_bus_info[sequence_group_idx[index].item()] = {
+                            'prev_pose':temp_pose,
+                            'prev_angle':temp_angle
+                        }
+                        img_metas[index]['can_bus'] = can_bus
+                    else:
+                        can_bus = copy.deepcopy(img_metas[index]['can_bus'])
+                        temp_pose = copy.deepcopy(can_bus[:3])
+                        temp_angle = copy.deepcopy(can_bus[-1])
                         can_bus[:3] = can_bus[:3] - self.scene_can_bus_info[sequence_group_idx[index].item()]['prev_pose']
                         can_bus[-1] = can_bus[-1] - self.scene_can_bus_info[sequence_group_idx[index].item()]['prev_angle']
-                    self.scene_can_bus_info[sequence_group_idx[index].item()] = {
-                        'prev_pose': temp_pose,
-                        'prev_angle': temp_angle
-                    }
-                    img_metas[index]['can_bus'] = can_bus
+                        self.scene_can_bus_info[sequence_group_idx[index].item()] = {
+                            'prev_pose': temp_pose,
+                            'prev_angle': temp_angle
+                        }
+                        img_metas[index]['can_bus'] = can_bus
 
         else:
             use_temporal = False
             history_fusion_params = None
+
+        # breakpoint()
 
         # 1、Forward-Projection create coarse voxel features
         if 'sequential' not in kwargs or not kwargs['sequential']:
@@ -430,26 +347,9 @@ class STCOcc(CenterPoint):
         intermediate_occ_pred_dict = {}
         intermediate_voxel_feat = []
         for i in range(len(self.backward_projection_list)-1, -1, -1):
-            voxel_feat_raw = voxel_feats[voxel_feats_index]
-            
-            # DEBUG: print raw voxel_feat before adding last_voxel_feat
-            if not hasattr(self, f'_voxel_feat_raw_stage{i}_debug'):
-                print(f"\n[VOXEL_FEAT_RAW] Stage {i}:")
-                print(f"  Shape: {voxel_feat_raw.shape}")
-                print(f"  Mean: {voxel_feat_raw.mean().item():.6f}, Std: {voxel_feat_raw.std().item():.6f}")
-                print(f"  Min: {voxel_feat_raw.min().item():.6f}, Max: {voxel_feat_raw.max().item():.6f}")
-                setattr(self, f'_voxel_feat_raw_stage{i}_debug', True)
-            
-            voxel_feat = voxel_feat_raw
+            voxel_feat = voxel_feats[voxel_feats_index]
 
             if last_voxel_feat is not None:
-                # DEBUG: print voxel_feat after adding last_voxel_feat
-                if not hasattr(self, f'_voxel_feat_combined_stage{i}_debug'):
-                    print(f"\n[VOXEL_FEAT_COMBINED] Stage {i} (after + last_voxel_feat):")
-                    print(f"  last_voxel_feat: Mean={last_voxel_feat.mean().item():.6f}, Std={last_voxel_feat.std().item():.6f}")
-                    combined = last_voxel_feat + voxel_feat
-                    print(f"  Combined: Mean={combined.mean().item():.6f}, Std={combined.std().item():.6f}")
-                    setattr(self, f'_voxel_feat_combined_stage{i}_debug', True)
                 voxel_feat = last_voxel_feat + voxel_feat
 
             # voxel_feats shape: [bs, c, z, h, w]
@@ -464,18 +364,6 @@ class STCOcc(CenterPoint):
                 prev_bev_aug=self.temporal_fusion_list[i].history_forward_augs,
                 history_fusion_params=history_fusion_params,
             )
-            
-            # DEBUG: print BEVFormer output
-            if i == len(self.backward_projection_list)-1 and not hasattr(self, '_bevformer_output_debug'):
-                print(f"\n[BEVFORMER_OUTPUT] Stage {i}:")
-                print(f"  bev_feat.shape={bev_feat.shape}")
-                print(f"  bev_feat: Mean={bev_feat.mean().item():.6f}, Std={bev_feat.std().item():.6f}")
-                print(f"  occ_pred.shape={occ_pred.shape}")
-                print(f"  occ_pred: Mean={occ_pred.mean().item():.6f}, Std={occ_pred.std().item():.6f}")
-                pred_cls = occ_pred.softmax(dim=-1).argmax(dim=-1)
-                unique_cls = pred_cls.unique()
-                print(f"  occ_pred unique classes: {len(unique_cls)}")
-                self._bevformer_output_debug = True
 
             # save for loss
             intermediate_occ_pred_dict['pred_voxel_semantic_1_{}'.format(2 ** (i + 1))] = occ_pred
@@ -489,11 +377,6 @@ class STCOcc(CenterPoint):
             else:
                 nonempty_prob = 1 - last_occ_pred.softmax(-1)[..., -1].permute(0, 3, 2, 1)
                 last_voxel_feat = voxel_feat + bev_feat * nonempty_prob.unsqueeze(1)
-                
-            # DEBUG: print after adding BEV refinement
-            if i == len(self.backward_projection_list)-1 and not hasattr(self, '_after_bev_refine_debug'):
-                print(f"  last_voxel_feat (after BEV refine): Mean={last_voxel_feat.mean().item():.6f}, Std={last_voxel_feat.std().item():.6f}")
-                self._after_bev_refine_debug = True
 
             # Option: temporal fusion
             if self.with_specific_component('temporal_fusion_list'):
@@ -503,11 +386,6 @@ class STCOcc(CenterPoint):
                     last_occ_pred=last_occ_pred,
                     nonempty_prob=nonempty_prob,
                 )
-                
-                # DEBUG: print after temporal fusion
-                if i == len(self.backward_projection_list)-1 and not hasattr(self, '_after_temporal_fusion_debug'):
-                    print(f"  last_voxel_feat (after temporal fusion): Mean={last_voxel_feat.mean().item():.6f}, Std={last_voxel_feat.std().item():.6f}")
-                    self._after_temporal_fusion_debug = True
 
             # output stage don't need to upsample
             if i != 0:
@@ -525,6 +403,8 @@ class STCOcc(CenterPoint):
             intermediate_occ_pred_dict=intermediate_occ_pred_dict,
             history_fusion_params=history_fusion_params,
         )
+
+        # breakpoint()
         return return_dict
 
     def simple_test(self,
@@ -533,34 +413,223 @@ class STCOcc(CenterPoint):
                     img=None,
                     img_inputs=None,
                     **kwargs):
+        # CRITICAL: Unwrap DataContainer from points to match original format
+        # Original format: points is a list of tensors: [tensor, tensor, ...]
+        # MMEngine format: points is a list of DataContainers: [{'data': tensor}, {'data': tensor}, ...]
+        # or nested lists: [[tensor], [tensor], ...]
+        if points is not None:
+            if isinstance(points, list) and len(points) > 0:
+                # Handle DataContainer format: [{'data': tensor}, ...]
+                if isinstance(points[0], dict) and 'data' in points[0]:
+                    unwrapped_points = []
+                    for item in points:
+                        if isinstance(item, dict) and 'data' in item:
+                            data = item['data']
+                            # If data is a list, take the first element
+                            if isinstance(data, list) and len(data) > 0:
+                                unwrapped_points.append(data[0])
+                            else:
+                                unwrapped_points.append(data)
+                        else:
+                            unwrapped_points.append(item)
+                    points = unwrapped_points
+                # Handle nested list format: [[tensor], [tensor], ...] -> [tensor, tensor, ...]
+                elif isinstance(points[0], list) and len(points[0]) > 0:
+                    # Unwrap nested lists: take first element from each inner list
+                    points = [item[0] if isinstance(item, list) and len(item) > 0 else item for item in points]
+        
+        # Unwrap DataContainer from img_metas to match original format
+        if img_metas is not None:
+            # Handle DataContainer format: {'data': [...], 'cpu_only': True}
+            if isinstance(img_metas, dict) and 'data' in img_metas:
+                img_metas = img_metas['data']
+            # Handle list of DataContainers: [{'data': {...}, 'cpu_only': True}, ...]
+            elif isinstance(img_metas, list) and len(img_metas) > 0:
+                if isinstance(img_metas[0], dict) and 'data' in img_metas[0]:
+                    img_metas = [item['data'] if isinstance(item, dict) and 'data' in item else item for item in img_metas]
+            
+            # CRITICAL: Unwrap tuple-wrapped values in img_metas lists
+            # DataContainer may wrap list elements as tuples: [(tensor,), (tensor,), ...]
+            # Original format: [tensor, tensor, ...]
+            for img_meta in img_metas:
+                if isinstance(img_meta, dict):
+                    # Unwrap tuple-wrapped list elements for transformation matrices
+                    for key in ['sensor2sensorego', 'sensorego2global', 'sensorego2sensor', 'global2sensorego', 'lidar2img']:
+                        if key in img_meta and isinstance(img_meta[key], list):
+                            # Unwrap tuples: [(tensor,), (tensor,), ...] -> [tensor, tensor, ...]
+                            unwrapped_list = []
+                            for item in img_meta[key]:
+                                if isinstance(item, tuple) and len(item) > 0:
+                                    unwrapped_list.append(item[0])
+                                else:
+                                    unwrapped_list.append(item)
+                            img_meta[key] = unwrapped_list
+                    
+                    # CRITICAL: Unwrap single-element lists to match original format
+                    # Original format: sample_idx is a string (token), not a list
+                    # Current format: sample_idx might be [token] (single-element list)
+                    for key in ['sample_idx', 'flip', 'pcd_horizontal_flip', 'pcd_vertical_flip', 
+                               'pcd_scale_factor', 'sequence_group_idx', 'start_of_sequence',
+                               'box_mode_3d', 'box_type_3d', 'index', 'curr_to_prev_ego_rt', 
+                               'curr_to_prev_lidar_rt', 'can_bus', 'scene_name', 'ego2lidar',
+                               'sensor2sensorego', 'sensorego2global', 'sensorego2sensor', 'global2sensorego'
+                               ]:
+                        if key in img_meta and isinstance(img_meta[key], list) and len(img_meta[key]) == 1:
+                            img_meta[key] = img_meta[key][0]
+        
         # ---------------------- normalize img_inputs to original format -----------------------------
         # mmengine format: img_inputs = [[(imgs,), (sensor2egos,), (ego2globals,), (cam2imgs,), (post_augs,)]]
         # original format: img_inputs = (imgs, sensor2egos, ego2globals, cam2imgs, post_augs)
         # where imgs = tensor([6, 3, 256, 704])
         
-        if img_inputs is not None and isinstance(img_inputs, list) and len(img_inputs) > 0:
-            if isinstance(img_inputs[0], list) and len(img_inputs[0]) > 0:
-                # Extract all elements from the wrapped structure
-                unwrapped_elements = []
-                for item in img_inputs[0]:
-                    if isinstance(item, tuple) and len(item) > 0:
-                        unwrapped_elements.append(item[0])
-                
-                # Convert back to original tuple format
-                if unwrapped_elements:
-                    img_inputs = tuple(unwrapped_elements)
+        # CRITICAL: Unwrap img_inputs to match original format
+        # Original: img=img_inputs[0] (first element of tuple, which is imgs tensor)
+        if img_inputs is not None:
+            if isinstance(img_inputs, list) and len(img_inputs) > 0:
+                # Handle nested list format: [[(imgs,), (sensor2egos,), ...]]
+                if isinstance(img_inputs[0], list) and len(img_inputs[0]) > 0:
+                    # Unwrap tuples: [(imgs,), (sensor2egos,), ...] -> [imgs, sensor2egos, ...]
+                    unwrapped_elements = []
+                    for item in img_inputs[0]:
+                        if isinstance(item, tuple) and len(item) > 0:
+                            unwrapped_elements.append(item[0])
+                        else:
+                            unwrapped_elements.append(item)
+                    # CRITICAL: Add batch dimension to tensors if missing
+                    # Original format: all tensors have batch dimension [1, ...]
+                    if len(unwrapped_elements) > 0:
+                        imgs = unwrapped_elements[0]
+                        if torch.is_tensor(imgs) and imgs.dim() == 4:  # (18, 3, 256, 704) -> (1, 18, 3, 256, 704)
+                            unwrapped_elements[0] = imgs.unsqueeze(0)
+                    if len(unwrapped_elements) > 1:
+                        sensor2egos = unwrapped_elements[1]
+                        if torch.is_tensor(sensor2egos) and sensor2egos.dim() == 3:  # (18, 4, 4) -> (1, 18, 4, 4)
+                            unwrapped_elements[1] = sensor2egos.unsqueeze(0)
+                    if len(unwrapped_elements) > 2:
+                        ego2globals = unwrapped_elements[2]
+                        if torch.is_tensor(ego2globals) and ego2globals.dim() == 3:  # (18, 4, 4) -> (1, 18, 4, 4)
+                            unwrapped_elements[2] = ego2globals.unsqueeze(0)
+                    if len(unwrapped_elements) > 3:
+                        cam2imgs = unwrapped_elements[3]
+                        if torch.is_tensor(cam2imgs) and cam2imgs.dim() == 3:  # (18, 4, 4) -> (1, 18, 4, 4)
+                            unwrapped_elements[3] = cam2imgs.unsqueeze(0)
+                    if len(unwrapped_elements) > 4:
+                        post_augs = unwrapped_elements[4]
+                        if torch.is_tensor(post_augs) and post_augs.dim() == 3:  # (18, 4, 4) -> (1, 18, 4, 4)
+                            unwrapped_elements[4] = post_augs.unsqueeze(0)
+                    # CRITICAL: Add batch dimension to bda if missing
+                    # Original format: bda has shape [1, 4, 4], not [4, 4]
+                    if len(unwrapped_elements) >= 6:
+                        bda = unwrapped_elements[5]
+                        if torch.is_tensor(bda) and bda.dim() == 2:  # (4, 4) -> (1, 4, 4)
+                            unwrapped_elements[5] = bda.unsqueeze(0)
+                    # CRITICAL: Convert to list format to match original: [[imgs, sensor2egos, ego2globals, cam2imgs, post_augs, bda]]
+                    # Original format: img_inputs is a list with single list element (length 6)
+                    img_inputs = [list(unwrapped_elements)]
+                elif isinstance(img_inputs[0], tuple):
+                    # CRITICAL: Convert tuple to list and add batch dimensions
+                    # Original format: img_inputs[0] is a list, not a tuple
+                    tuple_elements = list(img_inputs[0])
+                    # Add batch dimension to tensors if missing
+                    if len(tuple_elements) > 0:
+                        imgs = tuple_elements[0]
+                        if torch.is_tensor(imgs) and imgs.dim() == 4:  # (18, 3, 256, 704) -> (1, 18, 3, 256, 704)
+                            tuple_elements[0] = imgs.unsqueeze(0)
+                    if len(tuple_elements) > 1:
+                        sensor2egos = tuple_elements[1]
+                        if torch.is_tensor(sensor2egos) and sensor2egos.dim() == 3:  # (18, 4, 4) -> (1, 18, 4, 4)
+                            tuple_elements[1] = sensor2egos.unsqueeze(0)
+                    if len(tuple_elements) > 2:
+                        ego2globals = tuple_elements[2]
+                        if torch.is_tensor(ego2globals) and ego2globals.dim() == 3:  # (18, 4, 4) -> (1, 18, 4, 4)
+                            tuple_elements[2] = ego2globals.unsqueeze(0)
+                    if len(tuple_elements) > 3:
+                        cam2imgs = tuple_elements[3]
+                        if torch.is_tensor(cam2imgs) and cam2imgs.dim() == 3:  # (18, 4, 4) -> (1, 18, 4, 4)
+                            tuple_elements[3] = cam2imgs.unsqueeze(0)
+                    if len(tuple_elements) > 4:
+                        post_augs = tuple_elements[4]
+                        if torch.is_tensor(post_augs) and post_augs.dim() == 3:  # (18, 4, 4) -> (1, 18, 4, 4)
+                            tuple_elements[4] = post_augs.unsqueeze(0)
+                    # Add batch dimension to bda if missing
+                    if len(tuple_elements) >= 6:
+                        bda = tuple_elements[5]
+                        if torch.is_tensor(bda) and bda.dim() == 2:  # (4, 4) -> (1, 4, 4)
+                            tuple_elements[5] = bda.unsqueeze(0)
+                    img_inputs = [tuple_elements]
+                # else: img_inputs[0] is already a list, check all tensors
+                elif isinstance(img_inputs[0], list) and len(img_inputs[0]) >= 1:
+                    # Add batch dimension to imgs if missing
+                    imgs = img_inputs[0][0]
+                    if torch.is_tensor(imgs) and imgs.dim() == 4:  # (18, 3, 256, 704) -> (1, 18, 3, 256, 704)
+                        img_inputs[0][0] = imgs.unsqueeze(0)
+                    # Add batch dimension to sensor2egos if missing
+                    if len(img_inputs[0]) > 1:
+                        sensor2egos = img_inputs[0][1]
+                        if torch.is_tensor(sensor2egos) and sensor2egos.dim() == 3:  # (18, 4, 4) -> (1, 18, 4, 4)
+                            img_inputs[0][1] = sensor2egos.unsqueeze(0)
+                    # Add batch dimension to ego2globals if missing
+                    if len(img_inputs[0]) > 2:
+                        ego2globals = img_inputs[0][2]
+                        if torch.is_tensor(ego2globals) and ego2globals.dim() == 3:  # (18, 4, 4) -> (1, 18, 4, 4)
+                            img_inputs[0][2] = ego2globals.unsqueeze(0)
+                    # Add batch dimension to cam2imgs if missing
+                    if len(img_inputs[0]) > 3:
+                        cam2imgs = img_inputs[0][3]
+                        if torch.is_tensor(cam2imgs) and cam2imgs.dim() == 3:  # (18, 4, 4) -> (1, 18, 4, 4)
+                            img_inputs[0][3] = cam2imgs.unsqueeze(0)
+                    # Add batch dimension to post_augs if missing
+                    if len(img_inputs[0]) > 4:
+                        post_augs = img_inputs[0][4]
+                        if torch.is_tensor(post_augs) and post_augs.dim() == 3:  # (18, 4, 4) -> (1, 18, 4, 4)
+                            img_inputs[0][4] = post_augs.unsqueeze(0)
+                    # Add batch dimension to bda if missing
+                    if len(img_inputs[0]) >= 6:
+                        bda = img_inputs[0][5]
+                        if torch.is_tensor(bda) and bda.dim() == 2:  # (4, 4) -> (1, 4, 4)
+                            img_inputs[0][5] = bda.unsqueeze(0)
+            elif isinstance(img_inputs, tuple):
+                # CRITICAL: Convert tuple to list and add batch dimensions
+                # Original format: img_inputs is a list with single list element (length 6)
+                tuple_elements = list(img_inputs)
+                # Add batch dimension to imgs if missing
+                if len(tuple_elements) > 0:
+                    imgs = tuple_elements[0]
+                    if torch.is_tensor(imgs) and imgs.dim() == 4:  # (18, 3, 256, 704) -> (1, 18, 3, 256, 704)
+                        tuple_elements[0] = imgs.unsqueeze(0)
+                # Add batch dimension to sensor2egos if missing
+                if len(tuple_elements) > 1:
+                    sensor2egos = tuple_elements[1]
+                    if torch.is_tensor(sensor2egos) and sensor2egos.dim() == 3:  # (18, 4, 4) -> (1, 18, 4, 4)
+                        tuple_elements[1] = sensor2egos.unsqueeze(0)
+                # Add batch dimension to ego2globals if missing
+                if len(tuple_elements) > 2:
+                    ego2globals = tuple_elements[2]
+                    if torch.is_tensor(ego2globals) and ego2globals.dim() == 3:  # (18, 4, 4) -> (1, 18, 4, 4)
+                        tuple_elements[2] = ego2globals.unsqueeze(0)
+                # Add batch dimension to cam2imgs if missing
+                if len(tuple_elements) > 3:
+                    cam2imgs = tuple_elements[3]
+                    if torch.is_tensor(cam2imgs) and cam2imgs.dim() == 3:  # (18, 4, 4) -> (1, 18, 4, 4)
+                        tuple_elements[3] = cam2imgs.unsqueeze(0)
+                # Add batch dimension to post_augs if missing
+                if len(tuple_elements) > 4:
+                    post_augs = tuple_elements[4]
+                    if torch.is_tensor(post_augs) and post_augs.dim() == 3:  # (18, 4, 4) -> (1, 18, 4, 4)
+                        tuple_elements[4] = post_augs.unsqueeze(0)
+                # Add batch dimension to bda if missing
+                if len(tuple_elements) >= 6:
+                    bda = tuple_elements[5]
+                    if torch.is_tensor(bda) and bda.dim() == 2:  # (4, 4) -> (1, 4, 4)
+                        tuple_elements[5] = bda.unsqueeze(0)
+                img_inputs = [tuple_elements]
         
-        # DEBUG: Print input stats once
-        if not hasattr(self, '_input_stats_debug') and torch.is_tensor(img_inputs[0]):
-            print(f"\n[INPUT] img_inputs[0] (images):")
-            print(f"  Shape: {img_inputs[0].shape}")
-            print(f"  Mean: {img_inputs[0].mean().item():.6f}, Std: {img_inputs[0].std().item():.6f}")
-            print(f"  Min: {img_inputs[0].min().item():.6f}, Max: {img_inputs[0].max().item():.6f}")
-            self._input_stats_debug = True
-        
+
+        # breakpoint()
+            
         # ---------------------- obtain feats from images -----------------------------
-        # Pass entire img_inputs tuple, not just img_inputs[0]
-        return_dict = self.obtain_feats_from_images(points, img=img_inputs, img_metas=img_metas, **kwargs)
+        # Original: img=img_inputs[0] (imgs tensor)
+        return_dict = self.obtain_feats_from_images(points, img=img_inputs[0] if img_inputs is not None else None, img_metas=img_metas, **kwargs)
         voxel_feat = return_dict['voxel_feats']
         last_occ_pred = return_dict['last_occ_pred']
 
@@ -703,6 +772,16 @@ class STCOcc(CenterPoint):
                 # Fallback: treat all kwargs as the old format and redirect to legacy methods
                 return self._handle_legacy_forward(**kwargs)
         
+        # Unwrap DataContainer from img_metas if present
+        if 'img_metas' in kwargs:
+            img_metas = kwargs['img_metas']
+            # Handle DataContainer format: {'data': [...], 'cpu_only': True}
+            if isinstance(img_metas, dict) and 'data' in img_metas:
+                kwargs['img_metas'] = img_metas['data']
+            # Handle list of DataContainers
+            elif isinstance(img_metas, list) and len(img_metas) > 0:
+                if isinstance(img_metas[0], dict) and 'data' in img_metas[0]:
+                    kwargs['img_metas'] = [item['data'] if isinstance(item, dict) and 'data' in item else item for item in img_metas]
         
         if mode == 'loss':
             # Training mode - call forward_train
@@ -713,13 +792,13 @@ class STCOcc(CenterPoint):
             # Extract ground truth from data_samples if provided
             if data_samples is not None:
                 # Convert data_samples to traditional format
-                img_metas = []
+                img_metas_list = []
                 gt_bboxes_3d = []
                 gt_labels_3d = []
                 
                 for data_sample in data_samples:
                     # Extract metainfo
-                    img_metas.append(data_sample.metainfo)
+                    img_metas_list.append(data_sample.metainfo)
                     
                     # Extract 3D ground truth if available
                     if hasattr(data_sample, 'gt_instances_3d'):
@@ -730,14 +809,10 @@ class STCOcc(CenterPoint):
                         gt_labels_3d.append(None)
                 
                 kwargs.update({
-                    'img_metas': img_metas,
+                    'img_metas': img_metas_list,
                     'gt_bboxes_3d': gt_bboxes_3d,
                     'gt_labels_3d': gt_labels_3d,
                 })
-            
-            # Extract actual data from DataContainer format if needed
-            if 'img_metas' in kwargs and isinstance(kwargs['img_metas'], dict) and 'data' in kwargs['img_metas']:
-                kwargs['img_metas'] = kwargs['img_metas']['data']
             
             return self.forward_train(
                 points=points,

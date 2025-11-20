@@ -116,7 +116,7 @@ class OccupancyMetric(BaseMetric):
         print('\nStarting Evaluation...')
         print(f"Evaluating {len(results)} predictions against ground truth...")
         
-        breakpoint()
+        # breakpoint()
 
         # Process all results
         loaded_count = 0

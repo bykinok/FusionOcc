@@ -7,7 +7,6 @@ from mmdet3d.registry import METRICS
 # Import original metric functions
 import sys
 import os
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'STCOcc_ori'))
 try:
     from mmdet3d.datasets.occ_metrics import Metric_mIoU, Metric_FScore
 except ImportError:
@@ -75,7 +74,16 @@ class OccupancyMetric(BaseMetric):
                     self.data_infos = data['infos']
                 elif isinstance(data, list):
                     self.data_infos = data
-                print(f"Loaded {len(self.data_infos)} data_infos from {ann_file}")
+                # CRITICAL: Sort by timestamp to match dataset's data_infos order
+                # Dataset sorts data_infos in load_data_list(), so metric must use same order
+                if self.data_infos and len(self.data_infos) > 0:
+                    if 'timestamp' in self.data_infos[0]:
+                        self.data_infos = list(sorted(self.data_infos, key=lambda e: e['timestamp']))
+                        print(f"Loaded and sorted {len(self.data_infos)} data_infos from {ann_file}")
+                    else:
+                        print(f"Loaded {len(self.data_infos)} data_infos from {ann_file} (no timestamp, not sorted)")
+                else:
+                    print(f"Loaded {len(self.data_infos)} data_infos from {ann_file}")
             except Exception as e:
                 print(f"Warning: Failed to load data_infos from {ann_file}: {e}")
         
@@ -227,33 +235,54 @@ class OccupancyMetric(BaseMetric):
         
         print('\nStarting Evaluation...')
         
-        # Collect predictions
-        sample_idx = 0
+        # CRITICAL: Match original model's logic - use result['index'] instead of sequential index
+        # Original: data_id = result['index'], then for i, id in enumerate(data_id): data_index.append(id)
+        processed_set = set()
         for pred_dict in self.predictions:
+            # Get index list from pred_dict (same as original: result['index'])
+            if 'index' not in pred_dict:
+                # Fallback: use sequential index if 'index' not available
+                data_id = [len(data_index)]
+            else:
+                data_id = pred_dict['index']
+                # Ensure data_id is a list
+                if not isinstance(data_id, list):
+                    data_id = [data_id]
+            
             occ_results = pred_dict['occ_results']
-            for i in range(len(occ_results)):
+            for i, id in enumerate(data_id):
+                # CRITICAL: Skip duplicates using processed_set (same as original)
+                if id in processed_set:
+                    continue
+                processed_set.add(id)
+                
+                # Ensure index is within bounds
+                if i >= len(occ_results):
+                    continue
+                
                 pred_sem = occ_results[i]
-                data_index.append(sample_idx)
+                
+                data_index.append(id)  # CRITICAL: Use actual id from result['index'], not sequential index
                 pred_sems.append(pred_sem)
                 
                 # Get flow if available
-                if 'flow_results' in pred_dict:
+                if 'flow_results' in pred_dict and i < len(pred_dict['flow_results']):
                     pred_flows.append(pred_dict['flow_results'][i])
                 else:
                     pred_flows.append(np.zeros(pred_sem.shape + (2,)))
-                
-                sample_idx += 1
         
         # Load NuScenes dataset for lidar origins
         from nuscenes.nuscenes import NuScenes
         nusc = NuScenes('v1.0-trainval', 'data/nuscenes/')
         nusdata = nuScenesDataset(nusc, 'val')
         
-        # Load ground truth
+        # CRITICAL: Load ground truth in the same order as data_index (same as original)
         for index in data_index:
             if index >= len(self.data_infos):
                 break
             info = self.data_infos[index]
+
+            breakpoint()
             
             occ_path = info['occ_path']
             if self.dataset_name == 'openocc':

@@ -84,6 +84,8 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
                  img_info_prototype=None,  # Handle img_info_prototype parameter
                  multi_adj_frame_id_cfg=None,  # Handle multi_adj_frame_id_cfg parameter
                  use_sequence_group_flag=None,  # Handle use_sequence_group_flag parameter
+                 load_interval=1,  # Add load_interval parameter (default=1, same as original)
+                 box_type_3d='LiDAR',  # CRITICAL: Add box_type_3d parameter
                  **kwargs):
         # Store custom parameters separately
         self._classes = classes
@@ -96,9 +98,15 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         self.img_info_prototype = img_info_prototype
         self.multi_adj_frame_id_cfg = multi_adj_frame_id_cfg
         self.use_sequence_group_flag = use_sequence_group_flag
+        self.load_interval = load_interval  # Store load_interval
         
         # Initialize show_ins_var attribute (required by Det3DDataset)
         self.show_ins_var = kwargs.get('show_ins_var', False)
+        
+        # CRITICAL: Store box_type_3d and compute box_mode_3d
+        self.box_type_3d = box_type_3d
+        from mmdet3d.structures.bbox_3d import get_box_type
+        self.box_type_3d, self.box_mode_3d = get_box_type(box_type_3d)
         
         # Set up METAINFO for proper class statistics
         if classes is not None:
@@ -130,73 +138,86 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
             self._show_correct_statistics()
         
         # CRITICAL: After parent __init__, self.data_infos may be empty, reload it!
-        if not hasattr(self, 'data_infos') or len(self.data_infos) == 0:
-            import mmengine
-            raw_data = mmengine.load(self.ann_file)
-            if isinstance(raw_data, dict) and 'data_list' in raw_data:
-                self.data_infos = raw_data['data_list']
-            elif isinstance(raw_data, dict) and 'infos' in raw_data:
-                self.data_infos = raw_data['infos']
-            elif isinstance(raw_data, list):
-                self.data_infos = raw_data
-            else:
-                self.data_infos = []
-            print(f"DEBUG __init__ end: reloaded data_infos, len={len(self.data_infos)}")
+        # Note: This happens before load_data_list is called by parent class
+        # So we need to ensure load_data_list sets data_infos correctly
         
         # CRITICAL: Set sequence group flag for temporal fusion
+        # Must be called after load_data_list (which does sorting) - same as original
+        # In mmengine, full_init() calls load_data_list() and stores result in self.data_list
         if self.use_sequence_group_flag:
+            # Ensure data is loaded before setting sequence group flag
+            # If lazy_init=False, parent __init__ already called full_init()
+            # If lazy_init=True, we need to call full_init() manually
+            if not hasattr(self, 'data_list') or len(self.data_list) == 0:
+                if hasattr(self, 'full_init'):
+                    self.full_init()
+            
+            # Sync data_infos for backward compatibility
+            if hasattr(self, 'data_list') and len(self.data_list) > 0:
+                self.data_infos = self.data_list
+            
+            # Now set sequence group flag
             self._set_sequence_group_flag()
-            print(f"DEBUG: Sequence group flag set, flag shape: {self.flag.shape}, unique values: {np.unique(self.flag)}")
 
     def load_data_list(self):
         """Load annotations from file.
         
         Adapts the old format STCOcc annotations to the new mmengine format.
         CRITICAL: This method MUST return the data_list AND set self.data_infos
+        CRITICAL: Match original behavior - sort by timestamp and apply load_interval
         """
         import mmengine
         
         # Load the original annotation file
         raw_data = mmengine.load(self.ann_file)
         
-        # DEBUG: print to verify loading
-        if not hasattr(self, '_load_debug'):
-            print(f"DEBUG load_data_list: type(raw_data)={type(raw_data)}")
-            if isinstance(raw_data, dict):
-                print(f"  dict keys={list(raw_data.keys())[:5]}")
-                if 'infos' in raw_data and len(raw_data['infos']) > 0:
-                    print(f"  first info keys: {list(raw_data['infos'][0].keys())[:10]}")
-            elif isinstance(raw_data, list) and len(raw_data) > 0:
-                print(f"  list len={len(raw_data)}")
-                print(f"  first item keys: {list(raw_data[0].keys())[:10]}")
-            self._load_debug = True
+        # Extract data_infos based on format
+        data_infos = None
         
         # Check if it's already in the new format
         if isinstance(raw_data, dict) and 'data_list' in raw_data and 'metainfo' in raw_data:
-            data_list = raw_data['data_list']
-            # CRITICAL: Set data_infos for backward compatibility
-            self.data_infos = data_list
-            print(f"DEBUG: Loaded data_list format, len={len(data_list)}")
-            return data_list
-        
-        # Convert old format to new format
-        # Assume raw_data is a list of data_infos (old format)
-        if isinstance(raw_data, list):
-            # Store the data_infos for backward compatibility
-            self.data_infos = raw_data
-            print(f"DEBUG: Loaded list format, len={len(raw_data)}")
-            return raw_data
+            data_infos = raw_data['data_list']
+        elif isinstance(raw_data, list):
+            data_infos = raw_data
         elif isinstance(raw_data, dict) and 'infos' in raw_data:
-            # Some formats have 'infos' key
-            # Store the data_infos for backward compatibility
-            self.data_infos = raw_data['infos']
-            print(f"DEBUG: Loaded infos format, len={len(raw_data['infos'])}")
-            return raw_data['infos']
+            data_infos = raw_data['infos']
         else:
             # Fallback: treat the whole data as data_list
-            self.data_infos = raw_data if isinstance(raw_data, list) else [raw_data]
-            print(f"DEBUG: Loaded fallback format, len={len(self.data_infos)}")
-            return self.data_infos
+            data_infos = raw_data if isinstance(raw_data, list) else [raw_data]
+        
+        # CRITICAL: Sort by timestamp to match original behavior
+        # Original: data_infos = list(sorted(data['infos'], key=lambda e: e['timestamp']))
+        if data_infos and len(data_infos) > 0:
+            # Check if timestamp key exists
+            if 'timestamp' in data_infos[0]:
+                data_infos = list(sorted(data_infos, key=lambda e: e['timestamp']))
+            else:
+                print(f"WARNING: 'timestamp' key not found in data_infos, skipping sort")
+        
+        # CRITICAL: Apply load_interval sampling to match original behavior
+        # Original: data_infos = data_infos[::self.load_interval]
+        load_interval = getattr(self, 'load_interval', 1)
+        if load_interval > 1:
+            original_len = len(data_infos)
+            data_infos = data_infos[::load_interval]
+        
+        # Store metadata if available (for backward compatibility)
+        if isinstance(raw_data, dict):
+            if 'metadata' in raw_data:
+                self.metadata = raw_data['metadata']
+                if 'version' in self.metadata:
+                    self.version = self.metadata['version']
+            elif 'metainfo' in raw_data:
+                self.metadata = raw_data['metainfo']
+        
+        # CRITICAL: Set data_infos for backward compatibility
+        self.data_infos = data_infos
+        
+        # CRITICAL: Also ensure data_list is set (mmengine BaseDataset will overwrite this, but we set it for consistency)
+        if not hasattr(self, 'data_list') or len(self.data_list) == 0:
+            self.data_list = data_infos
+        
+        return data_infos
 
     def get_data_info(self, index):
         """Get data info according to the given index.
@@ -219,6 +240,63 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         """
         input_dict = super(NuScenesDatasetOccpancy, self).get_data_info(index)
         
+        # CRITICAL: Ensure data_list is loaded before accessing it
+        # In mmengine, full_init() calls load_data_list(), but get_data_info might be called before full_init()
+        # So we need to ensure data_list is loaded here
+        if not hasattr(self, 'data_list') or len(self.data_list) == 0:
+            # Load data_list if not already loaded
+            self.load_data_list()
+        
+        # CRITICAL: Ensure data_infos is synced with data_list (mmengine format)
+        if not hasattr(self, 'data_infos') or len(self.data_infos) == 0:
+            if hasattr(self, 'data_list') and len(self.data_list) > 0:
+                self.data_infos = self.data_list
+        
+        # CRITICAL: Add index to match original format
+        input_dict['index'] = index
+        
+        # CRITICAL: Get data_info from data_list or data_infos (use data_list first as it's mmengine format)
+        data_info = None
+        if hasattr(self, 'data_list') and len(self.data_list) > 0 and index < len(self.data_list):
+            data_info = self.data_list[index]
+        elif hasattr(self, 'data_infos') and len(self.data_infos) > 0 and index < len(self.data_infos):
+            data_info = self.data_infos[index]
+        
+        # CRITICAL: Set sample_idx from token to match original format
+        # Original: sample_idx=info['token'] (string token like '30e55a3ec6184d8cb1944b39ba19d622')
+        if 'sample_idx' not in input_dict or input_dict.get('sample_idx') == index:
+            if data_info is not None and 'token' in data_info:
+                input_dict['sample_idx'] = data_info['token']
+            elif 'token' in input_dict:
+                input_dict['sample_idx'] = input_dict['token']
+        
+        # CRITICAL: Ensure pts_filename is properly set (match original format)
+        # Priority: 1) data_info['lidar_path'], 2) input_dict['lidar_path'], 3) data_info['lidar_points']['lidar_path']
+        if 'pts_filename' not in input_dict or not input_dict.get('pts_filename'):
+            if data_info is not None:
+                # STCOcc data uses 'lidar_path' key
+                if 'lidar_path' in data_info and data_info['lidar_path']:
+                    input_dict['pts_filename'] = data_info['lidar_path']
+                # Also check if lidar_points has lidar_path (mmdet3d format)
+                elif 'lidar_points' in data_info and isinstance(data_info['lidar_points'], dict):
+                    if 'lidar_path' in data_info['lidar_points']:
+                        input_dict['pts_filename'] = data_info['lidar_points']['lidar_path']
+            
+            # Fallback: use lidar_path from input_dict if already set by parent
+            if ('pts_filename' not in input_dict or not input_dict.get('pts_filename')) and 'lidar_path' in input_dict:
+                input_dict['pts_filename'] = input_dict['lidar_path']
+        
+        # CRITICAL: Add scene_name to match original format
+        # Priority: 1) data_info['occ_path'], 2) input_dict['occ_path']
+        if 'scene_name' not in input_dict or not input_dict.get('scene_name'):
+            if data_info is not None:
+                if 'occ_path' in data_info and data_info['occ_path']:
+                    input_dict['scene_name'] = data_info['occ_path'].split('/')[-2]
+            
+            # Fallback: use occ_path from input_dict if already set by parent
+            if ('scene_name' not in input_dict or not input_dict.get('scene_name')) and 'occ_path' in input_dict and input_dict['occ_path']:
+                input_dict['scene_name'] = input_dict['occ_path'].split('/')[-2]
+        
         # Super() already provides perfect data structure with cams info
         # Just add curr key pointing to the same data for STCOcc compatibility
         input_dict['curr'] = input_dict.copy()
@@ -226,77 +304,118 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         # Add specific STCOcc fields if they exist in the data
         if 'occ_path' in input_dict:
             input_dict['occ_gt_path'] = input_dict['occ_path']
-            
-        # Ensure pts_filename is properly set from data_infos
-        if 'pts_filename' not in input_dict and hasattr(self, 'data_infos') and index < len(self.data_infos):
-            data_info = self.data_infos[index] 
-            # STCOcc data uses 'lidar_path' key
-            if 'lidar_path' in data_info and data_info['lidar_path']:
-                input_dict['pts_filename'] = data_info['lidar_path']
         
         # Handle multi-frame adjacency if needed (STCOcc specific)
         # This follows the original STCOcc_ori implementation
-        # Use self.data_infos for adjacent frame loading
-        # DEBUG: print conditions once
-        if not hasattr(self, '_adj_cond_debug'):
-            print(f"DEBUG get_data_info adjacency conditions:")
-            print(f"  multi_adj_frame_id_cfg: {self.multi_adj_frame_id_cfg}")
-            print(f"  hasattr(data_infos): {hasattr(self, 'data_infos')}")
-            if hasattr(self, 'data_infos'):
-                print(f"  len(data_infos): {len(self.data_infos)}")
-                print(f"  index: {index}, index < len: {index < len(self.data_infos)}")
-            print(f"  stereo: {self.stereo}")
-            self._adj_cond_debug = True
-        
-        if self.multi_adj_frame_id_cfg and hasattr(self, 'data_infos') and len(self.data_infos) > 0 and index < len(self.data_infos):
-            info = self.data_infos[index]
-            adjacent_list = []
+        # CRITICAL: Use data_list (mmengine format) - it should be loaded by now
+        # Match original condition: '4d' in img_info_prototype
+        if (self.multi_adj_frame_id_cfg and 
+            hasattr(self, 'img_info_prototype') and 
+            '4d' in self.img_info_prototype):
             
-            # Build adjacent frame id list
-            adj_id_list = list(range(*self.multi_adj_frame_id_cfg))
+            # CRITICAL: data_list should be loaded by now, but check again
+            data_source = None
+            if hasattr(self, 'data_list') and len(self.data_list) > 0:
+                data_source = self.data_list
+            elif hasattr(self, 'data_infos') and len(self.data_infos) > 0:
+                data_source = self.data_infos
+
+            # breakpoint()
             
-            # For stereo mode, add an additional frame
-            if self.stereo:
-                assert self.multi_adj_frame_id_cfg[0] == 1
-                assert self.multi_adj_frame_id_cfg[2] == 1
-                adj_id_list.append(self.multi_adj_frame_id_cfg[1])
-            
-            # Get adjacent frames (PAST frames, not future!)
-            for select_id in adj_id_list:
-                # Use PAST frame: index - select_id
-                adj_data_idx = max(index - select_id, 0)
+            if data_source is not None and len(data_source) > 0 and index < len(data_source):
+                info = data_source[index]
+                adjacent_list = []
                 
-                # Check if it's the same scene, otherwise use current frame
-                if 'scene_token' in info and 'scene_token' in self.data_infos[adj_data_idx]:
-                    if not self.data_infos[adj_data_idx]['scene_token'] == info['scene_token']:
-                        # Different scene, use current frame instead
-                        adjacent_list.append(info)
+                # Build adjacent frame id list (same as get_adj_info)
+                adj_id_list = list(range(*self.multi_adj_frame_id_cfg))
+                
+                # For stereo mode, add an additional frame
+                if self.stereo:
+                    assert self.multi_adj_frame_id_cfg[0] == 1
+                    assert self.multi_adj_frame_id_cfg[2] == 1
+                    adj_id_list.append(self.multi_adj_frame_id_cfg[1])
+                
+                # Get adjacent frames (PAST frames, not future!)
+                for select_id in adj_id_list:
+                    # Use PAST frame: index - select_id (same as get_adj_info)
+                    adj_data_idx = max(index - select_id, 0)
+                    
+                    # Check if it's the same scene, otherwise use current frame
+                    if adj_data_idx < len(data_source) and 'scene_token' in info and 'scene_token' in data_source[adj_data_idx]:
+                        if not data_source[adj_data_idx]['scene_token'] == info['scene_token']:
+                            # Different scene, use current frame instead
+                            adjacent_list.append(info)
+                        else:
+                            # Same scene, use the adjacent frame
+                            adjacent_list.append(data_source[adj_data_idx])
+                    elif adj_data_idx < len(data_source):
+                        # No scene_token info, use the adjacent frame
+                        adjacent_list.append(data_source[adj_data_idx])
                     else:
-                        # Same scene, use the adjacent frame
-                        adjacent_list.append(self.data_infos[adj_data_idx])
-                else:
-                    # No scene_token info, use the adjacent frame
-                    adjacent_list.append(self.data_infos[adj_data_idx])
-            
-            if adjacent_list:
-                input_dict['adjacent'] = adjacent_list
-                # DEBUG: print once
-                if not hasattr(self, '_adj_added_debug'):
-                    print(f"DEBUG get_data_info: added 'adjacent' to input_dict, len={len(adjacent_list)}")
-                    print(f"  input_dict keys: {list(input_dict.keys())[:10]}")
-                    self._adj_added_debug = True
+                        # Index out of bounds, use current frame
+                        adjacent_list.append(info)
+                
+                if adjacent_list:
+                    input_dict['adjacent'] = adjacent_list
         
         input_dict['seg_label_mapping'] = self.SegLabelMapping
+        
+        # CRITICAL: Update can_bus information to match original format
+        # Original code overwrites can_bus pos&rot information with ego2global values
+        if 'can_bus' in input_dict and 'curr' in input_dict:
+            from pyquaternion import Quaternion
+            from nuscenes.eval.common.utils import quaternion_yaw
+            
+            rotation = Quaternion(input_dict['curr']['ego2global_rotation'])
+            translation = input_dict['curr']['ego2global_translation']
+            can_bus = input_dict['can_bus'].copy()  # Make a copy to avoid modifying original
+            # Overwrite the canbus pos&rot information.
+            can_bus[:3] = translation
+            can_bus[3:7] = rotation
+            patch_angle = quaternion_yaw(rotation) / np.pi * 180
+            if patch_angle < 0:
+                patch_angle += 360
+            can_bus[-2] = patch_angle / 180 * np.pi
+            can_bus[-1] = patch_angle
+            input_dict['can_bus'] = can_bus
+        elif 'can_bus' in input_dict and 'ego2global_rotation' in input_dict and 'ego2global_translation' in input_dict:
+            # Fallback: use direct keys if 'curr' key doesn't exist
+            from pyquaternion import Quaternion
+            from nuscenes.eval.common.utils import quaternion_yaw
+            
+            rotation = Quaternion(input_dict['ego2global_rotation'])
+            translation = input_dict['ego2global_translation']
+            can_bus = input_dict['can_bus'].copy()  # Make a copy to avoid modifying original
+            # Overwrite the canbus pos&rot information.
+            can_bus[:3] = translation
+            can_bus[3:7] = rotation
+            patch_angle = quaternion_yaw(rotation) / np.pi * 180
+            if patch_angle < 0:
+                patch_angle += 360
+            can_bus[-2] = patch_angle / 180 * np.pi
+            can_bus[-1] = patch_angle
+            input_dict['can_bus'] = can_bus
+        
         return input_dict
     
     def _set_sequence_group_flag(self):
         """
         Set each sequence to be a different group
+        CRITICAL: Use self.data_list (mmengine format) instead of self.data_infos
         """
+        # Use data_list (mmengine format) or data_infos (backward compatibility)
+        data_source = getattr(self, 'data_list', None)
+        if data_source is None or len(data_source) == 0:
+            data_source = getattr(self, 'data_infos', None)
+        if data_source is None or len(data_source) == 0:
+            print(f"WARNING: Both data_list and data_infos are empty, cannot set sequence group flag")
+            self.flag = np.array([], dtype=np.int64)
+            return
+        
         res = []
         curr_sequence = 0
-        for idx in range(len(self.data_infos)):
-            if idx != 0 and len(self.data_infos[idx].get('prev', [])) == 0:
+        for idx in range(len(data_source)):
+            if idx != 0 and len(data_source[idx].get('prev', [])) == 0:
                 # Not first frame and # of sweeps is 0 -> new sequence
                 curr_sequence += 1
             res.append(curr_sequence)
@@ -305,7 +424,7 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
 
         if self.sequences_split_num != 1:
             if self.sequences_split_num == 'all':
-                self.flag = np.array(range(len(self.data_infos)), dtype=np.int64)
+                self.flag = np.array(range(len(data_source)), dtype=np.int64)
             else:
                 bin_counts = np.bincount(self.flag)
                 new_flags = []
@@ -324,6 +443,10 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
                 assert len(new_flags) == len(self.flag)
                 assert len(np.bincount(new_flags)) == len(np.bincount(self.flag)) * self.sequences_split_num
                 self.flag = np.array(new_flags, dtype=np.int64)
+        
+        # CRITICAL: Sync data_infos for backward compatibility
+        if not hasattr(self, 'data_infos') or len(self.data_infos) == 0:
+            self.data_infos = data_source
 
     def prepare_data(self, idx: int) -> Any:
         """Prepare data for the given index.
@@ -334,21 +457,75 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         # Get data info
         data_info = self.get_data_info(idx)
         
+        # CRITICAL: Add box_mode_3d and box_type_3d to match original format
+        # These are normally added by pre_pipeline in mmdet3d, but we need to add them explicitly
+        if hasattr(self, 'box_type_3d') and hasattr(self, 'box_mode_3d'):
+            data_info['box_type_3d'] = self.box_type_3d
+            data_info['box_mode_3d'] = self.box_mode_3d
+        else:
+            # Fallback: try to get from parent class or set defaults
+            from mmdet3d.structures.bbox_3d import LiDARInstance3DBoxes
+            data_info['box_type_3d'] = 'LiDAR'
+            data_info['box_mode_3d'] = LiDARInstance3DBoxes
+        
         # Add temporal fusion information
         if self.use_sequence_group_flag:
-            data_info['sample_index'] = idx
-            data_info['sequence_group_idx'] = int(self.flag[idx])
+            # CRITICAL: Ensure flag is set and has correct length
+            if not hasattr(self, 'flag') or len(self.flag) == 0:
+                # Flag not set yet, set it now
+                if hasattr(self, 'data_list') and len(self.data_list) > 0:
+                    if not hasattr(self, 'data_infos') or len(self.data_infos) == 0:
+                        self.data_infos = self.data_list
+                    self._set_sequence_group_flag()
+                else:
+                    # Fallback: use index as sequence_group_idx
+                    data_info['sequence_group_idx'] = 0
+                    data_info['start_of_sequence'] = True
+                    data_info['curr_to_prev_ego_rt'] = torch.eye(4).float()
+                    data_info['curr_to_prev_lidar_rt'] = torch.eye(4).float()  # CRITICAL: Add this
+                    return self.pipeline(data_info)
+            
+            # Ensure idx is within bounds
+            if idx >= len(self.flag):
+                print(f"WARNING: idx {idx} >= len(flag) {len(self.flag)}, using 0 as default")
+                data_info['sequence_group_idx'] = 0
+            else:
+                data_info['sample_index'] = idx
+                data_info['sequence_group_idx'] = int(self.flag[idx])
+            
             #data_info['start_of_sequence'] = idx == 0 or self.flag[idx - 1] != self.flag[idx]
             data_info['start_of_sequence'] = True
             
-            # Get transformation matrix from current to previous frame
-            if not data_info['start_of_sequence']:
-                data_info['curr_to_prev_ego_rt'] = torch.FloatTensor(nuscenes_get_rt_matrix(
-                    self.data_infos[idx], self.data_infos[idx - 1],
-                    "ego", "ego"))
+            # CRITICAL: Get transformation matrices from current to previous frame
+            # Match original format: both curr_to_prev_lidar_rt and curr_to_prev_ego_rt
+            if not data_info['start_of_sequence'] and idx > 0:
+                # Ensure data_infos is available
+                if not hasattr(self, 'data_infos') or len(self.data_infos) == 0:
+                    if hasattr(self, 'data_list') and len(self.data_list) > 0:
+                        self.data_infos = self.data_list
+                
+                if hasattr(self, 'data_infos') and len(self.data_infos) > idx and len(self.data_infos) > idx - 1:
+                    # CRITICAL: Add curr_to_prev_lidar_rt to match original format
+                    data_info['curr_to_prev_lidar_rt'] = torch.FloatTensor(nuscenes_get_rt_matrix(
+                        self.data_infos[idx], self.data_infos[idx - 1],
+                        "lidar", "lidar"))
+                    data_info['curr_to_prev_ego_rt'] = torch.FloatTensor(nuscenes_get_rt_matrix(
+                        self.data_infos[idx], self.data_infos[idx - 1],
+                        "ego", "ego"))
+                else:
+                    data_info['curr_to_prev_lidar_rt'] = torch.eye(4).float()
+                    data_info['curr_to_prev_ego_rt'] = torch.eye(4).float()
             else:
-                # Identity matrix for the first frame of a sequence
-                data_info['curr_to_prev_ego_rt'] = torch.eye(4).float()
+                # Match original: calculate transformation matrix even for start_of_sequence
+                # Original uses nuscenes_get_rt_matrix with same frame for both src and dest
+                if hasattr(self, 'data_infos') and len(self.data_infos) > idx:
+                    data_info['curr_to_prev_lidar_rt'] = torch.eye(4).float()
+                    data_info['curr_to_prev_ego_rt'] = torch.FloatTensor(nuscenes_get_rt_matrix(
+                        self.data_infos[idx], self.data_infos[idx],
+                        "ego", "ego"))
+                else:
+                    data_info['curr_to_prev_lidar_rt'] = torch.eye(4).float()
+                    data_info['curr_to_prev_ego_rt'] = torch.eye(4).float()
         
         # Apply pipeline transforms
         # Deepcopy to avoid modifying cached data_info

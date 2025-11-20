@@ -12,11 +12,6 @@ from pathlib import Path
 debug_path = Path(__file__).parent.parent.parent.parent
 if str(debug_path) not in sys.path:
     sys.path.insert(0, str(debug_path))
-try:
-    from debug_layer_comparison import log_layer
-except ImportError:
-    def log_layer(*args, **kwargs):
-        pass
 
 @MODELS.register_module()
 class CustomResNet(nn.Module):
@@ -209,42 +204,13 @@ class CustomResNet3D(nn.Module):
         self.with_cp = with_cp
 
     def forward(self, x):
-        # DEBUG: Log BEV encoder input
-        log_layer("bev_encoder", inputs={"x": x})
-        
         feats = []
         x_tmp = x
         for lid, layer in enumerate(self.layers):
-            # DEBUG: Check LAYER0 weights before forward
-            if lid == 0 and not hasattr(self, '_layer0_weights_debug'):
-                print(f"\n[BEV_ENCODER_LAYER0_WEIGHTS]:")
-                # First block
-                first_block = layer[0]
-                if hasattr(first_block, 'conv1'):
-                    # ConvModule uses .conv attribute
-                    conv1 = first_block.conv1.conv if hasattr(first_block.conv1, 'conv') else first_block.conv1
-                    print(f"  conv1.weight: mean={conv1.weight.mean().item():.6f}, std={conv1.weight.std().item():.6f}")
-                if hasattr(first_block, 'bn1'):
-                    # BN might be in .bn attribute
-                    bn1 = first_block.bn1.bn if hasattr(first_block.bn1, 'bn') else first_block.bn1
-                    print(f"  bn1.weight: mean={bn1.weight.mean().item():.6f}, std={bn1.weight.std().item():.6f}")
-                    print(f"  bn1.running_mean: mean={bn1.running_mean.mean().item():.6f}, std={bn1.running_mean.std().item():.6f}")
-                    print(f"  bn1.running_var: mean={bn1.running_var.mean().item():.6f}, min={bn1.running_var.min().item():.6f}")
-                    print(f"  bn1.training={bn1.training}")
-                self._layer0_weights_debug = True
-            
             if self.with_cp:
                 x_tmp = checkpoint.checkpoint(layer, x_tmp)
             else:
                 x_tmp = layer(x_tmp)
-            
-            # DEBUG: Print output after each layer
-            if not hasattr(self, f'_layer{lid}_output_debug'):
-                print(f"\n[BEV_ENCODER_LAYER{lid}]:")
-                print(f"  Shape: {x_tmp.shape}")
-                print(f"  Mean: {x_tmp.mean().item():.6f}, Std: {x_tmp.std().item():.6f}")
-                print(f"  Min: {x_tmp.min().item():.6f}, Max: {x_tmp.max().item():.6f}")
-                setattr(self, f'_layer{lid}_output_debug', True)
             
             if lid in self.backbone_output_ids:
                 feats.append(x_tmp)

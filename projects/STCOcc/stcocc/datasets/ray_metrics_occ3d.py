@@ -18,8 +18,8 @@ def print_log(msg, logger=None):
         logger.info(msg)
 
 # Load DVR extension
-dvr_cpp_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'STCOcc_ori', 'libs', 'dvr', 'dvr.cpp')
-dvr_cu_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'STCOcc_ori', 'libs', 'dvr', 'dvr.cu')
+dvr_cpp_path = os.path.join(os.path.dirname(__file__), '..', 'libs', 'dvr', 'dvr.cpp')
+dvr_cu_path = os.path.join(os.path.dirname(__file__), '..', 'libs', 'dvr', 'dvr.cu')
 dvr = load("dvr", sources=[dvr_cpp_path, dvr_cu_path], verbose=True,
            extra_cuda_cflags=['-allow-unsupported-compiler'])
 
@@ -210,6 +210,9 @@ def calc_metrics(pcd_pred_list, pcd_gt_list):
 
 
 def main(sem_pred_list, sem_gt_list, flow_pred_list, flow_gt_list, lidar_origin_list, logger):
+
+    breakpoint()
+    
     torch.cuda.empty_cache()
 
     # generate lidar rays

@@ -97,17 +97,6 @@ class SparseFusion(BaseModule):
             curr_to_prev_ego_rt = history_fusion_params['curr_to_prev_ego_rt']
         forward_augs = cam_params[-1]  # bda
         
-        # DEBUG: Print temporal fusion inputs
-        if not hasattr(self, '_temporal_fusion_input_debug'):
-            print(f"\n[TEMPORAL_FUSION_INPUT]")
-            print(f"  curr_bev: Mean={curr_bev.mean().item():.6f}, Std={curr_bev.std().item():.6f}")
-            print(f"  seq_ids: {seq_ids}")
-            print(f"  start_of_sequence: {start_of_sequence}")
-            print(f"  curr_to_prev_ego_rt:\n{curr_to_prev_ego_rt}")
-            print(f"  forward_augs:\n{forward_augs}")
-            print(f"  history_bev: {type(self.history_bev)}, {self.history_bev.shape if self.history_bev is not None else None}")
-            self._temporal_fusion_input_debug = True
-
         # check seq_ids > 0
         assert (seq_ids >= 0).all()
 

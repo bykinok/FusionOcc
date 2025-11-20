@@ -182,16 +182,6 @@ class LSSViewTransformer(BaseModule):
             torch.tensor: Point coordinates in shape
                 (B, N_cams, D, ownsample, 3)
         """
-        # DEBUG: Check input parameters
-        if not hasattr(self, '_get_lidar_coor_input_debug'):
-            print(f"\n[GET_LIDAR_COOR_INPUT]:")
-            print(f"  frustum: Mean={self.frustum.mean().item():.6f}, Std={self.frustum.std().item():.6f}")
-            print(f"  sensor2ego[0,0]: \n{sensor2ego[0,0]}")
-            print(f"  cam2imgs[0,0]: \n{cam2imgs[0,0]}")
-            print(f"  post_rots[0,0]: \n{post_rots[0,0]}")
-            print(f"  post_trans[0,0]: {post_trans[0,0]}")
-            print(f"  bda[0]: \n{bda[0]}")
-            self._get_lidar_coor_input_debug = True
         
         B, N, _, _ = sensor2ego.shape
 
@@ -348,15 +338,6 @@ class LSSViewTransformer(BaseModule):
         B, N, D, H, W, _ = coor.shape
         num_points = B * N * D * H * W
         
-        # DEBUG: print grid parameters once
-        if not hasattr(self, '_grid_params_debug'):
-            print(f"\n[GRID_PARAMS]:")
-            print(f"  grid_size: {self.grid_size}")
-            print(f"  grid_lower_bound: {self.grid_lower_bound}")
-            print(f"  grid_interval: {self.grid_interval}")
-            print(f"  num_points: {num_points}")
-            self._grid_params_debug = True
-        
         # record the index of selected points for acceleration purpose
         ranks_depth = torch.arange(
             0, num_points, dtype=torch.int, device=coor.device)
@@ -378,20 +359,6 @@ class LSSViewTransformer(BaseModule):
                (coor[:, 1] >= 0) & (coor[:, 1] < self.grid_size[1]) & \
                (coor[:, 2] >= 0) & (coor[:, 2] < self.grid_size[2])
         
-        # DEBUG: print filtering statistics once
-        if not hasattr(self, '_kept_stats_debug'):
-            print(f"[KEPT_FILTER]:")
-            print(f"  Total points: {num_points}")
-            print(f"  Kept points: {kept.sum().item()}")
-            print(f"  Filtered out: {(~kept).sum().item()} ({100*(~kept).sum().item()/num_points:.2f}%)")
-            # Check which condition filters most
-            x_out = (coor[:, 0] < 0) | (coor[:, 0] >= self.grid_size[0])
-            y_out = (coor[:, 1] < 0) | (coor[:, 1] >= self.grid_size[1])
-            z_out = (coor[:, 2] < 0) | (coor[:, 2] >= self.grid_size[2])
-            print(f"  X out of bound: {x_out.sum().item()}")
-            print(f"  Y out of bound: {y_out.sum().item()}")
-            print(f"  Z out of bound: {z_out.sum().item()}")
-            self._kept_stats_debug = True
         if len(kept) == 0:
             return None, None, None, None, None
         coor, ranks_depth, ranks_feat = \

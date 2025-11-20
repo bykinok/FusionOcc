@@ -75,7 +75,7 @@ test_sequences_split_num = 1
 # Running Config
 num_gpus = 8
 samples_per_gpu = 1  # Reduce batch size to prevent CUDA OOM
-workers_per_gpu = 2  # Reduce workers to save memory
+workers_per_gpu = 0 #2  # Reduce workers to save memory
 total_epoch = 36
 num_iters_per_epoch = int(28130 // (num_gpus * samples_per_gpu))      # total samples: 28130
 
@@ -324,7 +324,7 @@ train_dataloader = dict(
 val_dataloader = dict(
     batch_size=1,
     num_workers=workers_per_gpu,
-    persistent_workers=True,
+    persistent_workers=False, #True,
     drop_last=False,
     sampler=dict(type='DefaultSampler', shuffle=False),
     dataset=dict(

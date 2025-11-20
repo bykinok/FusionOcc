@@ -78,30 +78,7 @@ class OccPredictor(nn.Module):
 
     # @force_fp32  # deprecated decorator()
     def forward(self, bev_query_feats, last_occ_pred=None, layer_num=None):
-        # DEBUG: Check OccPredictor weights (first call only)
-        if not hasattr(self, '_weights_checked'):
-            print(f"\n[OCCPREDICTOR_WEIGHTS]:")
-            # Check bev_conv weights
-            if hasattr(self.bev_conv, 'weight'):
-                w = self.bev_conv.weight
-                print(f"  bev_conv.weight: shape={w.shape}, mean={w.mean().item():.6f}, std={w.std().item():.6f}")
-            # Check predicter weights
-            for name, param in self.predicter.named_parameters():
-                if 'weight' in name:
-                    print(f"  predicter.{name}: shape={param.shape}, mean={param.mean().item():.6f}, std={param.std().item():.6f}")
-            # Check alpha_list
-            if hasattr(self, 'alpha_list') and len(self.alpha_list) > 0:
-                print(f"  alpha_list: {[a.item() for a in self.alpha_list]}")
-            self._weights_checked = True
-        
-        # DEBUG: Check input bev_query_feats
-        if not hasattr(self, '_bev_query_input_debug'):
-            print(f"\n[BEV_QUERY_INPUT] layer_num={layer_num}:")
-            print(f"  Shape: {bev_query_feats.shape}")
-            print(f"  Mean: {bev_query_feats.mean().item():.6f}, Std: {bev_query_feats.std().item():.6f}")
-            print(f"  Min: {bev_query_feats.min().item():.6f}, Max: {bev_query_feats.max().item():.6f}")
-            self._bev_query_input_debug = True
-        
+
         # required [bs, h*w, c] bev query
         # shape check
         bs, hw, c = bev_query_feats.shape
@@ -120,33 +97,6 @@ class OccPredictor(nn.Module):
             else:
                 occ_pred = occ_pred + last_occ_pred * self.alpha_list[layer_num]
 
-        # DEBUG: BEVFormer OccPredictor output
-        if not hasattr(self, '_bevformer_pred_debug'):
-            print(f"\n[BEVFORMER_OCC_PRED]:")
-            print(f"  occ_pred.shape={occ_pred.shape}")
-            print(f"  Mean={occ_pred.mean().item():.6f}, Std={occ_pred.std().item():.6f}")
-            print(f"  Min={occ_pred.min().item():.6f}, Max={occ_pred.max().item():.6f}")
-            
-            # Check negative values
-            neg_count = (occ_pred < 0).sum().item()
-            total_count = occ_pred.numel()
-            print(f"  Negative values: {neg_count}/{total_count} ({100*neg_count/total_count:.2f}%)")
-            
-            # After softmax
-            occ_softmax = occ_pred.softmax(-1)
-            occ_argmax = occ_softmax.argmax(-1)
-            print(f"\n  After softmax:")
-            print(f"    Mean={occ_softmax.mean().item():.6f}, Std={occ_softmax.std().item():.6f}")
-            
-            # Class distribution
-            print(f"\n  Class distribution (argmax):")
-            for cls in range(18):
-                count = (occ_argmax == cls).sum().item()
-                if count > 0:
-                    print(f"    Class {cls}: {count} ({100*count/occ_argmax.numel():.2f}%)")
-            
-            self._bevformer_pred_debug = True
-        
         # parse occ_pred
         occ_logits = occ_pred.softmax(-1).clone().detach()
         empty_occ_logits = occ_logits[..., -1].unsqueeze(-1)
@@ -515,14 +465,7 @@ class BEVFormerEncoder(TransformerLayerSequence):
             hybird_ref_2d = shift_ref_2d
 
         for lid, layer in enumerate(self.layers):
-            # DEBUG: Query before layer
-            if lid == 0 and not hasattr(self, f'_query_before_layer_{bev_h}_{bev_w}_debug'):
-                print(f"\n[QUERY_BEFORE_LAYER] bev_size={bev_h}x{bev_w}, layer={lid}:")
-                print(f"  Shape: {bev_query.shape}")
-                print(f"  Mean: {bev_query.mean().item():.6f}, Std: {bev_query.std().item():.6f}")
-                print(f"  Min: {bev_query.min().item():.6f}, Max: {bev_query.max().item():.6f}")
-                setattr(self, f'_query_before_layer_{bev_h}_{bev_w}_debug', True)
-            
+
             output, occ_pred = layer(
                 bev_query,
                 key,
@@ -549,13 +492,6 @@ class BEVFormerEncoder(TransformerLayerSequence):
             bev_query = output
             last_occ_pred = occ_pred
             
-            # DEBUG: Query after layer
-            if lid == 0 and not hasattr(self, f'_query_after_layer_{bev_h}_{bev_w}_debug'):
-                print(f"\n[QUERY_AFTER_LAYER] bev_size={bev_h}x{bev_w}, layer={lid}:")
-                print(f"  Shape: {bev_query.shape}")
-                print(f"  Mean: {bev_query.mean().item():.6f}, Std: {bev_query.std().item():.6f}")
-                print(f"  Min: {bev_query.min().item():.6f}, Max: {bev_query.max().item():.6f}")
-                setattr(self, f'_query_after_layer_{bev_h}_{bev_w}_debug', True)
             if self.return_intermediate:
                 intermediate.append(output)
 
@@ -713,24 +649,8 @@ class BEVFormerEncoderLayer(MyCustomBaseTransformerLayer):
                 norm_index += 1
 
             elif layer == 'predictor':
-                # DEBUG: print query before OccPredictor
-                if layer_num == 0 and not hasattr(self, '_query_before_occ_debug'):
-                    print(f"\n[QUERY_BEFORE_OCC] layer_num={layer_num}:")
-                    print(f"  query.shape={query.shape}")
-                    print(f"  Mean={query.mean().item():.6f}, Std={query.std().item():.6f}")
-                    print(f"  Min={query.min().item():.6f}, Max={query.max().item():.6f}")
-                    self._query_before_occ_debug = True
-                
+
                 occ_pred, nonempty_voxel_logits = occ_predictor(query, last_occ_pred, layer_num=layer_num)
-                
-                # DEBUG: print occ_pred after OccPredictor
-                if layer_num == 0 and not hasattr(self, '_occ_pred_after_occ_debug'):
-                    print(f"  occ_pred.shape={occ_pred.shape}")
-                    print(f"  Mean={occ_pred.mean().item():.6f}, Std={occ_pred.std().item():.6f}")
-                    pred_cls = occ_pred.softmax(dim=-1).argmax(dim=-1)
-                    unique_cls = pred_cls.unique()
-                    print(f"  Unique classes: {len(unique_cls)}")
-                    self._occ_pred_after_occ_debug = True
 
             # spaital cross attention
             elif layer == 'cross_attn':

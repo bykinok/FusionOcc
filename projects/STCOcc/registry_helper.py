@@ -27,6 +27,7 @@ try:
     
     # Import view transformation modules
     from projects.STCOcc.stcocc.view_transformation.forward_projection.bevdet_utils.lss_transformation import LSSVStereoForwardPorjection
+    from projects.STCOcc.stcocc.view_transformation.forward_projection.bevdet_stereo_projection import BEVDetStereoForwardProjection
     from projects.STCOcc.stcocc.view_transformation.backward_projection.bevformer_utils.positional_encoding import CustormLearnedPositionalEncoding
     
     # Import heads and modules

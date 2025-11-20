@@ -18,8 +18,8 @@ def print_log(msg, logger=None):
         logger.info(msg)
 
 # Load DVR extension
-dvr_cpp_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'STCOcc_ori', 'libs', 'dvr', 'dvr.cpp')
-dvr_cu_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'STCOcc_ori', 'libs', 'dvr', 'dvr.cu')
+dvr_cpp_path = os.path.join(os.path.dirname(__file__), '..', 'libs', 'dvr', 'dvr.cpp')
+dvr_cu_path = os.path.join(os.path.dirname(__file__), '..', 'libs', 'dvr', 'dvr.cu')
 dvr = load("dvr", sources=[dvr_cpp_path, dvr_cu_path], verbose=True,
            extra_cuda_cflags=['-allow-unsupported-compiler'])
 

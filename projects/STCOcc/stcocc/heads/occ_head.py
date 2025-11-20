@@ -12,18 +12,6 @@ from mmdet.models.losses.utils import reduce_loss
 
 from ..modules.basic_block import BasicBlock3D
 
-# Import debug utilities
-import sys
-from pathlib import Path
-debug_path = Path(__file__).parent.parent.parent
-if str(debug_path) not in sys.path:
-    sys.path.insert(0, str(debug_path))
-try:
-    from debug_layer_comparison import log_layer
-except ImportError:
-    def log_layer(*args, **kwargs):
-        pass
-
 @MODELS.register_module()
 class OccHead(BaseModule):
     def __init__(
@@ -75,8 +63,6 @@ class OccHead(BaseModule):
 
     # @force_fp32()  # deprecated decorator
     def forward(self, voxel_feats, last_occ_pred=None):
-        # DEBUG: Log OccHead input
-        log_layer("occ_head", inputs={"voxel_feats": voxel_feats, "last_occ_pred": last_occ_pred})
         
         # required [bs, c, z, h, w] voxel feats
         if self.conv_before_predictor:
@@ -99,36 +85,9 @@ class OccHead(BaseModule):
                 last_occ_pred = last_occ_pred.permute(0, 3, 4, 2, 1)  # [bs, w, h, z, c]
             pred_voxel_semantic = pred_voxel_semantic + 0.5*last_occ_pred
 
-        # DEBUG: Log OccHead output
-        log_layer("occ_head", outputs={"pred_voxel_semantic": pred_voxel_semantic, "pred_voxel_feats": pred_voxel_feats})
-
-        # DEBUG: print occupancy head output (keep for console output)
-        if not hasattr(self, '_occ_head_output_debug'):
-            print(f"\n[OCC_HEAD_OUTPUT]:")
-            print(f"  pred_voxel_semantic.shape={pred_voxel_semantic.shape}")
-            print(f"  Mean={pred_voxel_semantic.mean().item():.6f}, Std={pred_voxel_semantic.std().item():.6f}")
-            print(f"  Min={pred_voxel_semantic.min().item():.6f}, Max={pred_voxel_semantic.max().item():.6f}")
-            
-            # Check negative values
-            neg_count = (pred_voxel_semantic < 0).sum().item()
-            total_count = pred_voxel_semantic.numel()
-            print(f"  Negative values: {neg_count}/{total_count} ({100*neg_count/total_count:.2f}%)")
-            
             # After softmax
             pred_softmax = pred_voxel_semantic.softmax(-1)
             pred_argmax = pred_softmax.argmax(-1)
-            print(f"\n  After softmax:")
-            print(f"    Mean={pred_softmax.mean().item():.6f}, Std={pred_softmax.std().item():.6f}")
-            print(f"    Min={pred_softmax.min().item():.6f}, Max={pred_softmax.max().item():.6f}")
-            
-            # Class distribution
-            print(f"\n  Class distribution (argmax):")
-            for cls in range(18):
-                count = (pred_argmax == cls).sum().item()
-                if count > 0:
-                    print(f"    Class {cls}: {count} ({100*count/pred_argmax.numel():.2f}%)")
-            
-            self._occ_head_output_debug = True
         
         return pred_voxel_semantic, pred_voxel_feats
 
