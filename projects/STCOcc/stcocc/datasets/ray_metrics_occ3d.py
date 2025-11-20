@@ -210,9 +210,7 @@ def calc_metrics(pcd_pred_list, pcd_gt_list):
 
 
 def main(sem_pred_list, sem_gt_list, flow_pred_list, flow_gt_list, lidar_origin_list, logger):
-
-    breakpoint()
-    
+ 
     torch.cuda.empty_cache()
 
     # generate lidar rays

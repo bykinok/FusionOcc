@@ -282,8 +282,6 @@ class OccupancyMetric(BaseMetric):
                 break
             info = self.data_infos[index]
 
-            breakpoint()
-            
             occ_path = info['occ_path']
             if self.dataset_name == 'openocc':
                 occ_path = occ_path.replace('gts', 'openocc_v2')
