@@ -6,7 +6,7 @@ import os.path as osp
 
 from mmengine.config import Config, DictAction
 from mmengine.logging import print_log
-from mmengine.registry import RUNNERS
+from mmengine.registry import RUNNERS, DefaultScope
 from mmengine.runner import Runner
 
 from mmdet3d.utils import replace_ceph_backend
@@ -63,8 +63,24 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # Set default scope to mmdet3d before loading config
+    DefaultScope.get_instance('mmdet3d', scope_name='mmdet3d')
+
     # load config
     cfg = Config.fromfile(args.config)
+
+    # Handle custom imports
+    if hasattr(cfg, 'custom_imports') and cfg.custom_imports:
+        import importlib
+        for module_name in cfg.custom_imports.get('imports', []):
+            print(f"Importing custom module: {module_name}")
+            try:
+                importlib.import_module(module_name)
+                print(f"✅ Successfully imported {module_name}")
+            except Exception as e:
+                print(f"❌ Failed to import {module_name}: {e}")
+                if not cfg.custom_imports.get('allow_failed_imports', True):
+                    raise
 
     # TODO: We will unify the ceph support approach with other OpenMMLab repos
     if args.ceph:
