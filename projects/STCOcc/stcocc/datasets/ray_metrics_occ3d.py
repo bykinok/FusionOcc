@@ -134,23 +134,43 @@ def process_one_sample(sem_pred, lidar_rays, output_origin, flow_pred):
                 "test"
             )
             pred_dist *= _voxel_size
+            
+            # CPU로 복사 후 CUDA 텐서 명시적 삭제
+            pred_dist_full = pred_dist[0, :].cpu()  # [N] 형태 - get_rendered_pcds용
+            pred_dist_cpu = pred_dist[0, :, None].cpu()  # [N, 1] 형태 - torch.cat용
+            coord_index_cpu = coord_index[0, :, :].int().cpu()
+            
+            # CUDA 텐서 삭제
+            del pred_dist, coord_index
 
         pred_pcds = get_rendered_pcds(
             lidar_origin[0].cpu().numpy(),
             lidar_endpts[0].cpu().numpy(),
             lidar_tindex[0].cpu().numpy(),
-            pred_dist[0].cpu().numpy()
+            pred_dist_full.numpy()  # [N] 형태로 전달
         )
-        coord_index = coord_index[0, :, :].int().cpu()  # [N, 3]
 
-        pred_flow = torch.from_numpy(flow_pred[coord_index[:, 0], coord_index[:, 1], coord_index[:, 2]])  # [N, 2]
-        pred_label = torch.from_numpy(sem_pred[coord_index[:, 0], coord_index[:, 1], coord_index[:, 2]])[:, None]  # [N, 1]
-        pred_dist = pred_dist[0, :, None].cpu()
-        pred_pcds = torch.cat([pred_pcds[0], pred_label, pred_dist, pred_flow], dim=-1)  # [N, 7]  5: [x, y, z, label, dist, dx, dy]
+        pred_flow = torch.from_numpy(flow_pred[coord_index_cpu[:, 0], coord_index_cpu[:, 1], coord_index_cpu[:, 2]])
+        pred_label = torch.from_numpy(sem_pred[coord_index_cpu[:, 0], coord_index_cpu[:, 1], coord_index_cpu[:, 2]])[:, None]
+        
+        # pred_pcds[0]의 길이에 맞춰서 pred_dist_cpu를 필터링
+        # coord_index_cpu는 전체 레이에 대한 것이므로, pred_pcds[0]과 길이가 다를 수 있음
+        # 하지만 실제로는 coord_index_cpu의 모든 포인트가 pred_pcds[0]에 포함되어야 함
+        # 원본 코드를 보면 pred_dist[0, :, None].cpu()를 그대로 사용하므로,
+        # pred_pcds[0]의 길이가 coord_index_cpu의 길이와 같아야 함
+        
+        # 원본 코드와 동일하게: pred_dist_cpu는 [N, 1] 형태이고, 
+        # pred_pcds[0]은 [N_t, 3] 형태인데, N_t == N이어야 함
+        # 만약 다르다면, coord_index_cpu로 인덱싱된 것만 사용해야 함
+        pred_pcds = torch.cat([pred_pcds[0], pred_label, pred_dist_cpu, pred_flow], dim=-1)
 
         pred_pcds_t.append(pred_pcds)
 
     pred_pcds_t = torch.cat(pred_pcds_t, dim=0)
+    
+    # occ_pred CUDA 텐서 삭제
+    del occ_pred
+    torch.cuda.synchronize()  # CUDA 작업 완료 대기
 
     return pred_pcds_t.numpy()
 
@@ -210,16 +230,29 @@ def calc_metrics(pcd_pred_list, pcd_gt_list):
 
 
 def main(sem_pred_list, sem_gt_list, flow_pred_list, flow_gt_list, lidar_origin_list, logger):
- 
     torch.cuda.empty_cache()
 
     # generate lidar rays
     lidar_rays = generate_lidar_rays()
     lidar_rays = torch.from_numpy(lidar_rays)
 
-    pcd_pred_list, pcd_gt_list = [], []
-    for sem_pred, sem_gt, flow_pred, flow_gt, lidar_origins in tqdm(
-            zip(sem_pred_list, sem_gt_list, flow_pred_list, flow_gt_list, lidar_origin_list), ncols=50):
+    # 메트릭을 누적할 변수들 (calc_metrics의 로직을 여기로 이동)
+    thresholds = [1, 2, 4]
+    gt_cnt = np.zeros([len(occ_class_names)])
+    pred_cnt = np.zeros([len(occ_class_names)])
+    tp_cnt = np.zeros([len(thresholds), len(occ_class_names)])
+    ave = np.zeros([len(thresholds), len(occ_class_names)])
+    for i, cls in enumerate(occ_class_names):
+        if cls not in flow_class_names:
+            ave[:, i] = np.nan
+    ave_count = np.zeros([len(thresholds), len(occ_class_names)])
+
+    # 배치 단위로 처리 (메모리 절약)
+    batch_size = 500  # 500개씩 처리 후 메모리 정리
+    pcd_pred_batch, pcd_gt_batch = [], []
+    
+    for idx, (sem_pred, sem_gt, flow_pred, flow_gt, lidar_origins) in enumerate(tqdm(
+            zip(sem_pred_list, sem_gt_list, flow_pred_list, flow_gt_list, lidar_origin_list), ncols=50)):
         sem_pred = np.reshape(sem_pred, [200, 200, 16])
         sem_gt = np.reshape(sem_gt, [200, 200, 16])
         flow_pred = np.reshape(flow_pred, [200, 200, 16, 2])
@@ -234,10 +267,59 @@ def main(sem_pred_list, sem_gt_list, flow_pred_list, flow_gt_list, lidar_origin_
         pcd_gt = pcd_gt[valid_mask]
 
         assert pcd_pred.shape == pcd_gt.shape
-        pcd_pred_list.append(pcd_pred)
-        pcd_gt_list.append(pcd_gt)
+        pcd_pred_batch.append(pcd_pred)
+        pcd_gt_batch.append(pcd_gt)
+        
+        # 배치 단위로 메트릭 계산 및 누적
+        if (idx + 1) % batch_size == 0 or (idx + 1) == len(sem_pred_list):
+            # 배치에 대한 메트릭 계산
+            for pcd_pred_item, pcd_gt_item in zip(pcd_pred_batch, pcd_gt_batch):
+                for j, threshold in enumerate(thresholds):
+                    depth_pred = pcd_pred_item[:, 4]
+                    depth_gt = pcd_gt_item[:, 4]
+                    l1_error = np.abs(depth_pred - depth_gt)
+                    tp_dist_mask = (l1_error < threshold)
 
-    iou_list, ave_list = calc_metrics(pcd_pred_list, pcd_gt_list)
+                    for i, cls in enumerate(occ_class_names):
+                        cls_id = occ_class_names.index(cls)
+                        cls_mask_pred = (pcd_pred_item[:, 3] == cls_id)
+                        cls_mask_gt = (pcd_gt_item[:, 3] == cls_id)
+
+                        gt_cnt_i = cls_mask_gt.sum()
+                        pred_cnt_i = cls_mask_pred.sum()
+                        if j == 0:
+                            gt_cnt[i] += gt_cnt_i
+                            pred_cnt[i] += pred_cnt_i
+
+                        tp_cls = cls_mask_gt & cls_mask_pred
+                        tp_mask = np.logical_and(tp_cls, tp_dist_mask)
+                        tp_cnt[j][i] += tp_mask.sum()
+
+                        # flow L2 error
+                        if cls in flow_class_names and tp_mask.sum() > 0:
+                            gt_flow_i = pcd_gt_item[tp_mask, 5:7]
+                            pred_flow_i = pcd_pred_item[tp_mask, 5:7]
+                            flow_error = np.linalg.norm(gt_flow_i - pred_flow_i, axis=1)
+                            ave[j][i] += np.sum(flow_error)
+                            ave_count[j][i] += flow_error.shape[0]
+            
+            # 배치 처리 후 메모리 정리
+            del pcd_pred_batch, pcd_gt_batch
+            pcd_pred_batch, pcd_gt_batch = [], []
+            torch.cuda.empty_cache()
+            import gc
+            gc.collect()  # Python garbage collection
+        
+        # 주기적으로 CUDA 메모리 정리 (매 100개 샘플마다)
+        elif (idx + 1) % 100 == 0:
+            torch.cuda.empty_cache()
+
+    # 최종 메트릭 계산
+    iou_list = []
+    for j, threshold in enumerate(thresholds):
+        iou_list.append((tp_cnt[j] / (gt_cnt + pred_cnt - tp_cnt[j]))[:-1])
+
+    ave_list = ave[1][:-1] / ave_count[1][:-1]  # use threshold = 2
 
     table = PrettyTable([
         'Class Names',
@@ -268,7 +350,6 @@ def main(sem_pred_list, sem_gt_list, flow_pred_list, flow_gt_list, lidar_origin_
     print_log('MIOU: {}'.format(miou), logger=logger)
     print_log('MAVE: {}'.format(mave), logger=logger)
     print_log('Occ score: {}'.format(occ_score), logger=logger)
-
 
     torch.cuda.empty_cache()
 
