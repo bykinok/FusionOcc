@@ -73,7 +73,7 @@ train_sequences_split_num = 2
 test_sequences_split_num = 1
 
 # Running Config
-num_gpus = 1
+num_gpus = 2
 samples_per_gpu = 2
 workers_per_gpu = 4  # Reduce workers to save memory
 total_epoch = 36
@@ -369,16 +369,19 @@ param_scheduler = [
         end=200),
     dict(
         type='StepLR',
-        by_epoch=True,
-        step_size=total_epoch,
+        by_epoch=False,
+        step_size=total_epoch * num_iters_per_epoch,
         gamma=0.1)
 ]
 
-# Training config
+# Training config - 명시적으로 IterBasedTrainLoop 강제
 train_cfg = dict(
     type='IterBasedTrainLoop',
     max_iters=total_epoch * num_iters_per_epoch,
     val_interval=num_iters_per_epoch)
+
+# log_processor도 iteration 기반으로 명시
+log_processor = dict(type='LogProcessor', window_size=50, by_epoch=False)
 
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
