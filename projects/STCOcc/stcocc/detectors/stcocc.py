@@ -854,14 +854,14 @@ class STCOcc(CenterPoint):
 
         
         # 디버깅: 배치 내 그룹 중복 확인
-        if img_metas is not None and isinstance(img_metas, list):
-            batch_groups = [meta.get('sequence_group_idx', -1) for meta in img_metas]
-            unique_groups = len(set(batch_groups))
+        # if img_metas is not None and isinstance(img_metas, list):
+        #     batch_groups = [meta.get('sequence_group_idx', -1) for meta in img_metas]
+        #     unique_groups = len(set(batch_groups))
             
-            if unique_groups < len(batch_groups):
-                print(f"⚠️ 경고: 배치 내 중복 그룹 발견! 그룹: {batch_groups}")
-            else:
-                print(f"✓ 배치 그룹: {batch_groups} (모두 고유)")
+        #     if unique_groups < len(batch_groups):
+        #         print(f"⚠️ 경고: 배치 내 중복 그룹 발견! 그룹: {batch_groups}")
+        #     else:
+        #         print(f"✓ 배치 그룹: {batch_groups} (모두 고유)")
 
 
         # ---------------------- obtain feats from images -----------------------------

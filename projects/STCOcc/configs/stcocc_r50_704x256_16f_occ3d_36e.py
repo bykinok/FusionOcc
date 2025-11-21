@@ -73,9 +73,9 @@ train_sequences_split_num = 2
 test_sequences_split_num = 1
 
 # Running Config
-num_gpus = 8
+num_gpus = 1
 samples_per_gpu = 2
-workers_per_gpu = 0 #2  # Reduce workers to save memory
+workers_per_gpu = 4  # Reduce workers to save memory
 total_epoch = 36
 num_iters_per_epoch = int(28130 // (num_gpus * samples_per_gpu))      # total samples: 28130
 

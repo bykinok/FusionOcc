@@ -74,12 +74,12 @@ class InfiniteGroupEachSampleInBatchSampler(Sampler):
 
     def _infinite_group_indices(self):
         # 랜덤성 제거: 순차적 그룹 순서 사용
-        while True:
-            yield from list(range(self.groups_num))
-        # g = torch.Generator()
-        # g.manual_seed(self.seed)
         # while True:
-        #     yield from torch.randperm(self.groups_num, generator=g).tolist()
+        #     yield from list(range(self.groups_num))
+        g = torch.Generator()
+        g.manual_seed(self.seed)
+        while True:
+            yield from torch.randperm(self.groups_num, generator=g).tolist()
 
     def _group_indices_per_global_sample_idx(self, global_sample_idx):
         yield from itertools.islice(self._infinite_group_indices(), 
