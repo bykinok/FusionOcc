@@ -74,7 +74,7 @@ test_sequences_split_num = 1
 
 # Running Config
 num_gpus = 8
-samples_per_gpu = 1  # Reduce batch size to prevent CUDA OOM
+samples_per_gpu = 2
 workers_per_gpu = 0 #2  # Reduce workers to save memory
 total_epoch = 36
 num_iters_per_epoch = int(28130 // (num_gpus * samples_per_gpu))      # total samples: 28130
@@ -296,10 +296,17 @@ input_modality = dict(
 
 # New style data loaders
 train_dataloader = dict(
-    batch_size=samples_per_gpu,
+    batch_size=1,  # batch_sampler 사용 시 DataLoader의 batch_size는 1로 설정
     num_workers=workers_per_gpu,
     persistent_workers=True,
-    sampler=dict(type='DefaultSampler', shuffle=True),
+    sampler=dict(type='DefaultSampler', shuffle=True),  # MMEngine이 먼저 sampler를 빌드하도록
+    batch_sampler=dict(
+        type='InfiniteGroupEachSampleInBatchSampler',
+        batch_size=samples_per_gpu,  # 실제 배치 크기 (2)
+        world_size=None,
+        rank=None,
+        seed=None
+    ),
     dataset=dict(
         type=dataset_type,
         data_root=data_root,
@@ -406,7 +413,9 @@ custom_hooks = [
 ]
 
 # Pretrained weights (temporarily disabled due to compatibility issues)
-load_from = "projects/STCOcc/pretrained/forward_projection-r50-4d-stereo-pretrained.pth"
+load_from = "projects/STCOcc/pretrain/forward_projection-r50-4d-stereo-pretrained.pth"
+# load_from = "projects/STCOcc/pretrain/init_orig.pth"
+# load_from = "projects/STCOcc/ckpt/stcocc_r50_704x256_16f_occ3d.pth"
 
 # Visualization
 vis_backends = [dict(type='LocalVisBackend')]

@@ -309,7 +309,14 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         
         # Super() already provides perfect data structure with cams info
         # Just add curr key pointing to the same data for STCOcc compatibility
-        input_dict['curr'] = input_dict.copy()
+        # CRITICAL: Use data_info directly (like original) instead of input_dict.copy()
+        # Original: input_dict['curr'] = info (where info = self.data_infos[index])
+        # This ensures ego2global_rotation and ego2global_translation are available
+        if data_info is not None:
+            input_dict['curr'] = data_info
+        else:
+            # Fallback: use input_dict.copy() if data_info is not available
+            input_dict['curr'] = input_dict.copy()
         
         # Add specific STCOcc fields if they exist in the data
         if 'occ_path' in input_dict:

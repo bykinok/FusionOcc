@@ -127,6 +127,12 @@ def main():
         # if 'runner_type' is set in the cfg
         runner = RUNNERS.build(cfg)
 
+    # CRITICAL: mmengine Runner does not auto-load checkpoint in test mode
+    # Explicitly load checkpoint if cfg.load_from is set (general solution for all models)
+    if hasattr(cfg, 'load_from') and cfg.load_from:
+        from mmengine.runner import load_checkpoint
+        load_checkpoint(runner.model, cfg.load_from, map_location='cpu', strict=False)
+    
     # start training
     runner.train()
 

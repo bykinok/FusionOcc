@@ -670,9 +670,199 @@ class STCOcc(CenterPoint):
                       gt_bboxes_ignore=None,
                       **kwargs):
 
-        # Extract actual data from DataContainer format if needed
-        if img_metas is not None and isinstance(img_metas, dict) and 'data' in img_metas:
-            img_metas = img_metas['data']
+        # CRITICAL: Convert img_metas from dict format to list format to match original
+        # Original format: img_metas is a list of dicts: [dict1, dict2, ...]
+        # Current format: img_metas might be a dict with list values: {'key1': [val1, val2], 'key2': [val1, val2], ...}
+        if img_metas is not None and isinstance(img_metas, dict):
+            # Handle DataContainer format: {'data': [...], 'cpu_only': True}
+            if 'data' in img_metas:
+                img_metas = img_metas['data']
+            else:
+                # Convert dict with list values to list of dicts
+                # CRITICAL: Determine batch size from sample-specific keys, not from multi-camera keys
+                # Sample-specific keys: 'sample_idx', 'index', 'scene_name', 'sequence_group_idx', etc.
+                # Multi-camera keys (should be ignored for batch size): 'lidar2img', 'cam2img', etc.
+                batch_size = None
+                
+                # Try to determine batch size from sample-specific keys first
+                sample_specific_keys = ['sample_idx', 'index', 'scene_name', 'sequence_group_idx', 
+                                       'pts_filename', 'start_of_sequence', 'can_bus']
+                for key in sample_specific_keys:
+                    if key in img_metas:
+                        value = img_metas[key]
+                        if isinstance(value, (list, tuple)):
+                            batch_size = len(value)
+                            break
+                        elif hasattr(value, 'shape') and len(value.shape) > 0 and value.shape[0] > 0:
+                            batch_size = value.shape[0]
+                            break
+                
+                # If not found, try other keys but exclude multi-camera keys
+                if batch_size is None:
+                    multi_camera_keys = ['lidar2img', 'cam2img', 'sensor2sensorego', 'sensorego2global', 
+                                       'sensorego2sensor', 'global2sensorego', 'ego2lidar']
+                    for key, value in img_metas.items():
+                        if key in multi_camera_keys:
+                            continue  # Skip multi-camera keys
+                        if isinstance(value, (list, tuple)) and len(value) > 0:
+                            # Check if it's a list of simple values (not nested structures)
+                            if not isinstance(value[0], (list, tuple)) or len(value[0]) == 1:
+                                batch_size = len(value)
+                                break
+                        elif hasattr(value, 'shape') and len(value.shape) > 0 and value.shape[0] > 0:
+                            batch_size = value.shape[0]
+                            break
+                
+                # If still not found, use first key but warn
+                if batch_size is None:
+                    first_key = list(img_metas.keys())[0] if len(img_metas) > 0 else None
+                    if first_key is not None:
+                        first_value = img_metas[first_key]
+                        if isinstance(first_value, (list, tuple)):
+                            batch_size = len(first_value)
+                        elif hasattr(first_value, 'shape') and len(first_value.shape) > 0:
+                            batch_size = first_value.shape[0]
+                        else:
+                            batch_size = 1
+                
+                # Convert dict with list values to list of dicts
+                if batch_size is not None and batch_size > 0:
+                    img_metas_list = []
+                    for i in range(batch_size):
+                        img_meta_dict = {}
+                        for key, value in img_metas.items():
+                            if key == 'lidar2img':
+                                # CRITICAL: lidar2img는 원본에서 텐서 [6, 4, 4] 형태
+                                # 재구현에서는 mmcv.parallel.collate가 리스트를 카메라별로 배치 차원으로 묶음
+                                # value 형태: [(tensor1, tensor1), (tensor2, tensor2), ..., (tensor6, tensor6)]
+                                # 각 샘플의 lidar2img를 재구성: [value[j][i] for j in range(len(value))]
+                                if isinstance(value, (list, tuple)) and len(value) > 0:
+                                    # value의 각 요소가 튜플/리스트인지 확인 (카메라별 배치)
+                                    if isinstance(value[0], (list, tuple)):
+                                        # 카메라별로 배치가 묶인 경우: 각 샘플의 리스트 재구성
+                                        if i < len(value[0]):
+                                            # 각 카메라에서 i번째 샘플의 변환 행렬 가져오기
+                                            lidar2img_list = [value[j][i] if i < len(value[j]) else None for j in range(len(value))]
+                                            # None이 있으면 에러, 모두 텐서면 stack
+                                            if all(item is not None for item in lidar2img_list):
+                                                img_meta_dict[key] = torch.stack(lidar2img_list)
+                                            else:
+                                                img_meta_dict[key] = None
+                                        else:
+                                            img_meta_dict[key] = None
+                                    else:
+                                        # value[i]가 직접 텐서인 경우
+                                        if i < len(value):
+                                            img_meta_dict[key] = value[i]
+                                        else:
+                                            img_meta_dict[key] = None
+                                elif hasattr(value, '__getitem__') and hasattr(value, 'shape') and len(value.shape) > 0:
+                                    # 이미 텐서인 경우
+                                    if i < value.shape[0]:
+                                        img_meta_dict[key] = value[i]
+                                    else:
+                                        img_meta_dict[key] = None
+                                else:
+                                    img_meta_dict[key] = value
+                            elif isinstance(value, (list, tuple)):
+                                if i < len(value):
+                                    item = value[i]
+                                    # Unwrap single-element lists/tuples
+                                    if isinstance(item, (list, tuple)) and len(item) == 1:
+                                        img_meta_dict[key] = item[0]
+                                    else:
+                                        img_meta_dict[key] = item
+                                else:
+                                    img_meta_dict[key] = None
+                            elif hasattr(value, '__getitem__') and hasattr(value, 'shape') and len(value.shape) > 0:
+                                # Tensor or array-like
+                                if i < value.shape[0]:
+                                    item = value[i]
+                                    # Unwrap single-element lists/tuples
+                                    if isinstance(item, (list, tuple)) and len(item) == 1:
+                                        img_meta_dict[key] = item[0]
+                                    else:
+                                        img_meta_dict[key] = item
+                                else:
+                                    img_meta_dict[key] = None
+                            else:
+                                # Scalar or non-indexable value - use as is for all samples
+                                img_meta_dict[key] = value
+                        img_metas_list.append(img_meta_dict)
+                    img_metas = img_metas_list
+
+        # CRITICAL: Convert img_inputs from list of tuples to stacked tensors
+        # Original format: img_inputs[0] is [2, 18, 3, 256, 704] tensor
+        # Current format: img_inputs is list of tuples where each tuple contains batch samples
+        if img_inputs is not None:
+            # Case 1: img_inputs is already a tuple with stacked tensors (correct format)
+            if isinstance(img_inputs, tuple) and len(img_inputs) > 0:
+                if isinstance(img_inputs[0], torch.Tensor) and img_inputs[0].dim() >= 4:
+                    # Already in correct format: img_inputs[0] is [B, N, C, H, W]
+                    pass  # No conversion needed
+                else:
+                    # img_inputs is tuple but first element is not a stacked tensor
+                    print(f"Warning: img_inputs is tuple but first element is not a stacked tensor")
+                    print(f"  First element type: {type(img_inputs[0])}")
+                    if isinstance(img_inputs[0], torch.Tensor):
+                        print(f"  First element shape: {img_inputs[0].shape}")
+            
+            # Case 2: img_inputs is a list where each element is a tuple of batch samples
+            # Structure: [(elem0_batch0, elem0_batch1), (elem1_batch0, elem1_batch1), ...]
+            # Need to convert to: (stacked_elem0, stacked_elem1, ...)
+            elif isinstance(img_inputs, list) and len(img_inputs) > 0:
+                if isinstance(img_inputs[0], (tuple, list)):
+                    # Each element is a tuple containing samples from different batches
+                    # Need to stack each tuple's elements
+                    stacked_elements = []
+                    
+                    for elem_idx, batch_tuple in enumerate(img_inputs):
+                        # batch_tuple is like (tensor_batch0, tensor_batch1)
+                        if isinstance(batch_tuple, (tuple, list)) and len(batch_tuple) > 0:
+                            # Check if all elements in this batch_tuple are tensors with same shape
+                            first_elem = batch_tuple[0]
+                            if isinstance(first_elem, torch.Tensor):
+                                # Check if all elements have the same shape
+                                all_same_shape = all(
+                                    isinstance(e, torch.Tensor) and e.shape == first_elem.shape
+                                    for e in batch_tuple
+                                )
+                                
+                                if all_same_shape:
+                                    # Stack along batch dimension
+                                    stacked = torch.stack(list(batch_tuple), dim=0)
+                                    stacked_elements.append(stacked)
+                                else:
+                                    # Shapes don't match - keep as tuple/list
+                                    print(f"Warning: Element {elem_idx} has mismatched shapes in batch tuple:")
+                                    for i, e in enumerate(batch_tuple):
+                                        if isinstance(e, torch.Tensor):
+                                            print(f"  Batch {i}: {e.shape}")
+                                        else:
+                                            print(f"  Batch {i}: {type(e)}")
+                                    # Keep as list
+                                    stacked_elements.append(list(batch_tuple))
+                            else:
+                                # Non-tensor elements - keep as list
+                                stacked_elements.append(list(batch_tuple))
+                        else:
+                            stacked_elements.append(batch_tuple)
+                    
+                    img_inputs = list(stacked_elements)
+                else:
+                    print(f"Warning: img_inputs is list but first element is not tuple/list: {type(img_inputs[0])}")
+
+        
+        # 디버깅: 배치 내 그룹 중복 확인
+        if img_metas is not None and isinstance(img_metas, list):
+            batch_groups = [meta.get('sequence_group_idx', -1) for meta in img_metas]
+            unique_groups = len(set(batch_groups))
+            
+            if unique_groups < len(batch_groups):
+                print(f"⚠️ 경고: 배치 내 중복 그룹 발견! 그룹: {batch_groups}")
+            else:
+                print(f"✓ 배치 그룹: {batch_groups} (모두 고유)")
+
 
         # ---------------------- obtain feats from images -----------------------------
         return_dict = self.obtain_feats_from_images(points, img=img_inputs, img_metas=img_metas, **kwargs)
