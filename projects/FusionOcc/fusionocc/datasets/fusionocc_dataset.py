@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import copy
 import numpy as np
 import os
 from mmdet3d.datasets import NuScenesDataset
@@ -42,14 +43,15 @@ class FusionOccDataset(NuScenesDataset):
     
     def get_data_info(self, index):
         """Get data info according to the given index.
-        
+
         Args:
             index (int): Index of the sample data to get.
-            
+
         Returns:
             dict: Data information that will be passed to the data
                 preprocessing pipelines.
         """
+
         data_info = super().get_data_info(index)
         
         # Add FusionOcc specific information
@@ -66,48 +68,70 @@ class FusionOccDataset(NuScenesDataset):
         return data_info
     
     def prepare_train_data(self, index):
-        """Training data preparation.
-        
-        Args:
-            index (int): Index for accessing the target data.
-            
-        Returns:
-            dict: Training data dict of the corresponding index.
-        """
+        """Training data preparation."""
         input_dict = self.get_data_info(index)
         if input_dict is None:
             return None
-        
+
+        # NuScenesDatasetOccpancy는 Det3DDataset을 직접 상속받지 않으므로 pre_pipeline 대신 직접 처리
+        # deepcopy here to avoid inplace modification in pipeline.
+        input_dict = copy.deepcopy(input_dict)
+
+        # box_type_3d (str): 3D box type.
+        input_dict['box_type_3d'] = self.box_type_3d
+        # box_mode_3d (str): 3D box mode.
+        input_dict['box_mode_3d'] = self.box_mode_3d
+
         # Add FusionOcc specific data preparation
         if self.modality is None:
             input_dict['modality'] = dict(use_lidar=True, use_camera=True)
-        
+
         # Add occupancy-specific keys
         input_dict['voxel_semantics'] = None  # Will be loaded by pipeline
         input_dict['mask_camera'] = None  # Will be loaded by pipeline
-        
-        data = self.pipeline(input_dict)
-        return data
-    
+
+        try:
+            data = self.pipeline(input_dict)
+            return data
+        except Exception as e:
+            # 디버깅을 위한 에러 로깅
+            import traceback
+            print(f"ERROR in pipeline for index {index}: {e}")
+            print(f"input_dict keys: {input_dict.keys()}")
+            if 'curr' in input_dict:
+                print(f"curr keys: {input_dict['curr'].keys() if isinstance(input_dict['curr'], dict) else 'not dict'}")
+            elif 'images' in input_dict:
+                print(f"images keys: {list(input_dict['images'].keys()) if isinstance(input_dict['images'], dict) else 'not dict'}")
+            traceback.print_exc()
+            return None  # None을 반환하면 BaseDataset이 재시도
+
     def prepare_test_data(self, index):
-        """Testing data preparation.
-        
-        Args:
-            index (int): Index for accessing the target data.
-            
-        Returns:
-            dict: Testing data dict of the corresponding index.
-        """
+        """Testing data preparation."""
         input_dict = self.get_data_info(index)
         if input_dict is None:
             return None
-        
+
+        # NuScenesDatasetOccpancy는 Det3DDataset을 직접 상속받지 않으므로 pre_pipeline 대신 직접 처리
+        # deepcopy here to avoid inplace modification in pipeline.
+        input_dict = copy.deepcopy(input_dict)
+
+        # box_type_3d (str): 3D box type.
+        input_dict['box_type_3d'] = self.box_type_3d
+        # box_mode_3d (str): 3D box mode.
+        input_dict['box_mode_3d'] = self.box_mode_3d
+
         # Add FusionOcc specific data preparation
         if self.modality is None:
             input_dict['modality'] = dict(use_lidar=True, use_camera=True)
-        
-        data = self.pipeline(input_dict)
-        return data
+
+        try:
+            data = self.pipeline(input_dict)
+            return data
+        except Exception as e:
+            import traceback
+            print(f"ERROR in test pipeline for index {index}: {e}")
+            traceback.print_exc()
+            raise  # 테스트 모드에서는 예외를 다시 발생시킴
 
 
 @DATASETS.register_module()
@@ -149,6 +173,8 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         # Initialize attributes that were skipped due to lazy_init=True
         self.show_ins_var = show_ins_var
         
+        # breakpoint()
+
         # Ensure data_list is properly loaded (workaround for BaseDataset issue)
         if not hasattr(self, 'data_list') or not self.data_list:
             self.data_list = self.load_data_list()
@@ -178,18 +204,34 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         with open(ann_file, 'rb') as f:
             data = pickle.load(f)
         
-        # Support both fusionocc format ('infos') and mmdet3d format ('data_list')
+        
+
+        # Extract data list - support both fusionocc format ('infos') and mmdet3d format ('data_list')
         if isinstance(data, dict):
             if 'data_list' in data:
-                return data['data_list']
+                data_list = data['data_list']
             elif 'infos' in data:
-                return data['infos']
+                data_list = data['infos']
             else:
                 raise ValueError(f"Dict in {ann_file} has neither 'data_list' nor 'infos' key. Keys: {data.keys()}")
         elif isinstance(data, list):
-            return data
+            data_list = data
         else:
             raise ValueError(f"Unsupported data format in {ann_file}: {type(data)}")
+        
+        # CRITICAL: Sort by timestamp to match original behavior
+        # Original code: data_infos = list(sorted(data['infos'], key=lambda e: e['timestamp']))
+        if len(data_list) > 0 and 'timestamp' in data_list[0]:
+            data_list = list(sorted(data_list, key=lambda e: e['timestamp']))
+        
+        # Apply load_interval if specified (matching original behavior)
+        # Original code: data_infos = data_infos[::self.load_interval]
+        if hasattr(self, 'load_interval') and self.load_interval > 1:
+            data_list = data_list[::self.load_interval]
+
+        # breakpoint()
+        
+        return data_list
     
     
     def get_adj_info(self, info: dict, index: int) -> list:
@@ -276,6 +318,7 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
                 - ann_info (dict): Annotation info.
                 - occ_gt_path (str): Path to occupancy ground truth.
         """
+        # breakpoint()
         # Ensure data_list is properly loaded and check bounds
         if not hasattr(self, 'data_list') or not self.data_list:
             self.data_list = self.load_data_list()
@@ -289,7 +332,10 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         input_dict = dict()
         
         # Basic info
-        input_dict['sample_idx'] = info.get('sample_idx', index)
+        if 'token' in info:
+            input_dict['sample_idx'] = info['token']
+        else:
+            input_dict['sample_idx'] = info.get('sample_idx', index)
         input_dict['token'] = info.get('token', '')
         input_dict['timestamp'] = info.get('timestamp', 0.0)
         
@@ -299,7 +345,7 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
             lidar_info = info['lidar_points']
             lidar_path = lidar_info.get('lidar_path', '')
             
-            # Handle path: occfrmwrk uses relative filename like "n015-2018-07-11-11-54-16+0800__LIDAR_TOP__1531281439800013.pcd.bin"
+            # Handle path: occfrmwrk uses relative filename
             if lidar_path and not lidar_path.startswith('data/') and not lidar_path.startswith('./'):
                 lidar_path = f'data/nuscenes/samples/LIDAR_TOP/{lidar_path}'
             elif lidar_path.startswith('./'):
@@ -341,15 +387,28 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
                 'num_pts_feats': 5
             }
         
-        # Image information - support both formats
-        if 'images' in info:
-            # occfrmwrk format
-            input_dict['images'] = info['images']
-        elif 'cams' in info:
-            # fusionocc format: pass entire info as 'curr' for compatibility
-            # This includes cams, lidar2ego_rotation, lidar2ego_translation, etc.
-            input_dict['curr'] = info
-            
+        # Image information - 원본과 동일하게 modality 체크 추가
+        # 원본: if self.modality['use_camera']: ... else: input_dict.update(dict(curr=info))
+        if self.modality is None or self.modality.get('use_camera', True):
+            if 'images' in info:
+                # occfrmwrk format
+                input_dict['images'] = info['images']
+            elif 'cams' in info:
+                # fusionocc format: pass entire info as 'curr' for compatibility (원본과 동일)
+                # 원본 코드: input_dict.update(dict(curr=info))
+                input_dict['curr'] = info
+                
+                # Add adjacent frames for temporal fusion (원본과 동일)
+                # 원본: if 'fusion' in self.img_info_prototype: ...
+                if hasattr(self, 'img_info_prototype') and 'fusion' in self.img_info_prototype:
+                    info_adj_list = self.get_adj_info(info, index)
+                    if info_adj_list:
+                        input_dict['adjacent'] = info_adj_list
+                    
+                    info_adj_list_lidar = self.get_adj_info_lidar(info, index)
+                    if info_adj_list_lidar:
+                        input_dict['lidar_adjacent'] = info_adj_list_lidar
+        
         # Ego to global transformation - support both formats
         if 'ego2global' in info:
             # occfrmwrk format: 4x4 transformation matrix
@@ -405,19 +464,6 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         if 'scene_token' in info:
             input_dict['scene_token'] = info['scene_token']
         
-        # Add adjacent frames for temporal fusion
-        # Add for both fusionocc ('cams') and occfrmwrk ('images') formats
-        if 'cams' in info or 'images' in info:
-            # Get adjacent camera frames
-            info_adj_list = self.get_adj_info(info, index)
-            if info_adj_list:
-                input_dict['adjacent'] = info_adj_list
-            
-            # Get adjacent lidar frames (CRITICAL for multi-frame lidar fusion)
-            info_adj_list_lidar = self.get_adj_info_lidar(info, index)
-            if info_adj_list_lidar:
-                input_dict['lidar_adjacent'] = info_adj_list_lidar
-            
         return input_dict
         
     def parse_data_info(self, info: dict) -> dict:
@@ -570,4 +616,78 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
                 mask_camera = occ_gt['mask_camera'].astype(bool)
                 self.occ_eval_metrics.add_batch(occ_pred, gt_semantics, mask_lidar, mask_camera)
 
-        return self.occ_eval_metrics.count_miou() 
+        return self.occ_eval_metrics.count_miou()
+
+    def prepare_data(self, index):
+        """Data preparation for both training and testing stage."""
+        # breakpoint()
+        if self.test_mode:
+            return self.prepare_test_data(index)
+        else:
+            return self.prepare_train_data(index)
+
+    def prepare_train_data(self, index):
+        """Training data preparation."""
+        input_dict = self.get_data_info(index)
+        if input_dict is None:
+            return None
+
+        # NuScenesDatasetOccpancy는 Det3DDataset을 직접 상속받지 않으므로 pre_pipeline 대신 직접 처리
+        # deepcopy here to avoid inplace modification in pipeline.
+        input_dict = copy.deepcopy(input_dict)
+
+        # box_type_3d (str): 3D box type.
+        input_dict['box_type_3d'] = self.box_type_3d
+        # box_mode_3d (str): 3D box mode.
+        input_dict['box_mode_3d'] = self.box_mode_3d
+
+        # Add FusionOcc specific data preparation
+        if self.modality is None:
+            input_dict['modality'] = dict(use_lidar=True, use_camera=True)
+
+        # Add occupancy-specific keys
+        input_dict['voxel_semantics'] = None  # Will be loaded by pipeline
+        input_dict['mask_camera'] = None  # Will be loaded by pipeline
+
+        try:
+            data = self.pipeline(input_dict)
+            return data
+        except Exception as e:
+            # 디버깅을 위한 에러 로깅
+            import traceback
+            print(f"ERROR in pipeline for index {index}: {e}")
+            print(f"input_dict keys: {input_dict.keys()}")
+            if 'curr' in input_dict:
+                print(f"curr keys: {input_dict['curr'].keys() if isinstance(input_dict['curr'], dict) else 'not dict'}")
+            elif 'images' in input_dict:
+                print(f"images keys: {list(input_dict['images'].keys()) if isinstance(input_dict['images'], dict) else 'not dict'}")
+            traceback.print_exc()
+            return None  # None을 반환하면 BaseDataset이 재시도
+
+    def prepare_test_data(self, index):
+        """Testing data preparation."""
+        input_dict = self.get_data_info(index)
+        if input_dict is None:
+            return None
+
+        # NuScenesDatasetOccpancy는 Det3DDataset을 직접 상속받지 않으므로 pre_pipeline 대신 직접 처리
+        # deepcopy here to avoid inplace modification in pipeline.
+        input_dict = copy.deepcopy(input_dict)
+
+        # box_type_3d (str): 3D box type.
+        input_dict['box_type_3d'] = self.box_type_3d
+        # box_mode_3d (str): 3D box mode.
+        input_dict['box_mode_3d'] = self.box_mode_3d
+
+        # Add FusionOcc specific data preparation
+        if self.modality is None:
+            input_dict['modality'] = dict(use_lidar=True, use_camera=True)
+
+        try:
+            data = self.pipeline(input_dict)
+            return data
+        except Exception as e:
+            import traceback
+            print(f"ERROR in test pipeline for index {index}: {e}")
+            traceback.print_exc()
+            raise  # 테스트 모드에서는 예외를 다시 발생시킴

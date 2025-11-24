@@ -25,10 +25,7 @@ except ImportError:
 from mmcv.ops import SparseSequential, SparseConvTensor
 from mmdet3d.registry import MODELS
 
-try:
-    from mmdet3d.ops import SparseBasicBlock, make_sparse_convmodule
-except ImportError:
-    from mmdet3d.models.layers.sparse_block import SparseBasicBlock, make_sparse_convmodule
+from mmdet3d.models.layers import SparseBasicBlock, make_sparse_convmodule
 
 
 @MODELS.register_module()
@@ -97,35 +94,26 @@ class CustomSparseEncoder(nn.Module):
         feats, coords, bs_list, inv_idx_list = [], [], [], []
         count = 0
         for k, pt in enumerate(points):
-            # Convert LiDARPoints object to tensor if necessary
+            # pt가 LiDARPoints인 경우 tensor 속성 사용
             if hasattr(pt, 'tensor'):
-                pt = pt.tensor
-            coord = torch.zeros_like(pt)[:, :3]
+                pt_tensor = pt.tensor
+            else:
+                pt_tensor = pt
+
+            coord = torch.zeros_like(pt_tensor)[:, :3]
             eps = 0
-            # Ensure point_cloud_range and voxel_size are on the same device as pt
-            device = pt.device
-            point_cloud_range = torch.tensor(self.point_cloud_range, device=device, dtype=pt.dtype)
-            voxel_size = torch.tensor(self.voxel_size, device=device, dtype=pt.dtype)
-            
-            coord[:, 0] = (pt[:, 0] - point_cloud_range[0]) / (voxel_size[0] + eps)
-            coord[:, 1] = (pt[:, 1] - point_cloud_range[1]) / (voxel_size[1] + eps)
-            coord[:, 2] = (pt[:, 2] - point_cloud_range[2]) / (voxel_size[2] + eps)
+            coord[:, 0] = (pt_tensor[:, 0] - self.point_cloud_range[0]) / (self.voxel_size[0] + eps)
+            coord[:, 1] = (pt_tensor[:, 1] - self.point_cloud_range[1]) / (self.voxel_size[1] + eps)
+            coord[:, 2] = (pt_tensor[:, 2] - self.point_cloud_range[2]) / (self.voxel_size[2] + eps)
             coord = torch.floor(coord).int()
-            
-            # Clamp coordinates to valid range to prevent CUDA errors
-            coord[:, 0] = torch.clamp(coord[:, 0], 0, self.sparse_shape[0] - 1)
-            coord[:, 1] = torch.clamp(coord[:, 1], 0, self.sparse_shape[1] - 1)
-            coord[:, 2] = torch.clamp(coord[:, 2], 0, self.sparse_shape[2] - 1)
-            
             uniq_coord, inv_idx = torch.unique(coord, return_inverse=True, dim=0)
-            feat = torch_scatter.scatter_mean(pt, inv_idx, dim=0)
+            feat = torch_scatter.scatter_mean(pt_tensor, inv_idx, dim=0)
 
             bs_list.append([count, count + feat.shape[0]])
             count += feat.shape[0]
 
             feats.append(feat)
             inv_idx_list.append(inv_idx)
-            # Ensure the padding value is on the same device
             uniq_coord_bs = F.pad(uniq_coord, (1, 0), mode="constant", value=k)
             coords.append(uniq_coord_bs)
 
@@ -205,25 +193,16 @@ class CustomSparseEncoder(nn.Module):
             self.encoder_layers.add_module(stage_name, stage_layers)
         return out_channels
 
-    # @auto_fp16(apply_to=("voxel_features",))  # Temporarily disabled for debugging
+    @auto_fp16(apply_to=("voxel_features",))
     def encode(self, voxel_features, coors, batch_size, **kwargs):
-        # Ensure coors is on the same device as voxel_features
-        device = voxel_features.device
-        coors = coors.int().to(device)
-        
-        # Convert batch_size to int if it's a tensor
-        if isinstance(batch_size, torch.Tensor):
-            batch_size = int(batch_size.item())
-        else:
-            batch_size = int(batch_size)
-        
+        coors = coors.int()
         input_sp_tensor = SparseConvTensor(
             voxel_features, coors, self.sparse_shape, batch_size
         )
         x = self.conv_input(input_sp_tensor)
 
         encode_features = []
-        for i, encoder_layer in enumerate(self.encoder_layers):
+        for encoder_layer in self.encoder_layers:
             x = encoder_layer(x)
             encode_features.append(x)
 

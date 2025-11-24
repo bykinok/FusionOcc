@@ -124,23 +124,14 @@ class FusionDepthSeg(nn.Module):
             self.img_bev_encoder_neck = None
 
     def image_encoder(self, img, stereo=False):
-        """Encode images using backbone and neck."""
         imgs = img
-        # Handle both (B, N, C, H, W) and (N, C, H, W) formats
-        if imgs.ndim == 4:  # (N, C, H, W)
-            N, C, imH, imW = imgs.shape
-            B = 1
-            imgs = imgs.unsqueeze(0)  # (1, N, C, H, W)
-        else:  # (B, N, C, H, W)
-            B, N, C, imH, imW = imgs.shape
+        B, N, C, imH, imW = imgs.shape
         imgs = imgs.view(B * N, C, imH, imW)
-        
         x = self.img_backbone(imgs)
         stereo_feat = None
         if stereo:
             stereo_feat = x[0]
         x = x[1:]
-        
         if self.with_img_neck:
             x = self.img_neck(x)
             if type(x) in [list, tuple]:
@@ -268,6 +259,8 @@ class FusionDepthSeg(nn.Module):
         img_3d_feat_list = []
         depth_key_frame = None
         seg_key_frame = None
+
+        # breakpoint()
         
         # Process each frame
         for fid in range(self.num_frame - 1, -1, -1):
@@ -744,6 +737,8 @@ class FusionOCC(FusionDepthSeg):
                 elif isinstance(segs[0], np.ndarray):
                     segs = torch.from_numpy(np.stack(segs, axis=0)).to(device)
         
+        # breakpoint()
+
         lidar_feat, x_list, x_sparse_out = self.lidar_encoder(points)
         lidar_feat = lidar_feat.permute(0, 1, 2, 4, 3).contiguous()
 
@@ -1336,9 +1331,24 @@ class FusionOCC(FusionDepthSeg):
         elif isinstance(imgs, torch.Tensor):
             imgs = imgs.to(device)
         
+        # Convert points to list of tensors to match original behavior
+        # Original code expects points[0] to be a tensor (from bevdet.py forward_test)
+        if points is not None:
+            if not isinstance(points, list):
+                # If it's a single LiDARPoints object, extract tensor and make it a list
+                if hasattr(points, 'tensor'):
+                    points = [points.tensor]
+                else:
+                    points = [points]
+            else:
+                # If it's a list, convert each LiDARPoints to tensor
+                points = [pt.tensor if hasattr(pt, 'tensor') else pt for pt in points]
+        
         # Keep points as LiDARPoints objects - lidar_encoder will handle conversion
         # No need to convert to tensor here
         
+        # breakpoint()
+
         # Forward pass (without gradient)
         with torch.no_grad():
             # WORKAROUND: Skip lidar due to mmcv 2.1.0 sparse convolution CUDA error

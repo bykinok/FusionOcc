@@ -68,8 +68,11 @@ class PointToMultiViewDepth(object):
         Returns:
             dict: Results with added 'sparse_depth' key.
         """
+
+        
+
         # Get points (should be in ego coordinate after PointsLidar2Ego)
-        points_lidar = results['points']
+        points_lidar = results['curr_points']
         
         # Get camera information from img_inputs
         imgs, sensor2egos, ego2globals, intrins, post_rots, post_trans = results['img_inputs']
@@ -93,10 +96,12 @@ class PointToMultiViewDepth(object):
             H, W = imgs.shape[2], imgs.shape[3]
             results['sparse_depth'] = torch.zeros(num_cams, H // self.downsample, W // self.downsample)
             return results
+
+        # breakpoint()
         
         depth_map_list = []
-        for cid in range(len(cam_names)):
-            cam_name = cam_names[cid]
+        for cid in range(len(results['cam_names'])):
+            cam_name = results['cam_names'][cid]
             
             if data_format == 'fusionocc':
                 # Get lidar2ego transformation
@@ -148,13 +153,27 @@ class PointToMultiViewDepth(object):
             cam2img[:3, :3] = intrins[cid]
 
             # Compute lidar2cam transformation
-            lidar2cam = torch.inverse(camego2global.matmul(cam2camego)).matmul(
-                lidarego2global.matmul(lidar2lidarego))
+            
+            # Compute inverse and clean up numerical errors in last row
+            cam2global = camego2global.matmul(cam2camego)
+            cam2global_inv = torch.inverse(cam2global)
+            threshold = 1e-10
+            cam2global_inv = torch.where(torch.abs(cam2global_inv) < threshold, 
+                                         torch.zeros_like(cam2global_inv), 
+                                         cam2global_inv)
+            lidar2cam = cam2global_inv.matmul(lidarego2global.matmul(lidar2lidarego))
+            lidar2cam = lidar2cam.float()
+
+            # lidar2cam = torch.inverse(camego2global.matmul(cam2camego)).matmul(
+            #     lidarego2global.matmul(lidar2lidarego))
             lidar2img = cam2img.matmul(lidar2cam)
             
+            # breakpoint()
+
             # Project points to image
             points_img = points_lidar.tensor[:, :3].matmul(
                 lidar2img[:3, :3].T) + lidar2img[:3, 3].unsqueeze(0)
+            
             points_img = torch.cat(
                 [points_img[:, :2] / points_img[:, 2:3], points_img[:, 2:3]], 1)
             
@@ -169,6 +188,8 @@ class PointToMultiViewDepth(object):
         depth_map = torch.stack(depth_map_list)
         results['sparse_depth'] = depth_map
         
+        # breakpoint()   
+
         return results
     
     def __repr__(self):

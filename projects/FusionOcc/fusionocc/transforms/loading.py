@@ -176,6 +176,7 @@ class PrepareImageSeg(object):
         """Get image inputs with proper transformation - REAL IMAGE LOADING."""
         from PIL import Image
         from scipy.spatial.transform import Rotation as R
+        import os
         
         imgs = []
         segs = []
@@ -205,25 +206,42 @@ class PrepareImageSeg(object):
         # The original implementation uses choose_cams() which returns config order
         # This is crucial for matching the pretrained checkpoint
         cam_names = self.data_config['cams']
+        results['cam_names'] = cam_names
         
         for cam_idx, cam_name in enumerate(cam_names):
             if cam_name not in cam_data:
+                # 디버깅: 카메라 데이터가 없는 경우 로깅
+                print(f"WARNING: Camera {cam_name} not found in cam_data. Available: {list(cam_data.keys())}")
                 continue
             
             cam_info = cam_data[cam_name]
             
-            # Load image
+            # Load image - 경로 처리 개선
             if data_format == 'fusionocc':
                 img_path = cam_info['data_path']
+                # data_root가 빈 문자열일 수 있으므로 경로 정규화
+                if img_path.startswith('./'):
+                    img_path = img_path[2:]
+                elif not img_path.startswith('/') and not img_path.startswith('data/'):
+                    # 상대 경로인 경우 data/nuscenes 추가
+                    img_path = f"data/nuscenes/{img_path}"
             else:  # occfrmwrk
                 img_path = cam_info['img_path']
                 # img_path in occfrmwrk is relative, need to add data_root
                 if not img_path.startswith('./') and not img_path.startswith('/'):
                     # Assume it's relative to nuscenes root
                     img_path = f"./data/nuscenes/samples/{cam_name}/{img_path}"
+                elif img_path.startswith('./'):
+                    img_path = img_path[2:]
             
-            # Load image file
-            img = Image.open(img_path)
+            # 이미지 파일 존재 확인 및 로드
+            if not os.path.exists(img_path):
+                raise FileNotFoundError(f"Image file not found: {img_path}")
+            
+            try:
+                img = Image.open(img_path)
+            except Exception as e:
+                raise RuntimeError(f"Failed to open image {img_path}: {e}")
             
             # Sample augmentation
             post_rot = np.eye(2)
@@ -289,9 +307,9 @@ class PrepareImageSeg(object):
                     imgs.append(img_adj)  # IMMEDIATELY after current frame (interleaved!)
                     
                     # Load and transform segmentation for adjacent frame (NO FALLBACK - same as original)
-                    seg_adj = self.get_img_seg(img_path_adj)
-                    seg_adj = self.seg_transform_core(seg_adj, resize_dims, crop, flip_aug, rotate)
-                    segs.append(self.format_seg(seg_adj))
+                    # seg_adj = self.get_img_seg(img_path_adj)
+                    # seg_adj = self.seg_transform_core(seg_adj, resize_dims, crop, flip_aug, rotate)
+                    # segs.append(self.format_seg(seg_adj))
             
             # Get intrinsics
             if data_format == 'fusionocc':
@@ -648,6 +666,16 @@ class FuseAdjacentSweeps(object):
             return results
         
         points = results['points']
+
+        # Save original points as curr_points before fusing (if not already set)
+        # This matches the original behavior where curr_points is the original points
+        if 'curr_points' not in results:
+            from mmdet3d.structures import LiDARPoints
+            results['curr_points'] = LiDARPoints(
+                points.tensor.clone(), 
+                points_dim=points.tensor.shape[-1], 
+                attribute_dims=None
+            )
         
         # Get current frame transformation matrices
         # Support both fusionocc ('curr' wrapper) and occfrmwrk (direct) formats
@@ -678,11 +706,12 @@ class FuseAdjacentSweeps(object):
         points = points.cat(pre_points_list)
         points = points[:, self.use_dim]
         
+        # breakpoint()
         # Sample points to reduce computation (deterministic for testing)
         # Only keep points with timestamp > 16 (for deterministic comparison)
         mask = points.tensor[:, 4] > 16
         # NOTE: Original has random sampling but we disable it for reproducibility
-        # mask = mask | (torch.randint(0, 10, size=mask.shape) > 7)  # random sampling
+        mask = mask | (torch.randint(0, 10, size=mask.shape) > 7)  # random sampling
         points = points[mask]
         
         results['points'] = points
@@ -838,37 +867,15 @@ class PointsLidar2Ego(object):
             dict: Results with transformed points.
         """
         points = input_dict['points']
+
+        # breakpoint()
         
-        # Support both formats
-        if 'lidar2ego' in input_dict:
-            # occfrmwrk format or dataset already provided the matrix
-            lidar2ego = input_dict['lidar2ego']
-            if isinstance(lidar2ego, np.ndarray):
-                lidar2ego = torch.from_numpy(lidar2ego).float()
-            else:
-                lidar2ego = torch.tensor(lidar2ego).float()
-            
-            # Apply transformation
-            points.tensor[:, :3] = points.tensor[:, :3] @ lidar2ego[:3, :3].T
-            points.tensor[:, :3] += lidar2ego[:3, 3]
-        elif 'curr' in input_dict and 'lidar2ego_rotation' in input_dict['curr']:
-            # fusionocc format
-            lidar2ego_rotation = input_dict['curr']['lidar2ego_rotation']
-            lidar2ego_translation = input_dict['curr']['lidar2ego_translation']
-            
-            # Convert rotation quaternion to rotation matrix
-            lidar2ego_rots = torch.tensor(
-                Quaternion(lidar2ego_rotation).rotation_matrix
-            ).float()
-            lidar2ego_trans = torch.tensor(lidar2ego_translation).float()
-            
-            # Apply rotation and translation
-            points.tensor[:, :3] = points.tensor[:, :3] @ lidar2ego_rots.T
-            points.tensor[:, :3] += lidar2ego_trans
-        else:
-            # No transformation available, skip
-            pass
-        
+        lidar2ego_rots = torch.tensor(Quaternion(input_dict['curr']['lidar2ego_rotation']).rotation_matrix).float()
+        lidar2ego_trans = torch.tensor(input_dict['curr']['lidar2ego_translation']).float()
+        points.tensor[:, :3] = (
+                points.tensor[:, :3] @ lidar2ego_rots.T
+        )
+        points.tensor[:, :3] += lidar2ego_trans
         input_dict['points'] = points
         return input_dict
 
@@ -899,6 +906,8 @@ class FusionOccPointsRangeFilter(object):
                  and 'pts_semantic_mask' keys are updated in the result dict.
         """
         points = input_dict['points']
+
+        # breakpoint()
         
         # Add small epsilon to avoid boundary issues
         eps = 0.001

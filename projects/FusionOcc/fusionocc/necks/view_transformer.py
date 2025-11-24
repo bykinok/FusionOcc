@@ -8,31 +8,7 @@ from mmengine.runner import autocast
 from torch.utils.checkpoint import checkpoint
 from mmdet.models.backbones.resnet import BasicBlock
 
-# Import bev_pool_v2 directly from the bev_pool_v2 module
-try:
-    import sys
-    import os
-    import importlib.util
-    
-    # Get the absolute path to bev_pool.py
-    bev_pool_file = os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'mmdet3d', 'ops', 'bev_pool_v2', 'bev_pool.py')
-    bev_pool_file = os.path.abspath(bev_pool_file)
-    
-    # Load the module from file
-    spec = importlib.util.spec_from_file_location("bev_pool_module", bev_pool_file)
-    bev_pool_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(bev_pool_module)
-    
-    # Get the bev_pool_v2 function
-    bev_pool_v2 = bev_pool_module.bev_pool_v2
-    print("Successfully imported bev_pool_v2 from bev_pool module")
-except Exception as e:
-    print(f"Warning: Could not import bev_pool_v2: {e}")
-    import traceback
-    traceback.print_exc()
-    # Provide a dummy implementation
-    def bev_pool_v2(*args, **kwargs):
-        raise NotImplementedError("bev_pool_v2 is not available")
+from mmdet3d.ops.bev_pool_v2.bev_pool import bev_pool_v2
 
 from mmdet3d.registry import MODELS as NECKS
 
