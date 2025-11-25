@@ -233,6 +233,8 @@ class BEVFormerOccHead(BaseModule):
         if hasattr(self, 'transformer'):
             self.transformer = self.transformer.to(device)
         
+        # breakpoint()
+
         bev_queries = self.bev_embedding.weight.to(device=device, dtype=dtype)
 
         bev_mask = torch.zeros((bs, self.bev_h, self.bev_w),

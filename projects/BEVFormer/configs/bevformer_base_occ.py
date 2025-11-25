@@ -10,6 +10,10 @@ custom_imports = dict(
     allow_failed_imports=False
 )
 
+custom_imports = dict(
+    imports=['projects.BEVFormer.datasets.samplers'],
+    allow_failed_imports=False)
+
 # Set default scope to mmdet3d for all modules
 default_scope = 'mmdet3d'
 
@@ -247,20 +251,31 @@ runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
 
 # Convert old-style data config to new-style dataloader config for mmengine
 # 원본 BEVFormer와 동일한 설정 사용 (persistent_workers, prefetch_factor 제거)
+# CRITICAL: Use DistributedGroupSampler to match original BEVFormer sampling order
 train_dataloader = dict(
     batch_size=data['samples_per_gpu'],
     num_workers=data['workers_per_gpu'],
     persistent_workers=False,  # 원본처럼 False로 설정
-    sampler=dict(type='DefaultSampler', shuffle=True),
+    sampler=dict(
+        type='DistributedGroupSampler',
+        # shuffle=False
+        samples_per_gpu=data['samples_per_gpu'],
+        seed=0  # 원본과 동일한 seed 사용
+    ),
     dataset=data['train']
 )
 
 # Enable validation and testing with OccupancyMetric
+# CRITICAL: Use DistributedGroupSampler for validation/test to match original BEVFormer
 val_dataloader = dict(
     batch_size=1,
     num_workers=0,  # Changed from 4 to 0 to match CONet and avoid multiprocessing issues
     persistent_workers=False,
-    sampler=dict(type='DefaultSampler', shuffle=False),
+    sampler=dict(
+        type='DistributedSampler',
+        # samples_per_gpu=1,  # validation batch size
+        # seed=0  # 원본과 동일한 seed 사용
+    ),
     # Removed collate_fn to use default behavior like CONet
     dataset=data['val']
 )
@@ -269,7 +284,11 @@ test_dataloader = dict(
     batch_size=1,
     num_workers=0,  # Changed from 4 to 0 to match CONet and avoid multiprocessing issues
     persistent_workers=False,
-    sampler=dict(type='DefaultSampler', shuffle=False),
+    sampler=dict(
+        type='DistributedSampler',
+        # samples_per_gpu=1,  # test batch size
+        # seed=0  # 원본과 동일한 seed 사용
+    ),
     # Removed collate_fn to use default behavior like CONet
     dataset=data['test']
 )
@@ -341,6 +360,7 @@ default_hooks = dict(
 
 # Pretrained checkpoint - download if needed: https://github.com/open-mmlab/mmdetection3d/tree/master/configs/fcos3d
 load_from = './projects/BEVFormer/pretrain/r101_dcn_fcos3d_pretrain.pth'
+#load_from = './projects/BEVFormer/ckpt/epoch_24.pth'
 
 checkpoint_config = dict(interval=1)
 

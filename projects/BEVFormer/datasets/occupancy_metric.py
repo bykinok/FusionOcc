@@ -137,8 +137,14 @@ class OccupancyMetric(BaseMetric):
         # Get per-class IoU
         mIoU = self.miou_metric.per_class_iu(self.miou_metric.hist)
         
+        # Print in original format (like count_miou method)
+        print(f'===> per class IoU of {self.miou_metric.cnt} samples:')
+        for ind_class in range(self.num_classes-1):
+            print(f'===> {self.miou_metric.class_names[ind_class]} - IoU = ' + str(round(mIoU[ind_class] * 100, 2)))
+
         # Calculate mean IoU (excluding the 'free' class which is the last one)
         mIoU_mean = np.nanmean(mIoU[:self.num_classes-1]) * 100
+        print(f'===> mIoU of {self.miou_metric.cnt} samples: ' + str(round(mIoU_mean, 2)))
         
         # Build result dictionary
         result_dict = {

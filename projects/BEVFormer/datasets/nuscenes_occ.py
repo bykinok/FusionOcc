@@ -61,7 +61,30 @@ class NuSceneOcc(NuScenesDataset):
         
         # After parent init, data_list should be populated. Store it as data_infos for compatibility
         self.data_infos = self.data_list
+        
+        # CRITICAL: Set group flag for DistributedGroupSampler
+        # This is required by DistributedGroupSampler to group samples
+        # Set flag for ALL modes (train/val/test) since DistributedGroupSampler may be used
+        # Ensure data_list is loaded before setting flag
+        if not hasattr(self, 'data_list') or not self.data_list:
+            self.data_list = self.load_data_list()
+        self._set_group_flag()
     
+    def _set_group_flag(self):
+        """Set flag according to image aspect ratio.
+        
+        Images with aspect ratio greater than 1 will be set as group 1,
+        otherwise group 0. In 3D datasets, they are all the same, thus are all
+        zeros.
+        """
+        import numpy as np
+        # Use len(self.data_list) instead of len(self) to avoid initialization issues
+        if hasattr(self, 'data_list') and self.data_list:
+            self.flag = np.zeros(len(self.data_list), dtype=np.uint8)
+        else:
+            # Fallback: use 0 if data_list is not available
+            self.flag = np.zeros(0, dtype=np.uint8)
+
     def load_data_list(self):
         """Load data list from annotation file for mmengine compatibility."""
         # In mmengine, BaseDataset calls load_data_list() in full_init()
@@ -124,6 +147,7 @@ class NuSceneOcc(NuScenesDataset):
         Returns:
             dict: Training data dict of the corresponding index.
         """
+        # breakpoint()
         queue = []
         index_list = list(range(index - self.queue_length, index))
         random.shuffle(index_list)
