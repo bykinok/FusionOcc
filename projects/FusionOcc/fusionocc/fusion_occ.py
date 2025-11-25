@@ -1183,6 +1183,7 @@ class FusionOCC(FusionDepthSeg):
         # Extract data
         imgs = data['img_inputs']
         points = data.get('points', None)
+        sparse_depth = data.get('sparse_depth', None)  # 추가: sparse_depth 추출
         voxel_semantics = data.get('voxel_semantics', None)
         mask_camera = data.get('mask_camera', None)
         img_metas = data.get('img_metas', {})
@@ -1199,6 +1200,20 @@ class FusionOCC(FusionDepthSeg):
                 points = [pt.to(device) if hasattr(pt, 'to') else pt for pt in points]
             elif hasattr(points, 'to'):
                 points = points.to(device)
+
+        # Handle sparse_depth: unpack and format like in test_step
+        if sparse_depth is not None:
+            # Unpack sparse_depth if it's a list (like in original simple_test)
+            if isinstance(sparse_depth, (list, tuple)):
+                sparse_depth = sparse_depth[0]
+            
+            # Ensure sparse_depth has batch dimension [B, N, H, W]
+            # If it's [N, H, W], add batch dimension
+            if isinstance(sparse_depth, torch.Tensor):
+                if sparse_depth.ndim == 3:
+                    sparse_depth = sparse_depth.unsqueeze(0)  # [N, H, W] -> [1, N, H, W]
+                # Move sparse_depth to device
+                sparse_depth = sparse_depth.to(device)
         
         # Forward pass (without gradient)
         with torch.no_grad():
@@ -1207,7 +1222,7 @@ class FusionOCC(FusionDepthSeg):
                 lidar_feat, _, _ = self.lidar_encoder(points)
                 
                 # Extract features from both modalities
-                occ_pred = self.extract_feat(lidar_feat, imgs, img_metas)
+                occ_pred = self.extract_feat(lidar_feat, imgs, img_metas, input_depth=sparse_depth)
             else:
                 # Image-only mode
                 occ_pred = self.extract_feat(None, imgs, img_metas)

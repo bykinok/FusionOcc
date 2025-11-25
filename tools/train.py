@@ -151,6 +151,7 @@ def main():
     
     # start training
     runner.train()
+    #runner.val()
 
 
 if __name__ == '__main__':

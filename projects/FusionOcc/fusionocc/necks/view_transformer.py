@@ -751,8 +751,6 @@ class LSSViewTransformerBEVDepth(LSSViewTransformer):
         Output:
             gt_depths: [B*N*h*w, d]
         """
-        if gt_depths is None:
-            return None, None
         B, N, H, W = gt_depths.shape
         gt_depths = gt_depths.view(B * N, H // self.downsample,
                                    self.downsample, W // self.downsample,
