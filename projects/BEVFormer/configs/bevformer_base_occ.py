@@ -255,7 +255,7 @@ runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
 train_dataloader = dict(
     batch_size=data['samples_per_gpu'],
     num_workers=data['workers_per_gpu'],
-    persistent_workers=False,  # 원본처럼 False로 설정
+    persistent_workers=True, #False,
     sampler=dict(
         type='DistributedGroupSampler',
         # shuffle=False
@@ -268,9 +268,9 @@ train_dataloader = dict(
 # Enable validation and testing with OccupancyMetric
 # CRITICAL: Use DistributedGroupSampler for validation/test to match original BEVFormer
 val_dataloader = dict(
-    batch_size=1,
-    num_workers=0,  # Changed from 4 to 0 to match CONet and avoid multiprocessing issues
-    persistent_workers=False,
+    batch_size=data['samples_per_gpu'],
+    num_workers=data['workers_per_gpu'],  # Changed from 4 to 0 to match CONet and avoid multiprocessing issues
+    persistent_workers=True, #False,
     sampler=dict(
         type='DistributedSampler',
         shuffle=False,
@@ -282,9 +282,9 @@ val_dataloader = dict(
 )
 
 test_dataloader = dict(
-    batch_size=1,
-    num_workers=0,  # Changed from 4 to 0 to match CONet and avoid multiprocessing issues
-    persistent_workers=False,
+    batch_size=data['samples_per_gpu'],
+    num_workers=data['workers_per_gpu'],  # Changed from 4 to 0 to match CONet and avoid multiprocessing issues
+    persistent_workers=True, #False,
     sampler=dict(
         type='DistributedSampler',
         shuffle=False,
