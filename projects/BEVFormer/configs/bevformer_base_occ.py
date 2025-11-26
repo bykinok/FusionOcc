@@ -273,6 +273,7 @@ val_dataloader = dict(
     persistent_workers=False,
     sampler=dict(
         type='DistributedSampler',
+        shuffle=False,
         # samples_per_gpu=1,  # validation batch size
         # seed=0  # 원본과 동일한 seed 사용
     ),
@@ -286,6 +287,7 @@ test_dataloader = dict(
     persistent_workers=False,
     sampler=dict(
         type='DistributedSampler',
+        shuffle=False,
         # samples_per_gpu=1,  # test batch size
         # seed=0  # 원본과 동일한 seed 사용
     ),
