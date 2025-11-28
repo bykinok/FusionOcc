@@ -27,6 +27,8 @@ class OccupancyMetric(BaseMetric):
         self.confusion_matrix_vox = np.zeros((self.num_classes, self.num_classes), dtype=np.int64)
     
     def process(self, data_batch, data_samples):
+        # breakpoint()
+
         """Process one batch of data samples.
         
         Args:
@@ -45,18 +47,6 @@ class OccupancyMetric(BaseMetric):
             else:
                 pred_logits_vox = getattr(data_sample, 'pred_logits_vox', None)
                 pred_logits_pts = getattr(data_sample, 'pred_logits_pts', None)
-            
-            # Debug: First sample only
-            if len(self.results) == 1:
-                print(f"  - has pred_logits_vox: {pred_logits_vox is not None}")
-                print(f"  - has pred_logits_pts: {pred_logits_pts is not None}")
-                if pred_logits_vox is not None:
-                    print(f"  - pred_logits_vox shape: {pred_logits_vox.shape}")
-                    # Check predicted classes
-                    pred_classes = torch.argmax(pred_logits_vox, dim=0)
-                    print(f"  - pred_classes unique: {torch.unique(pred_classes).tolist()}")
-                if pred_logits_pts is not None:
-                    print(f"  - pred_logits_pts shape: {pred_logits_pts.shape}")
             
             # Get ground truth point labels and voxel coordinates
             gt_pts_labels = None
@@ -91,21 +81,6 @@ class OccupancyMetric(BaseMetric):
                         voxel_coords = gt_pts_seg.voxel_coords
                     elif isinstance(gt_pts_seg, dict) and 'voxel_coords' in gt_pts_seg:
                         voxel_coords = gt_pts_seg['voxel_coords']
-            
-            # Debug: First sample only
-            if len(self.results) == 1:
-                print(f"  - has gt_pts_labels: {gt_pts_labels is not None}")
-                print(f"  - has voxel_coords: {voxel_coords is not None}")
-                if gt_pts_labels is not None:
-                    gt_shape = gt_pts_labels.shape if hasattr(gt_pts_labels, 'shape') else 'N/A'
-                    print(f"  - gt_pts_labels shape: {gt_shape}")
-                    if hasattr(gt_pts_labels, 'cpu'):
-                        gt_unique = torch.unique(gt_pts_labels).tolist()
-                    else:
-                        gt_unique = np.unique(gt_pts_labels).tolist()
-                    print(f"  - gt_pts_labels unique: {gt_unique}")
-                if voxel_coords is not None:
-                    print(f"  - voxel_coords shape: {voxel_coords.shape if hasattr(voxel_coords, 'shape') else 'N/A'}")
             
             # Skip if we don't have minimum required data
             if gt_pts_labels is None:
@@ -155,6 +130,7 @@ class OccupancyMetric(BaseMetric):
             gt (np.ndarray): Ground truth labels (1D array).
             confusion_matrix (np.ndarray): Confusion matrix to update.
         """
+        # breakpoint()
         # Ensure 1D arrays
         pred = pred.flatten()
         gt = gt.flatten()
@@ -218,21 +194,24 @@ class OccupancyMetric(BaseMetric):
         
         # Compute IoU for each class (exclude ignore_label = 0)
         iou_per_class = []
-        valid_classes = list(range(1, self.num_classes))  # Skip class 0 (ignore/noise)
+        valid_classes = self.class_indices  # 원본과 동일하게 class_indices 사용
         
         for i in valid_classes:
-            # True positives
-            tp = confusion_matrix[i, i]
-            # False positives
-            fp = confusion_matrix[:, i].sum() - tp
-            # False negatives
-            fn = confusion_matrix[i, :].sum() - tp
+            # total_seen = sum(targets == c) = GT에서 클래스 c의 개수
+            total_seen = confusion_matrix[i, :].sum()
+            # total_correct = sum((targets == c) & (outputs == c)) = TP
+            total_correct = confusion_matrix[i, i]
+            # total_positive = sum(outputs == c) = 예측에서 클래스 c의 개수
+            total_positive = confusion_matrix[:, i].sum()
             
-            # IoU (following original MeanIoU calculation)
-            if tp + fp + fn > 0:
-                iou = tp / (tp + fp + fn)
+            # 원본과 동일: seen=0이면 IoU=1 (100%)
+            if total_seen == 0:
+                iou = 1.0
             else:
-                iou = 0.0
+                # IoU = TP / (seen + positive - correct)
+                # 원본 라인 48-50과 동일
+                iou = total_correct / (total_seen + total_positive - total_correct)
+            
             iou_per_class.append(iou * 100)  # Convert to percentage
         
         # Compute mean IoU

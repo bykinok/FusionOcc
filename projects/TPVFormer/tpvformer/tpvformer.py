@@ -53,6 +53,8 @@ class TPVFormer(Base3DSegmentor):
         if img.dtype != torch.float32:
             img = img.float()
         
+        # breakpoint()
+
         B, N, C, H, W = img.size()
         img = img.view(B * N, C, H, W)
         
@@ -389,6 +391,8 @@ class TPVFormer(Base3DSegmentor):
         else:
             img = batch_inputs
         
+        # breakpoint()
+
         img_feats = self.extract_feat(img)
         tpv_queries = self.tpv_head(img_feats, batch_data_samples)
         
@@ -426,7 +430,9 @@ class TPVFormer(Base3DSegmentor):
                         point_coords_float = point_coords_float.unsqueeze(0)
                     
                     # print(f"[DEBUG TPVFormer.predict] point_coords_float shape: {point_coords_float.shape}, min: {point_coords_float.min()}, max: {point_coords_float.max()}")
-                    
+
+            # breakpoint()
+   
             # Forward through aggregator (returns tuple if point_coords, single tensor if not)
             outputs = self.tpv_aggregator(tpv_queries, point_coords_float)
             

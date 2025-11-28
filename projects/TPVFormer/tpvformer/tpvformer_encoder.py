@@ -218,11 +218,12 @@ class TPVFormerEncoder(TransformerLayerSequence):
             ref_2d = ref_2d.repeat(bs, 1, 1).unsqueeze(2)
             return ref_2d
 
-    def point_sampling(self, reference_points, pc_range, batch_data_smaples):
+    def point_sampling(self, reference_points, pc_range, img_metas):
 
+        # breakpoint()
         lidar2img = []
-        for data_sample in batch_data_smaples:
-            lidar2img.append(data_sample.lidar2img)
+        for img_meta in img_metas:
+            lidar2img.append(img_meta['lidar2img'])
         lidar2img = np.asarray(lidar2img)
         lidar2img = reference_points.new_tensor(lidar2img)  # (B, N, 4, 4)
         reference_points = reference_points.clone()
@@ -261,13 +262,9 @@ class TPVFormerEncoder(TransformerLayerSequence):
         reference_points_cam = reference_points_cam[..., 0:2] / torch.maximum(
             reference_points_cam[..., 2:3],
             torch.ones_like(reference_points_cam[..., 2:3]) * eps)
-
-        # 이미지 크기를 하드코딩된 값으로 설정 (원본 설정과 동일)
-        img_height = 900  # 원본 설정의 이미지 높이
-        img_width = 1600  # 원본 설정의 이미지 너비
         
-        reference_points_cam[..., 0] /= img_width
-        reference_points_cam[..., 1] /= img_height
+        reference_points_cam[..., 0] /= img_metas[0]['img_shape'][0][1]
+        reference_points_cam[..., 1] /= img_metas[0]['img_shape'][0][0]
 
         tpv_mask = (
             tpv_mask & (reference_points_cam[..., 1:2] > 0.0)
@@ -308,28 +305,18 @@ class TPVFormerEncoder(TransformerLayerSequence):
             level_start_index (Tensor): Level start indices
             img_metas (list[dict]): Meta information of each image
         """
+        # breakpoint()
+
         output = tpv_query
         intermediate = []
 
         bs = tpv_query[0].shape[0]
         
-        # batch_data_samples 구성 (img_metas에서)
-        batch_data_samples = []
-        if img_metas is not None:
-            for img_meta in img_metas:
-                # img_meta를 data_sample처럼 사용
-                class DataSample:
-                    def __init__(self, meta):
-                        self.metainfo = meta
-                        # point_sampling에서 필요한 lidar2img 직접 제공
-                        self.lidar2img = meta.get('lidar2img', None)
-                batch_data_samples.append(DataSample(img_meta))
-
         reference_points_cams, tpv_masks = [], []
         ref_3ds = [self.ref_3d_hw, self.ref_3d_zh, self.ref_3d_wz]
         for ref_3d in ref_3ds:
             reference_points_cam, tpv_mask = self.point_sampling(
-                ref_3d, self.pc_range, batch_data_samples)
+                ref_3d, self.pc_range, img_metas)
             reference_points_cams.append(reference_points_cam)
             tpv_masks.append(tpv_mask)
 
@@ -337,12 +324,14 @@ class TPVFormerEncoder(TransformerLayerSequence):
         ref_2d_hw = self.ref_2d_hw.clone().expand(bs, -1, -1, -1)
         hybird_ref_2d = torch.cat([ref_2d_hw, ref_2d_hw], 0)
 
-        # TPV layers (원본과 동일)
+        # breakpoint()
+
         for lid, layer in enumerate(self.layers):
             output = layer(
-                output,
+                tpv_query,
                 key,
                 value,
+                *args,  
                 tpv_pos=tpv_pos,
                 ref_2d=hybird_ref_2d,
                 tpv_h=tpv_h,
@@ -353,7 +342,7 @@ class TPVFormerEncoder(TransformerLayerSequence):
                 reference_points_cams=reference_points_cams,
                 tpv_masks=tpv_masks,
                 **kwargs)
-
+            tpv_query = output
             if self.return_intermediate:
                 intermediate.append(output)
 

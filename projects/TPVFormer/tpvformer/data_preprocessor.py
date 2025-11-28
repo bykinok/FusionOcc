@@ -20,37 +20,37 @@ class TPVFormerDataPreprocessor(Det3DDataPreprocessor):
     @torch.no_grad()
     def voxelize(self, points: List[Tensor],
                  data_samples: SampleList) -> List[Tensor]:
-        """Apply voxelization to point cloud. In TPVFormer, it will get voxel-
-        wise segmentation label and voxel/point coordinates.
+        """Apply voxelization to point cloud (원본과 동일한 방식).
         
-        NOTE: This implementation matches the original TPVFormer's voxelization
-        which uses intervals = crop_range / (grid_size - 1), NOT the standard
-        voxel_size = crop_range / grid_size. This is to ensure exact compatibility
-        with the original pretrained weights.
-
-        Args:
-            points (List[Tensor]): Point cloud in one data batch.
-            data_samples: (List[:obj:`Det3DDataSample`]): The annotation data
-                of every samples. Add voxel-wise annotation for segmentation.
-
-        Returns:
-            List[Tensor]: Coordinates of voxels, shape is Nx3,
+        NOTE: 원본 TPVFormer의 dataset_wrapper.py와 동일한 방식으로 voxelize
+        intervals = crop_range / (grid_size - 1) 사용
         """
+        # 원본과 동일한 설정값
+        max_bound = np.asarray([51.2, 51.2, 3.0])   # max_volume_space
+        min_bound = np.asarray([-51.2, -51.2, -5.0])  # min_volume_space
+        grid_size = np.asarray([100, 100, 8])  # grid_size
+        
+        # 원본과 동일한 intervals 계산
+        crop_range = max_bound - min_bound
+        intervals = crop_range / (grid_size - 1)  # 원본과 동일
+        
+        # breakpoint()
+
         for point, data_sample in zip(points, data_samples):
-            min_bound = point.new_tensor(
-                self.voxel_layer.point_cloud_range[:3])
-            max_bound = point.new_tensor(
-                self.voxel_layer.point_cloud_range[3:])
+            # point가 LiDARPoints 객체일 경우 tensor로 추출
+            if hasattr(point, 'tensor'):
+                point_np = point.tensor[:, :3].cpu().numpy()
+            else:
+                point_np = point[:, :3].cpu().numpy()
             
-            # Use voxel_size directly from voxel_layer
-            # When grid_shape is provided to VoxelizationByGridShape, it calculates:
-            # voxel_size = (max - min) / (grid_shape - 1)
-            # This matches the original TPVFormer's interval calculation
-            intervals = point.new_tensor(self.voxel_layer.voxel_size)
+            # 원본과 동일한 voxelize 계산 (numpy 사용)
+            grid_ind_float = (np.clip(point_np, min_bound, max_bound) - min_bound) / intervals
+            grid_ind = np.floor(grid_ind_float).astype(np.int32)
+
             
-            # Original TPVFormer clips to max_bound (not max_bound - 1e-3)
-            point_clamp = torch.clamp(point, min_bound, max_bound)
-            coors = torch.floor((point_clamp - min_bound) / intervals).int()
+            
+            # torch tensor로 변환
+            coors = torch.from_numpy(grid_ind).int().to(point.device if hasattr(point, 'device') else 'cuda')
             
             self.get_voxel_seg(coors, data_sample)
             data_sample.point_coors = coors

@@ -377,6 +377,8 @@ class TPVFormerHead(BaseModule):
         bs = img_feats[0].shape[0]
         dtype = img_feats[0].dtype
         device = img_feats[0].device
+
+        # breakpoint()
         
         # tpv queries and pos embeds (원본과 동일)
         tpv_queries_hw = self.tpv_embedding_hw.weight.to(dtype)
@@ -418,6 +420,7 @@ class TPVFormerHead(BaseModule):
                 else:
                     img_metas.append({})
         
+        # breakpoint()
         # Encoder forward (원본과 동일)
         tpv_embed = self.encoder(
             [tpv_queries_hw, tpv_queries_zh, tpv_queries_wz],

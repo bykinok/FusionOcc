@@ -67,6 +67,9 @@ class TPVAggregator(BaseModule):
             Else:
                 torch.Tensor: logits of shape (B, C, W, H, Z)
         """
+
+        # breakpoint()
+
         tpv_hw, tpv_zh, tpv_wz = tpv_list[0], tpv_list[1], tpv_list[2]
         bs, _, c = tpv_hw.shape
         

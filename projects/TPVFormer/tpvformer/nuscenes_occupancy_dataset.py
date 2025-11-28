@@ -96,6 +96,13 @@ class NuScenesOccupancyDataset(BaseDataset):
                 osp.join(
                     self.data_prefix.get('pts', ''),
                     info['lidar_points']['lidar_path'])
+            
+            # 최상위 레벨에 lidar_path 설정 (Pack3DDetInputs가 metainfo로 저장하기 위해)
+            info['lidar_path'] = info['lidar_points']['lidar_path']
+            
+            # pts_filename도 설정 (일부 transform에서 사용)
+            if 'pts_filename' not in info:
+                info['pts_filename'] = info['lidar_path']
 
         # Process camera images
         for cam_id, img_info in info['images'].items():

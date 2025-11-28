@@ -71,7 +71,7 @@ train_pipeline = [
     dict(
         type='Pack3DDetInputs',
         keys=['img', 'points', 'pts_semantic_mask', 'voxel_semantic_mask', 'voxel_coords'],
-        meta_keys=['lidar2img'])
+        meta_keys=['lidar2img', 'lidar_path', 'sample_idx', 'pts_filename', 'img_shape'])
 ]
 
 val_pipeline = [
@@ -106,7 +106,7 @@ val_pipeline = [
     dict(
         type='Pack3DDetInputs',
         keys=['img', 'points', 'pts_semantic_mask', 'voxel_semantic_mask', 'voxel_coords'],
-        meta_keys=['lidar2img'])
+        meta_keys=['lidar2img', 'lidar_path', 'sample_idx', 'pts_filename', 'img_shape'])
 ]
 
 test_pipeline = val_pipeline
