@@ -65,6 +65,12 @@ class OccupancyMetric(BaseMetric):
                     elif hasattr(gt_pts_seg, 'pts_semantic_mask'):
                         gt_pts_labels = gt_pts_seg.pts_semantic_mask
                         voxel_coords = getattr(gt_pts_seg, 'voxel_coords', None)
+                
+                # ★ data_sample 최상위 레벨에서도 확인 (config의 meta_keys가 top-level로 추가되는 경우)
+                if gt_pts_labels is None and 'pts_semantic_mask' in data_sample:
+                    gt_pts_labels = data_sample.get('pts_semantic_mask')
+                if voxel_coords is None and 'voxel_coords' in data_sample:
+                    voxel_coords = data_sample.get('voxel_coords')
             else:
                 # Object form (Det3DDataSample)
                 if hasattr(data_sample, 'gt_pts_seg'):
@@ -81,6 +87,12 @@ class OccupancyMetric(BaseMetric):
                         voxel_coords = gt_pts_seg.voxel_coords
                     elif isinstance(gt_pts_seg, dict) and 'voxel_coords' in gt_pts_seg:
                         voxel_coords = gt_pts_seg['voxel_coords']
+                
+                # ★ data_sample 최상위 속성에서도 확인 (object form)
+                if gt_pts_labels is None and hasattr(data_sample, 'pts_semantic_mask'):
+                    gt_pts_labels = data_sample.pts_semantic_mask
+                if voxel_coords is None and hasattr(data_sample, 'voxel_coords'):
+                    voxel_coords = data_sample.voxel_coords
             
             # Skip if we don't have minimum required data
             if gt_pts_labels is None:
@@ -165,13 +177,45 @@ class OccupancyMetric(BaseMetric):
             metrics_pts = self._compute_metrics_from_confusion_matrix(
                 self.confusion_matrix_pts, suffix='_pts')
             metrics.update(metrics_pts)
+
+            # Print per-class IoU for points (원본과 동일)
+            print("Validation per class iou pts:", flush=True)
+            class_names = [
+                'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle',
+                'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck',
+                'driveable_surface', 'other_flat', 'sidewalk', 'terrain', 'manmade',
+                'vegetation'
+            ]
+            for class_name in class_names:
+                iou_value = metrics_pts.get(f'{class_name}_pts', 0.0)
+                print(f"{class_name} : {iou_value:.2f}%", flush=True)
         
         # Compute metrics for voxel-wise evaluation
         if vox_sum > 0:
             metrics_vox = self._compute_metrics_from_confusion_matrix(
                 self.confusion_matrix_vox, suffix='_vox')
             metrics.update(metrics_vox)
+
+            # Print per-class IoU for voxels (원본과 동일)
+            print("Validation per class iou vox:", flush=True)
+            class_names = [
+                'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle',
+                'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck',
+                'driveable_surface', 'other_flat', 'sidewalk', 'terrain', 'manmade',
+                'vegetation'
+            ]
+            for class_name in class_names:
+                iou_value = metrics_vox.get(f'{class_name}_vox', 0.0)
+                print(f"{class_name} : {iou_value:.2f}%", flush=True)
+            
+        # Print mIoU summary (원본과 동일)
+        if pts_sum > 0:
+            print(f"Current val miou pts is {metrics.get('mIoU_pts', 0.0):.3f}", flush=True)
+        if vox_sum > 0:
+            print(f"Current val miou vox is {metrics.get('mIoU_vox', 0.0):.3f}", flush=True)
         
+        print("="*80, flush=True)
+
         return metrics
     
     def _compute_metrics_from_confusion_matrix(self, confusion_matrix, suffix=''):

@@ -39,6 +39,8 @@ class MultiViewImageNormalize:
         if 'img' not in results:
             return results
         
+        # breakpoint()
+
         # Normalize each view
         normalized_imgs = []
         for img in results['img']:
@@ -106,6 +108,8 @@ class PhotoMetricDistortionMultiViewImage:
         if 'img' not in results:
             return results
         
+        breakpoint()
+
         imgs = results['img']
         new_imgs = []
         

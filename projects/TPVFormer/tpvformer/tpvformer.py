@@ -8,7 +8,7 @@ from mmdet3d.models import Base3DSegmentor
 from mmdet3d.registry import MODELS
 from mmdet3d.structures.det3d_data_sample import SampleList
 from .lovasz_losses import lovasz_softmax
-
+from .grid_mask import GridMask
 
 @MODELS.register_module()
 class TPVFormer(Base3DSegmentor):
@@ -41,6 +41,10 @@ class TPVFormer(Base3DSegmentor):
         self.lovasz_input = lovasz_input  # 'voxel' or 'points'
         self.ce_input = ce_input  # 'voxel' or 'points'
         self.ce_loss_func = nn.CrossEntropyLoss(ignore_index=ignore_label)
+
+        self.grid_mask = GridMask(
+            True, True, rotate=1, offset=False, ratio=0.5, mode=1, prob=0.7)
+        self.use_grid_mask = use_grid_mask
 
     def extract_feat(self, img):
         """Extract features of images."""
@@ -85,36 +89,9 @@ class TPVFormer(Base3DSegmentor):
         if not self.use_grid_mask:
             return img
             
-        # GridMask 파라미터 (설정에서 조정 가능)
-        grid_size = 64  # Grid 크기
-        prob = 0.5      # 적용 확률
-        
-        # 랜덤하게 GridMask 적용
-        if torch.rand(1).item() < prob:
-            B, C, H, W = img.shape
-            
-            # Grid 패턴 생성
-            mask = torch.ones_like(img)
-            
-            # 랜덤한 시작 위치
-            start_h = torch.randint(0, H - grid_size, (1,)).item()
-            start_w = torch.randint(0, W - grid_size, (1,)).item()
-            
-            # Grid 패턴 적용 (일부 영역을 0으로 마스킹)
-            for i in range(0, grid_size, grid_size // 4):
-                for j in range(0, grid_size, grid_size // 4):
-                    h_start = start_h + i
-                    w_start = start_w + j
-                    h_end = min(h_start + grid_size // 4, H)
-                    w_end = min(w_start + grid_size // 4, W)
-                    
-                    if h_start < H and w_start < W:
-                        mask[:, :, h_start:h_end, w_start:w_end] = 0
-            
-            # 마스크 적용
-            img = img * mask
-            
-        return img
+        # breakpoint()
+
+        return self.grid_mask(img)
 
     def _forward(self, batch_inputs, batch_data_samples):
         """Forward function - not used in mmdet3d, kept for compatibility."""
@@ -143,6 +120,8 @@ class TPVFormer(Base3DSegmentor):
         else:
             img = batch_inputs
         
+        breakpoint()
+
         # Extract features
         img_feats = self.extract_feat(img)
         tpv_queries = self.tpv_head(img_feats, batch_data_samples)
@@ -225,137 +204,64 @@ class TPVFormer(Base3DSegmentor):
             losses = {}
             total_loss = 0.0
             
-            # Debug: print shapes (first iteration only)
-            # if not hasattr(self, '_debug_printed'):
-            #     print(f"[DEBUG LOSS] outputs_vox shape: {outputs_vox.shape if outputs_vox is not None else None}")
-            #     print(f"[DEBUG LOSS] outputs_pts shape: {outputs_pts.shape if outputs_pts is not None else None}")
-            #     print(f"[DEBUG LOSS] voxel_labels: {type(voxel_labels)}, len: {len(voxel_labels) if isinstance(voxel_labels, list) else 'N/A'}")
-            #     print(f"[DEBUG LOSS] point_labels: {type(point_labels)}, len: {len(point_labels) if isinstance(point_labels, list) else 'N/A'}")
-            #     if point_labels is not None and isinstance(point_labels, list) and len(point_labels) > 0:
-            #         print(f"[DEBUG LOSS] point_labels[0] shape: {point_labels[0].shape}")
-            #         print(f"[DEBUG LOSS] point_labels[0] unique: {torch.unique(point_labels[0])}")
-            #     print(f"[DEBUG LOSS] voxel_coords: {type(voxel_coords)}, len: {len(voxel_coords) if isinstance(voxel_coords, list) else 'N/A'}")
-            #     print(f"[DEBUG LOSS] lovasz_input: {self.lovasz_input}, ce_input: {self.ce_input}")
-            #     print(f"[DEBUG LOSS] ignore_label: {self.ignore_label}")
-            #     self._debug_printed = True
+            # Stack voxel_labels to batch tensor (원본과 동일)
+            # voxel_labels: List of (W, H, Z) -> (B, W, H, Z)
+            if voxel_labels is not None and len(voxel_labels) > 0:
+                voxel_label_tensor = torch.stack(voxel_labels, dim=0)  # (B, W, H, Z)
+            else:
+                voxel_label_tensor = None
             
-            # Determine which predictions and labels to use
-            # For voxel-based loss: sample from voxel grid at point locations, use point labels
-            # For point-based loss: use point predictions directly
+            # Stack point_labels to batch tensor (원본과 동일)
+            # point_labels: List of (N_i,) -> stack 필요시
+            if point_labels is not None and len(point_labels) > 0:
+                # point_labels는 각 샘플마다 포인트 수가 다를 수 있으므로 스택 안함
+                point_label_list = point_labels
+            else:
+                point_label_list = None
+            
+            # Determine which predictions and labels to use (원본과 동일)
             if self.lovasz_input == 'voxel':
                 lovasz_input_tensor = outputs_vox
-                lovasz_label_tensor = point_labels  # Use point labels (voxel_labels not available)
+                lovasz_label_tensor = voxel_label_tensor  # Dense voxel labels (B, W, H, Z)
             else:  # 'points'
                 lovasz_input_tensor = outputs_pts
-                lovasz_label_tensor = point_labels
+                # point_labels는 list이므로 그대로 유지
+                lovasz_label_tensor = point_label_list
             
             if self.ce_input == 'voxel':
                 ce_input_tensor = outputs_vox
-                ce_label_tensor = point_labels  # Use point labels (voxel_labels not available)
+                ce_label_tensor = voxel_label_tensor  # Dense voxel labels (B, W, H, Z)
             else:  # 'points'
                 ce_input_tensor = outputs_pts
-                ce_label_tensor = point_labels
+                ce_label_tensor = point_label_list
+
+            breakpoint()
             
-            # Compute Lovasz loss (per-sample averaging for batch_size > 1)
+            # Compute Lovasz loss (원본과 완전히 동일)
             if lovasz_input_tensor is not None and lovasz_label_tensor is not None:
-                if self.lovasz_input == 'voxel' and voxel_coords is not None:
-                    # Voxel-based: sample voxel predictions at point locations
-                    # Compute loss for each sample separately, then average
-                    B, C, W, H, Z = lovasz_input_tensor.shape
-                    
-                    lovasz_losses = []
-                    for b in range(B):
-                        # Get coordinates and labels for this sample
-                        coords = voxel_coords[b].long()  # (N_b, 3)
-                        x_idx = coords[:, 0].clamp(0, W-1)
-                        y_idx = coords[:, 1].clamp(0, H-1)
-                        z_idx = coords[:, 2].clamp(0, Z-1)
-                        
-                        # Extract predictions at point locations: (C, N_b)
-                        sampled_preds = lovasz_input_tensor[b, :, x_idx, y_idx, z_idx]
-                        
-                        # Reshape to 4D for lovasz_softmax: (C, N_b) -> (1, C, N_b, 1)
-                        lovasz_input_4d = sampled_preds.unsqueeze(0).unsqueeze(-1)  # (1, C, N_b, 1)
-                        lovasz_label_2d = lovasz_label_tensor[b].unsqueeze(0)  # (1, N_b)
-                        
-                        # Apply softmax before lovasz_softmax
-                        lovasz_probas_4d = F.softmax(lovasz_input_4d, dim=1)  # (1, C, N_b, 1)
-                        
-                        # Compute loss for this sample
-                        lovasz_loss_b = lovasz_softmax(lovasz_probas_4d, lovasz_label_2d, ignore=self.ignore_label)
-                        lovasz_losses.append(lovasz_loss_b)
-                    
-                    # Average across samples
-                    lovasz_loss = torch.stack(lovasz_losses).mean()
-                    
-                else:
-                    # Point-based: compute loss for each sample separately
-                    lovasz_input_flat = lovasz_input_tensor.squeeze(-1).squeeze(-1)  # (B, C, N)
-                    B, C, N = lovasz_input_flat.shape
-                    
-                    lovasz_losses = []
-                    for b in range(B):
-                        # Get predictions and labels for this sample
-                        # Reshape: (C, N) -> (1, C, N, 1) for lovasz_softmax
-                        lovasz_input_4d = lovasz_input_flat[b].unsqueeze(0).unsqueeze(-1)  # (1, C, N, 1)
-                        lovasz_label_2d = lovasz_label_tensor[b].unsqueeze(0)  # (1, N)
-                        
-                        # Apply softmax before lovasz_softmax
-                        lovasz_probas_4d = F.softmax(lovasz_input_4d, dim=1)  # (1, C, N, 1)
-                        
-                        # Compute loss for this sample
-                        lovasz_loss_b = lovasz_softmax(lovasz_probas_4d, lovasz_label_2d, ignore=self.ignore_label)
-                        lovasz_losses.append(lovasz_loss_b)
-                    
-                    # Average across samples
-                    lovasz_loss = torch.stack(lovasz_losses).mean()
+                # Apply softmax before lovasz_softmax (원본과 동일)
+                lovasz_probas = F.softmax(lovasz_input_tensor, dim=1)
+                
+                # Compute lovasz loss (원본과 동일)
+                # lovasz_input_tensor: (B, C, W, H, Z) for voxel
+                # lovasz_label_tensor: (B, W, H, Z) for voxel
+                lovasz_loss = lovasz_softmax(
+                    lovasz_probas, 
+                    lovasz_label_tensor, 
+                    per_image=False,  # 원본과 동일 (전체 배치를 한번에 처리)
+                    ignore=self.ignore_label
+                )
                 
                 losses['loss_lovasz'] = lovasz_loss
                 total_loss += lovasz_loss
             
-            # Compute CE loss (per-sample averaging for batch_size > 1)
+            # Compute CE loss (원본과 완전히 동일)
             if ce_input_tensor is not None and ce_label_tensor is not None:
-                if self.ce_input == 'voxel' and voxel_coords is not None:
-                    # Voxel-based: sample voxel predictions at point locations
-                    # Compute loss for each sample separately, then average
-                    B, C, W, H, Z = ce_input_tensor.shape
-                    
-                    ce_losses = []
-                    for b in range(B):
-                        # Get coordinates and labels for this sample
-                        coords = voxel_coords[b].long()  # (N_b, 3)
-                        x_idx = coords[:, 0].clamp(0, W-1)
-                        y_idx = coords[:, 1].clamp(0, H-1)
-                        z_idx = coords[:, 2].clamp(0, Z-1)
-                        
-                        # Extract predictions at these locations: (C, N_b) -> (N_b, C)
-                        sampled_preds = ce_input_tensor[b, :, x_idx, y_idx, z_idx].permute(1, 0)  # (N_b, C)
-                        sample_labels = ce_label_tensor[b]  # (N_b,)
-                        
-                        # Compute loss for this sample
-                        ce_loss_b = self.ce_loss_func(sampled_preds, sample_labels)
-                        ce_losses.append(ce_loss_b)
-                    
-                    # Average across samples
-                    ce_loss = torch.stack(ce_losses).mean()
-                    
-                else:
-                    # Point-based: compute loss for each sample separately
-                    ce_input_flat = ce_input_tensor.squeeze(-1).squeeze(-1)  # (B, C, N)
-                    B, C, N = ce_input_flat.shape
-                    
-                    ce_losses = []
-                    for b in range(B):
-                        # Get predictions and labels for this sample
-                        sample_preds = ce_input_flat[b].permute(1, 0)  # (C, N) -> (N, C)
-                        sample_labels = ce_label_tensor[b]  # (N,)
-                        
-                        # Compute loss for this sample
-                        ce_loss_b = self.ce_loss_func(sample_preds, sample_labels)
-                        ce_losses.append(ce_loss_b)
-                    
-                    # Average across samples
-                    ce_loss = torch.stack(ce_losses).mean()
+                # PyTorch CrossEntropyLoss는 multi-dimensional input을 자동으로 처리
+                # Input: (N, C, d1, d2, ..., dk)
+                # Target: (N, d1, d2, ..., dk)
+                # 원본과 동일하게 flatten 없이 직접 전달
+                ce_loss = self.ce_loss_func(ce_input_tensor, ce_label_tensor)
                 
                 losses['loss_ce'] = ce_loss
                 total_loss += ce_loss

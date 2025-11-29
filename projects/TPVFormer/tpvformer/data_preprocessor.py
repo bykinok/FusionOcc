@@ -65,14 +65,26 @@ class TPVFormerDataPreprocessor(Det3DDataPreprocessor):
         """
 
         if self.training:
-            pts_semantic_mask = data_sample.gt_pts_seg.pts_semantic_mask
-            pts_semantic_mask = F.one_hot(pts_semantic_mask.long()).float()
-            voxel_semantic_mask, voxel_coors, point2voxel_map = \
-                dynamic_scatter_3d(pts_semantic_mask, res_coors, 'mean', True)
-            voxel_semantic_mask = torch.argmax(voxel_semantic_mask, dim=-1)
-            data_sample.gt_pts_seg.voxel_semantic_mask = voxel_semantic_mask
-            data_sample.point2voxel_map = point2voxel_map
-            data_sample.voxel_coors = voxel_coors
+            # voxel_semantic_mask는 이미 LoadOccupancyAnnotations에서 dense grid로 생성됨
+            # 여기서는 point2voxel_map과 voxel_coors만 계산
+            if hasattr(data_sample.gt_pts_seg, 'voxel_semantic_mask'):
+                # voxel_semantic_mask가 이미 있으면 그대로 사용
+                # point2voxel_map과 voxel_coors는 평가에 필요
+                pseudo_tensor = res_coors.new_ones([res_coors.shape[0], 1]).float()
+                _, voxel_coors, point2voxel_map = dynamic_scatter_3d(pseudo_tensor,
+                                                           res_coors, 'mean', True)
+                data_sample.point2voxel_map = point2voxel_map
+                data_sample.voxel_coors = voxel_coors
+            else:
+                # Fallback: pts_semantic_mask가 있으면 변환 (backward compatibility)
+                pts_semantic_mask = data_sample.gt_pts_seg.pts_semantic_mask
+                pts_semantic_mask = F.one_hot(pts_semantic_mask.long()).float()
+                voxel_semantic_mask, voxel_coors, point2voxel_map = \
+                    dynamic_scatter_3d(pts_semantic_mask, res_coors, 'mean', True)
+                voxel_semantic_mask = torch.argmax(voxel_semantic_mask, dim=-1)
+                data_sample.gt_pts_seg.voxel_semantic_mask = voxel_semantic_mask
+                data_sample.point2voxel_map = point2voxel_map
+                data_sample.voxel_coors = voxel_coors
         else:
             # In evaluation mode, we still need voxel_coors for point-wise prediction
             # This matches the original TPVFormer eval.py behavior

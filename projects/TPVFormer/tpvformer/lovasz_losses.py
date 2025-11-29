@@ -42,15 +42,7 @@ def lovasz_softmax(probas, labels, classes='present', per_image=False, ignore=No
         loss = mean(lovasz_softmax_flat(*flatten_probas(prob.unsqueeze(0), lab.unsqueeze(0), ignore), classes=classes)
                           for prob, lab in zip(probas, labels))
     else:
-        flattened = flatten_probas(probas, labels, ignore)
-        # Debug: check what we got after flattening
-        # if not hasattr(lovasz_softmax, '_debug_flatten'):
-        #     vprobas, vlabels = flattened
-        #     print(f"[DEBUG LOVASZ FLATTEN] After flatten - vprobas shape: {vprobas.shape}, vlabels shape: {vlabels.shape}")
-        #     print(f"[DEBUG LOVASZ FLATTEN] Unique labels after filter: {torch.unique(vlabels)}")
-        #     print(f"[DEBUG LOVASZ FLATTEN] Number of valid samples: {len(vlabels)}")
-        #     lovasz_softmax._debug_flatten = True
-        loss = lovasz_softmax_flat(*flattened, classes=classes)
+        loss = lovasz_softmax_flat(*flatten_probas(probas, labels, ignore), classes=classes)
     return loss
 
 
@@ -63,17 +55,10 @@ def lovasz_softmax_flat(probas, labels, classes='present'):
     """
     if probas.numel() == 0:
         # only void pixels, the gradients should be 0
-        # print("[DEBUG LOVASZ FLAT] probas.numel() == 0, returning zero")
         return probas * 0.
     C = probas.size(1)
     losses = []
     class_to_sum = list(range(C)) if classes in ['all', 'present'] else classes
-    
-    # if not hasattr(lovasz_softmax_flat, '_debug_classes'):
-    #     print(f"[DEBUG LOVASZ FLAT] classes mode: {classes}, C: {C}")
-    #     print(f"[DEBUG LOVASZ FLAT] Unique labels in probas: {torch.unique(labels)}")
-    #     lovasz_softmax_flat._debug_classes = True
-    
     for c in class_to_sum:
         fg = (labels == c).float()  # foreground for class c
         if (classes == 'present' and fg.sum() == 0):
@@ -89,22 +74,7 @@ def lovasz_softmax_flat(probas, labels, classes='present'):
         perm = perm.data
         fg_sorted = fg[perm]
         losses.append(torch.dot(errors_sorted, Variable(lovasz_grad(fg_sorted))))
-    
-    # if not hasattr(lovasz_softmax_flat, '_debug_losses'):
-    #     print(f"[DEBUG LOVASZ FLAT] Number of class losses: {len(losses)}")
-    #     if len(losses) > 0:
-    #         print(f"[DEBUG LOVASZ FLAT] First few losses: {[l.item() for l in losses[:3]]}")
-    #     lovasz_softmax_flat._debug_losses = True
-    
-    # Ensure we return a tensor
-    if len(losses) == 0:
-        # print("[DEBUG LOVASZ FLAT] len(losses) == 0, returning zero")
-        return probas.sum() * 0.  # Return zero tensor with gradient
-    loss_mean = mean(losses)
-    # Convert to tensor if it's a scalar
-    if not isinstance(loss_mean, torch.Tensor):
-        return torch.tensor(loss_mean, device=probas.device, dtype=probas.dtype)
-    return loss_mean
+    return mean(losses)
 
 
 def flatten_probas(probas, labels, ignore=None):
@@ -137,23 +107,20 @@ def isnan(x):
 def mean(l, ignore_nan=False, empty=0):
     """
     nanmean compatible with generators.
-    Returns a tensor (not a Python scalar).
     """
-    l = list(l)  # Convert to list to handle properly
-    if len(l) == 0:
+    l = iter(l)
+    if ignore_nan:
+        l = ifilterfalse(isnan, l)
+    try:
+        n = 1
+        acc = next(l)
+    except StopIteration:
         if empty == 'raise':
             raise ValueError('Empty mean')
         return empty
-    
-    if ignore_nan:
-        l = [x for x in l if not isnan(x)]
-    
-    if len(l) == 0:
-        return empty
-    
-    # Use torch.stack to ensure we return a tensor
-    if isinstance(l[0], torch.Tensor):
-        return torch.stack(l).mean()
-    else:
-        return sum(l) / len(l)
+    for n, v in enumerate(l, 2):
+        acc += v
+    if n == 1:
+        return acc
+    return acc / n
 

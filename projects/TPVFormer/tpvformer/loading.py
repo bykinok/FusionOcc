@@ -8,6 +8,7 @@ import numpy as np
 import torch.nn as nn
 from mmcv.transforms.base import BaseTransform
 from mmengine.fileio import get
+import numba as nb
 
 from mmdet3d.datasets.transforms import LoadMultiViewImageFromFiles
 from mmdet3d.registry import TRANSFORMS
@@ -81,23 +82,19 @@ class SegLabelMapping(BaseTransform):
         }
     
     def transform(self, results: dict) -> dict:
-        """Transform function to map labels.
+        """Transform function - NO-OP because mapping is done in LoadOccupancyAnnotations.
+        
+        Label mapping is already performed in LoadOccupancyAnnotations.transform() at line 313.
+        This transform is kept for backward compatibility but does nothing.
+        Applying label mapping twice would corrupt the labels!
         
         Args:
             results (dict): Result dict containing 'pts_semantic_mask'.
             
         Returns:
-            dict: Result dict with mapped labels.
+            dict: Result dict unchanged.
         """
-        if 'pts_semantic_mask' in results:
-            # Apply label mapping similar to original TPVFormer
-            pts_semantic_mask = results['pts_semantic_mask']
-            if isinstance(pts_semantic_mask, np.ndarray):
-                # Vectorize the mapping function to map each label
-                # For labels not in the mapping, default to 0 (ignore)
-                mapped_mask = np.vectorize(lambda x: self.learning_map.get(x, 0))(pts_semantic_mask)
-                results['pts_semantic_mask'] = mapped_mask.astype(np.uint8)
-        
+        # Do nothing - label mapping already done in LoadOccupancyAnnotations
         return results
 
 
@@ -231,6 +228,18 @@ class LoadOccupancyAnnotations(BaseTransform):
         self.with_seg_3d = with_seg_3d
         self.with_attr_label = with_attr_label
         self.seg_3d_dtype = seg_3d_dtype
+        
+        # Initialize label mapping (원본과 동일: voxelization 전에 매핑)
+        # NuScenes lidarseg (0-32) → Occupancy (0-17) mapping
+        self.learning_map = self._get_default_nuscenes_mapping()
+    
+    def _get_default_nuscenes_mapping(self):
+        """Get default NuScenes lidarseg to occupancy mapping (원본과 동일)."""
+        return {
+            1: 0, 5: 0, 7: 0, 8: 0, 10: 0, 11: 0, 13: 0, 19: 0, 20: 0, 0: 0, 29: 0, 31: 0,
+            9: 1, 14: 2, 15: 3, 16: 3, 17: 4, 18: 5, 21: 6, 2: 7, 3: 7, 4: 7, 6: 7,
+            12: 8, 22: 9, 23: 10, 24: 11, 25: 12, 26: 13, 27: 14, 28: 15, 30: 16, 32: 17,
+        }
     
     def transform(self, results: dict) -> dict:
         """Transform function to load occupancy annotations.
@@ -241,6 +250,8 @@ class LoadOccupancyAnnotations(BaseTransform):
         Returns:
             dict: Result dict with loaded annotations.
         """
+        # breakpoint()
+
         # print(f"[DEBUG LoadOccupancy] Transform called, with_seg_3d: {self.with_seg_3d}, has points: {'points' in results}")
         if self.with_seg_3d:
             
@@ -290,6 +301,15 @@ class LoadOccupancyAnnotations(BaseTransform):
                 
                 if pts_semantic_mask is not None:
                     # print(f"[DEBUG LoadOccupancy] Points shape: {points.shape}, Labels shape: {pts_semantic_mask.shape}")
+                    
+                    # ★ 원본과 동일: Voxelization 전에 label mapping 수행
+                    # Raw lidarseg labels (0-32) → Occupancy labels (0-17)
+                    # 이렇게 해야 majority voting이 올바르게 작동함
+                    pts_semantic_mask = pts_semantic_mask.reshape(-1)  # Ensure 1D
+                    pts_semantic_mask = np.vectorize(lambda x: self.learning_map.get(x, 0))(pts_semantic_mask)
+                    pts_semantic_mask = pts_semantic_mask.astype(np.uint8)
+
+                    # breakpoint()
                     
                     # Create voxel grid from point cloud (following tpv04 approach)
                     voxel_semantic_mask, voxel_coords = self._points_to_voxel_grid(
@@ -355,49 +375,69 @@ class LoadOccupancyAnnotations(BaseTransform):
                 - voxel_grid: Voxel grid with semantic labels in (W, H, Z) order
                 - voxel_coords: Voxel coordinates for each point in (w, h, z) order (for evaluation)
         """
-        # Use tpv04 compatible parameters
-        # point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0] (x, y, z)
-        min_bound = np.array([-51.2, -51.2, -5.0])  # (x_min, y_min, z_min)
-        max_bound = np.array([51.2, 51.2, 3.0])      # (x_max, y_max, z_max)
-        grid_size = np.array([100, 100, 8])           # (W, H, Z) corresponding to (x, y, z)
-        fill_label = 17  # Empty voxel label (class 17)
+        # 원본과 동일한 파라미터
+        min_bound = np.array([-51.2, -51.2, -5.0])
+        max_bound = np.array([51.2, 51.2, 3.0])
+        grid_size = np.array([100, 100, 8])  # (W, H, Z)
+        fill_label = 17  # Empty voxel label
         
-        # Calculate voxel indices
-        crop_range = max_bound - min_bound  # (x_range, y_range, z_range)
-        intervals = crop_range / (grid_size - 1)  # intervals for (x, y, z)
+        # Calculate voxel indices (원본과 동일)
+        crop_range = max_bound - min_bound
+        intervals = crop_range / (grid_size - 1)
         
-        # Clip points to valid range and convert to grid indices
-        points_clipped = np.clip(points[:, :3], min_bound, max_bound)
-        grid_ind_float = (points_clipped - min_bound) / intervals
-        grid_ind = np.floor(grid_ind_float).astype(np.int32)
+        # Extract xyz coordinates
+        if points.shape[1] > 3:
+            xyz = points[:, :3]
+        else:
+            xyz = points
         
-        # Initialize voxel grid with fill_label
-        voxel_grid = np.ones(grid_size, dtype=np.uint8) * fill_label
+        # Clip and convert to grid indices (원본과 동일)
+        grid_ind_float = (np.clip(xyz, min_bound, max_bound) - min_bound) / intervals
+        grid_ind = np.floor(grid_ind_float).astype(np.int64)  # int64로 변경 (Numba 시그니처와 일치)
         
-        # Fill voxel grid with point labels (majority voting)
+        # Ensure labels is 1D array
         labels = labels.squeeze() if labels.ndim > 1 else labels
         
-        # Debug: Print statistics
-        # print(f"[DEBUG] Points shape: {points.shape}, Labels shape: {labels.shape}")
-        # print(f"[DEBUG] Unique labels: {np.unique(labels)}")
-        # print(f"[DEBUG] Label distribution: {np.bincount(labels.astype(int), minlength=18)}")
+        # Initialize dense voxel grid (원본과 동일)
+        processed_label = np.ones(grid_size, dtype=np.uint8) * fill_label  # (100, 100, 8) dense!
         
-        # Count valid points
-        valid_points = 0
-        for i in range(len(points)):
-            x, y, z = grid_ind[i]
-            if 0 <= x < grid_size[0] and 0 <= y < grid_size[1] and 0 <= z < grid_size[2]:
-                # Use the last encountered label (simple approach)
-                # In practice, you might want to use majority voting
-                voxel_grid[x, y, z] = labels[i]
-                valid_points += 1
+        # Create [x, y, z, label] pairs and sort (원본과 동일)
+        label_voxel_pair = np.concatenate([grid_ind, labels.reshape(-1, 1)], axis=1)
+        label_voxel_pair = label_voxel_pair[np.lexsort((grid_ind[:, 0], grid_ind[:, 1], grid_ind[:, 2])), :]
         
-        # print(f"[DEBUG] Valid points: {valid_points}/{len(points)}")
-        # print(f"[DEBUG] Voxel grid unique labels: {np.unique(voxel_grid)}")
-        # print(f"[DEBUG] Non-empty voxels: {np.sum(voxel_grid != fill_label)}")
+        # Apply majority voting using Numba-optimized function (원본과 동일)
+        processed_label = nb_process_label(np.copy(processed_label), label_voxel_pair)
         
-        return voxel_grid, grid_ind
+        # Return dense voxel grid and sparse coordinates
+        # processed_label: (100, 100, 8) ✅ Dense voxel grid
+        # grid_ind: (N, 3) Sparse coordinates
+        return processed_label, grid_ind
 
+
+@nb.jit('u1[:,:,:](u1[:,:,:],i8[:,:])', nopython=True, cache=True, parallel=False)
+def nb_process_label(processed_label, sorted_label_voxel_pair):
+    """Numba-optimized function for majority voting in voxels (원본과 동일).
+    
+    Args:
+        processed_label: (W, H, Z) dense grid initialized with fill_label
+        sorted_label_voxel_pair: (N, 4) array of [x, y, z, label], sorted by voxel coords
+        
+    Returns:
+        processed_label: (W, H, Z) dense grid with labels filled by majority voting
+    """
+    label_size = 256
+    counter = np.zeros((label_size,), dtype=np.uint16)
+    counter[sorted_label_voxel_pair[0, 3]] = 1
+    cur_sear_ind = sorted_label_voxel_pair[0, :3]
+    for i in range(1, sorted_label_voxel_pair.shape[0]):
+        cur_ind = sorted_label_voxel_pair[i, :3]
+        if not np.all(np.equal(cur_ind, cur_sear_ind)):
+            processed_label[cur_sear_ind[0], cur_sear_ind[1], cur_sear_ind[2]] = np.argmax(counter)
+            counter = np.zeros((label_size,), dtype=np.uint16)
+            cur_sear_ind = cur_ind
+        counter[sorted_label_voxel_pair[i, 3]] += 1
+    processed_label[cur_sear_ind[0], cur_sear_ind[1], cur_sear_ind[2]] = np.argmax(counter)
+    return processed_label
 
 @TRANSFORMS.register_module()
 class PadMultiViewImage(BaseTransform):
