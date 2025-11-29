@@ -14,6 +14,7 @@ class OccupancyMetric(BaseMetric):
     Args:
         use_semantic (bool): Whether to evaluate semantic occupancy. Default: True.
         num_classes (int): Number of classes for semantic evaluation. Default: 17.
+        class_names (list, optional): List of class names. If None, uses generic names.
         collect_device (str): Device name used for collecting results from
             different ranks during distributed training. Must be 'cpu' or
             'gpu'. Defaults to 'cpu'.
@@ -26,11 +27,13 @@ class OccupancyMetric(BaseMetric):
     def __init__(self,
                  use_semantic: bool = True,
                  num_classes: int = 17,
+                 class_names: Optional[List[str]] = None,
                  collect_device: str = 'cpu',
                  prefix: Optional[str] = None):
         super().__init__(collect_device=collect_device, prefix=prefix)
         self.use_semantic = use_semantic
         self.num_classes = num_classes
+        self.class_names = class_names
         
     def process(self, data_batch: dict, data_samples: Sequence[dict]) -> None:
         """Process one batch of data samples and predictions.
@@ -59,29 +62,15 @@ class OccupancyMetric(BaseMetric):
                 if isinstance(eval_result, torch.Tensor):
                     eval_result = eval_result.cpu().numpy()
                 
-                # Convert score (shape: [class_num, 3]) to IoU dict
-                # score[:, 0]: TP, score[:, 1]: GT_pos, score[:, 2]: Pred_pos
+                # Store raw evaluation result [class_num, 3] directly
+                # DO NOT compute IoU here - it will be computed in compute_metrics after summing all samples
+                # This matches the original SurroundOcc evaluation approach
+                # score[:, 0]: TP, score[:, 1]: GT_count, score[:, 2]: Pred_count
                 if isinstance(eval_result, np.ndarray) and eval_result.ndim == 2 and eval_result.shape[1] == 3:
-                    ious = []
-                    for j in range(eval_result.shape[0]):
-                        tp = eval_result[j, 0]
-                        gt_pos = eval_result[j, 1]
-                        pred_pos = eval_result[j, 2]
-                        union = gt_pos + pred_pos - tp
-                        if union > 0:
-                            iou = tp / union
-                        else:
-                            iou = float('nan')
-                        ious.append(iou)
-                    
-                    # Convert to dict format expected by compute_metrics
-                    result_dict = {
-                        'semantic_ious': ious,
-                        'semantic_miou': np.nanmean(ious),
-                    }
-                    self.results.append(result_dict)
+                    # Store raw [tp, gt_count, pred_count] for each class
+                    self.results.append(eval_result)
                 else:
-                    # Already in dict format or unexpected format
+                    # Already in dict format or unexpected format (fallback)
                     self.results.append(eval_result)
             else:
                 # Fallback: compute metrics here
@@ -239,23 +228,33 @@ class OccupancyMetric(BaseMetric):
             
             # Stack results: [num_samples, class_num, 3]
             # where last dimension is [tp, gt_count, pred_count]
+            # Then sum over all samples to get total TP/GT/Pred counts: [class_num, 3]
+            # This matches the original SurroundOcc: np.stack(results, axis=0).mean(0)
+            # But we use sum instead of mean because we need total counts, not averages
             try:
                 results_array = np.stack(results, axis=0)
+                total_results = results_array.sum(axis=0)  # [class_num, 3]
             except Exception as e:
                 print(f"Error stacking results: {e}")
                 print(f"First result type: {type(results[0])}")
                 # Fall back to old computation
                 return self._compute_metrics_fallback(results)
             
-            # Sum over all samples to get total TP/GT/Pred counts: [class_num, 3]
-            total_results = results_array.sum(axis=0)
-            
             # Compute IoU for each class using total counts
             # IoU = total_tp / (total_gt + total_pred - total_tp)
             # This matches the original SurroundOcc evaluation
-            mean_ious = []
-            class_names = {}
             
+            # Build class name mapping: class 0 is 'IoU', rest are actual class names
+            class_name_map = {0: 'IoU'}
+            if self.class_names is not None:
+                for i, name in enumerate(self.class_names):
+                    class_name_map[i + 1] = name
+            else:
+                # Fallback to generic names if no class names provided
+                for i in range(1, self.num_classes):
+                    class_name_map[i] = f'class_{i}'
+            
+            mean_ious = []
             for i in range(self.num_classes):
                 tp = total_results[i, 0]
                 gt_count = total_results[i, 1]
@@ -268,17 +267,11 @@ class OccupancyMetric(BaseMetric):
                     iou = float('nan')
                 
                 mean_ious.append(iou)
-                
-                # Add class name for metrics (class 0 is geometry IoU)
-                if i == 0:
-                    class_names[i] = 'IoU'
-                else:
-                    class_names[i] = f'class_{i}'
             
-            # Store per-class IoU
+            # Store per-class IoU with actual class names
             for i in range(len(mean_ious)):
                 if not np.isnan(mean_ious[i]):
-                    metrics[f'semantic_IoU_{class_names[i]}'] = float(mean_ious[i])
+                    metrics[f'semantic_IoU_{class_name_map[i]}'] = float(mean_ious[i])
             
             # Calculate mIoU (excluding class 0 which is geometry IoU)
             valid_ious = [iou for iou in mean_ious[1:] if not np.isnan(iou)]

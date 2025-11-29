@@ -206,7 +206,8 @@ val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
 val_evaluator = dict(
-    type='OccupancyMetric')
+    type='OccupancyMetric',
+    class_names=class_names)
 
 test_evaluator = val_evaluator
 # load_from = 'ckpts/r101_dcn_fcos3d_pretrain.pth'  # 사전 훈련된 가중치 파일이 없으면 주석 처리

@@ -360,7 +360,8 @@ class SurroundOcc(Base3DDetector):
         
         if self.use_semantic:
             class_num = pred_occ.shape[1]
-            _, pred_occ_class = torch.max(torch.softmax(pred_occ, dim=1), dim=1)
+            pred_softmax = torch.softmax(pred_occ, dim=1)
+            _, pred_occ_class = torch.max(pred_softmax, dim=1)
             
             # Collect GT occupancy from data samples
             # Keep as list because sparse GT has different N for each sample
@@ -437,6 +438,9 @@ class SurroundOcc(Base3DDetector):
 
     def simple_test(self, img_metas, img=None, rescale=False):
         """Test function without augmentation."""
+
+        # breakpoint()
+
         img_feats = self.extract_feat(img, img_metas)
         
         # If no features extracted (img was None), return empty output  

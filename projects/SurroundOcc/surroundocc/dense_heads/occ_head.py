@@ -228,6 +228,9 @@ class OccHead(BaseModule):
         Returns:
             dict: Predictions containing volume embeddings and occupancy predictions.
         """
+
+        # breakpoint()
+
         bs, num_cam, _, _, _ = mlvl_feats[0].shape
         dtype = mlvl_feats[0].dtype
 
@@ -284,16 +287,16 @@ class OccHead(BaseModule):
                 volume_embed_temp = volume_embed_reshape.pop()
                 
                 # Handle shape mismatch by interpolating to match result's shape
-                if result.shape != volume_embed_temp.shape:
-                    import torch.nn.functional as F
-                    # Interpolate volume_embed_temp to match result's spatial dimensions
-                    target_shape = result.shape[2:]  # Get spatial dimensions (H, W, D)
-                    volume_embed_temp = F.interpolate(
-                        volume_embed_temp, 
-                        size=target_shape, 
-                        mode='trilinear', 
-                        align_corners=False
-                    )
+                # if result.shape != volume_embed_temp.shape:
+                #     import torch.nn.functional as F
+                #     # Interpolate volume_embed_temp to match result's spatial dimensions
+                #     target_shape = result.shape[2:]  # Get spatial dimensions (H, W, D)
+                #     volume_embed_temp = F.interpolate(
+                #         volume_embed_temp, 
+                #         size=target_shape, 
+                #         mode='trilinear', 
+                #         align_corners=False
+                #     )
                 
                 result = result + volume_embed_temp
 
