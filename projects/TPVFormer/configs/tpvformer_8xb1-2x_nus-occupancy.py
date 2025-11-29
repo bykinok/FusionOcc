@@ -67,11 +67,11 @@ train_pipeline = [
         to_rgb=False),
     # 원본과 동일하게 32로 나누어떨어지도록 패딩
     dict(type='PadMultiViewImage', size_divisor=32),
-    dict(type='SegLabelMapping'),
+    # dict(type='SegLabelMapping'),
     dict(
         type='Pack3DDetInputs',
-        keys=['img', 'points', 'pts_semantic_mask', 'voxel_semantic_mask', 'voxel_coords'],
-        meta_keys=['lidar2img', 'lidar_path', 'sample_idx', 'pts_filename', 'img_shape'])
+        keys=['img', 'points', 'voxel_semantic_mask'],  # voxel 기반 loss만 사용 (pts_semantic_mask, voxel_coords는 meta로 이동)
+        meta_keys=['lidar2img', 'lidar_path', 'sample_idx', 'pts_filename', 'img_shape', 'voxel_coords', 'pts_semantic_mask'])
 ]
 
 val_pipeline = [
@@ -102,11 +102,11 @@ val_pipeline = [
         to_rgb=False),
     # 원본과 동일하게 32로 나누어떨어지도록 패딩
     dict(type='PadMultiViewImage', size_divisor=32),
-    dict(type='SegLabelMapping'),
+    # dict(type='SegLabelMapping'),
     dict(
         type='Pack3DDetInputs',
-        keys=['img', 'points', 'pts_semantic_mask', 'voxel_semantic_mask', 'voxel_coords'],
-        meta_keys=['lidar2img', 'lidar_path', 'sample_idx', 'pts_filename', 'img_shape'])
+        keys=['img', 'points', 'voxel_semantic_mask'],  # voxel 기반 loss 사용 (pts_semantic_mask 제거)
+        meta_keys=['lidar2img', 'lidar_path', 'sample_idx', 'pts_filename', 'img_shape', 'voxel_coords', 'pts_semantic_mask'])
 ]
 
 test_pipeline = val_pipeline
@@ -199,6 +199,7 @@ find_unused_parameters = False
 # Load pretrained backbone weights (following original TPVFormer)
 # Only load img_backbone weights, ignore other keys
 load_from = './projects/TPVFormer/pretrain/r101_dcn_fcos3d_pretrain.pth'
+# load_from = './projects/TPVFormer/ckpt/tpv04_occupancy_v2.pth'
 resume = False  # Don't resume training, just load backbone weights
 
 point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
