@@ -120,7 +120,7 @@ class TPVFormer(Base3DSegmentor):
         else:
             img = batch_inputs
         
-        breakpoint()
+        # breakpoint()
 
         # Extract features
         img_feats = self.extract_feat(img)
@@ -235,7 +235,7 @@ class TPVFormer(Base3DSegmentor):
                 ce_input_tensor = outputs_pts
                 ce_label_tensor = point_label_list
 
-            breakpoint()
+            # breakpoint()
             
             # Compute Lovasz loss (원본과 완전히 동일)
             if lovasz_input_tensor is not None and lovasz_label_tensor is not None:

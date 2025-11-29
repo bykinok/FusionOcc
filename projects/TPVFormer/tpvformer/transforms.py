@@ -108,7 +108,7 @@ class PhotoMetricDistortionMultiViewImage:
         if 'img' not in results:
             return results
         
-        breakpoint()
+        # breakpoint()
 
         imgs = results['img']
         new_imgs = []
