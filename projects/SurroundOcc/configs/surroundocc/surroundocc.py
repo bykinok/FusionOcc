@@ -132,7 +132,11 @@ train_dataloader = dict(
     batch_size=1,  # 원본과 동일. GPU 메모리 충분하면 2로 증가 가능
     num_workers=4,
     persistent_workers=True,
-    sampler=dict(type='DefaultSampler', shuffle=True),
+    sampler=dict(
+        type='DistributedGroupSampler',  # 원본과 동일한 그룹 기반 샘플링 사용
+        samples_per_gpu=1,
+        seed=0
+    ),
     dataset=dict(
         type=dataset_type,
         data_root=data_root,
@@ -152,7 +156,11 @@ val_dataloader = dict(
     num_workers=4,
     persistent_workers=True,
     drop_last=False,
-    sampler=dict(type='DefaultSampler', shuffle=False),
+    sampler=dict(
+        type='DistributedSampler',  # validation은 DistributedSampler 사용
+        shuffle=False,
+        seed=0
+    ),
     dataset=dict(
         type=dataset_type,
         data_root=data_root,
@@ -210,7 +218,8 @@ val_evaluator = dict(
     class_names=class_names)
 
 test_evaluator = val_evaluator
-# load_from = 'ckpts/r101_dcn_fcos3d_pretrain.pth'  # 사전 훈련된 가중치 파일이 없으면 주석 처리
+load_from = 'projects/SurroundOcc/pretrain/r101_dcn_fcos3d_pretrain.pth'
+#load_from = 'projects/SurroundOcc/ckpt/surroundocc.pth'
 
 # MMEngine style logging configuration
 # Model wrapper configuration for distributed training
@@ -234,3 +243,5 @@ log_config = dict(
     ])
 
 checkpoint_config = dict(interval=1)
+
+randomness = dict(seed=0, deterministic=False)

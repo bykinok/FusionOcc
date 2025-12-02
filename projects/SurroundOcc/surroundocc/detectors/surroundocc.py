@@ -49,23 +49,7 @@ from mmdet.models.backbones import ResNet
 from mmdet.models.necks import FPN
 from mmengine.registry import build_from_cfg
 
-try:
-    from projects.SurroundOcc.surroundocc.modules.grid_mask import GridMask
-except ImportError:
-    # Fallback grid mask implementation
-    class GridMask(nn.Module):
-        def __init__(self, use_h=True, use_w=True, rotate=1, offset=False, ratio=0.5, mode=1, prob=0.7):
-            super(GridMask, self).__init__()
-            self.use_h = use_h
-            self.use_w = use_w
-            self.rotate = rotate
-            self.offset = offset
-            self.ratio = ratio
-            self.mode = mode
-            self.prob = prob
-        
-        def forward(self, x):
-            return x
+from ..modules import GridMask
 
 
 @DET3D_MODELS.register_module()
@@ -201,6 +185,8 @@ class SurroundOcc(Base3DDetector):
         elif isinstance(img, list):
             import torch
             img = torch.stack(img, dim=0)
+
+        # breakpoint()
         
         B = img.size(0)
         if img is not None:
@@ -256,7 +242,9 @@ class SurroundOcc(Base3DDetector):
                 img_metas.append(data_sample.metainfo)
             else:
                 img_metas.append({})
-                
+
+        # breakpoint()
+
         img_feats = self.extract_feat(img, img_metas)
         
         # If no features extracted (img was None), return empty losses
@@ -298,6 +286,7 @@ class SurroundOcc(Base3DDetector):
 
     def forward_pts_train(self, pts_feats, gt_occ, img_metas):
         """Forward training function for occupancy head."""
+        # breakpoint()
         outs = self.pts_bbox_head(pts_feats, img_metas)
         loss_inputs = [gt_occ, outs]
         losses = self.pts_bbox_head.loss(*loss_inputs, img_metas=img_metas)

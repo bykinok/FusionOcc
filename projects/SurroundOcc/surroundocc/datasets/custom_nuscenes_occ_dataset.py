@@ -102,7 +102,20 @@ class CustomNuScenesOccDataset(NuScenesDataset):
         self.pc_range = pc_range
         self.occ_root = occ_root or self.data_root
         
+        # Set group flag for samplers (required by DistributedGroupSampler)
+        if not self.test_mode:
+            self._set_group_flag()
+        
         # CustomNuScenesOccDataset initialized
+    
+    def _set_group_flag(self):
+        """Set flag according to image aspect ratio.
+        
+        Images with aspect ratio greater than 1 will be set as group 1,
+        otherwise group 0. In 3D datasets, they are all the same, thus are all zeros.
+        This is required by DistributedGroupSampler for grouping samples.
+        """
+        self.flag = np.zeros(len(self), dtype=np.uint8)
         
     def _load_data_list_direct(self):
         """Load data list directly from annotation file without parent filtering."""
