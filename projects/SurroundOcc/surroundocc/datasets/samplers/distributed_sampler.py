@@ -30,6 +30,7 @@ class DistributedSampler(_DistributedSampler):
         self.seed = seed if seed is not None else 0
 
     def __iter__(self):
+        # breakpoint()
         # deterministically shuffle based on epoch
         if self.shuffle:
             assert False

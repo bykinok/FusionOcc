@@ -2,10 +2,12 @@ import math
 
 import torch
 from torch.utils.data import DistributedSampler as _DistributedSampler
+from mmengine.registry import DATA_SAMPLERS
 from .sampler import SAMPLER
 
 
 @SAMPLER.register_module()
+@DATA_SAMPLERS.register_module()
 class DistributedSampler(_DistributedSampler):
 
     def __init__(self,
@@ -16,10 +18,12 @@ class DistributedSampler(_DistributedSampler):
                  seed=0):
         super().__init__(
             dataset, num_replicas=num_replicas, rank=rank, shuffle=shuffle)
+        # breakpoint()
         # for the compatibility from PyTorch 1.3+
         self.seed = seed if seed is not None else 0
 
     def __iter__(self):
+        # breakpoint()
         # deterministically shuffle based on epoch
         if self.shuffle:
             assert False

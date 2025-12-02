@@ -173,13 +173,9 @@ class OccHead(nn.Module):
             if self.sample_from_img or self.sample_from_voxel:
                 coarse_occ_mask = coarse_occ.argmax(1) != self.empty_idx
                 
-                if coarse_occ_mask.sum() == 0:
-                    output['fine_output'] = []
-                    output['fine_coord'] = []
-                    output['output_voxels'] = [coarse_occ]
-                    output['output_voxels_fine'] = []
-                    output['output_coords_fine'] = []
-                    return output
+                # 원본과 동일하게 assert 사용 (early return 제거)
+                assert coarse_occ_mask.sum() > 0, 'no foreground in coarse voxel'
+                
                 B, W, H, D = coarse_occ_mask.shape
                 coarse_coord_x, coarse_coord_y, coarse_coord_z = torch.meshgrid(torch.arange(W).to(coarse_occ.device),
                             torch.arange(H).to(coarse_occ.device), torch.arange(D).to(coarse_occ.device), indexing='ij')

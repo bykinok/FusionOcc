@@ -107,19 +107,12 @@ class LoadPointsFromMultiSweeps(object):
                 - points (np.ndarray | :obj:`BasePoints`): Multi-sweep point \
                     cloud arrays.
         """
-        if not hasattr(self, '_debug_printed'):
-            print(f"\n[LoadPointsFromMultiSweeps] Called! sweeps_num={self.sweeps_num}")
-            self._debug_printed = True
-        
+                
         points = results['points']
         points.tensor[:, 4] = 0
         sweep_points_list = [points]
         ts = results['timestamp']
         
-        if not hasattr(self, '_debug_printed2'):
-            print(f"  Initial points: {points.tensor.shape}")
-            print(f"  Available sweeps: {len(results.get('sweeps', []))}")
-            self._debug_printed2 = True
         if self.pad_empty_sweeps and len(results['sweeps']) == 0:
             for i in range(self.sweeps_num):
                 if self.remove_close:
@@ -151,10 +144,6 @@ class LoadPointsFromMultiSweeps(object):
         points = points.cat(sweep_points_list)
         points = points[:, self.use_dim]
         results['points'] = points
-        
-        if not hasattr(self, '_debug_printed3'):
-            print(f"  Final points: {points.tensor.shape}")
-            self._debug_printed3 = True
         
         return results
 

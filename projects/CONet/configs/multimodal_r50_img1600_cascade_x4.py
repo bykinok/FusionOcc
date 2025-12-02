@@ -40,8 +40,8 @@ num_cls = 17  # 0 free, 1-16 obj
 visible_mask = False
 
 cascade_ratio = 4
-sample_from_voxel = True
-sample_from_img = True  # Enable image sampling for multimodal setup
+sample_from_voxel = False #True
+sample_from_img = False #True
 
 dataset_type = 'NuscOCCDataset'
 data_root = 'data/nuscenes/'
@@ -250,7 +250,7 @@ train_dataloader = dict(
     batch_size=1,
     num_workers=2,
     persistent_workers=True,
-    sampler=dict(type='DefaultSampler', shuffle=True),
+    sampler=dict(type='DistributedGroupSampler', shuffle=True),
     dataset=dict(
         type=dataset_type,
         data_root=data_root,
@@ -271,7 +271,7 @@ val_dataloader = dict(
     num_workers=0,
     persistent_workers=False,
     drop_last=False,
-    sampler=dict(type='DefaultSampler', shuffle=False),
+    sampler=dict(type='DistributedSampler', shuffle=False, seed=0),
     dataset=dict(
         type=dataset_type,
         occ_root=occ_path,

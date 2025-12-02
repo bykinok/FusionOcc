@@ -127,6 +127,8 @@ class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
                & (geom_feats[:, 2] >= 0) & (geom_feats[:, 2] < nx[2])
         x = x[kept]
         geom_feats = geom_feats[kept]
+
+        # breakpoint()
         
         # [b, c, z, x, y] == [b, c, x, y, z]
         # Convert nx tensor elements to integers for occ_pool

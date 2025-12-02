@@ -141,34 +141,11 @@ class OccNet(BaseModel):
         import torch
         # Note: record_time is not used in re-implementation, but kept for compatibility
         
-        # Extract components from img tuple/list
-        # Note: DataLoader collation makes img a list where each element is a tuple for batch
-        # For batch_size=1, img[i] is (sample_data,) so we need [0] to extract
-        imgs = img[0][0] if isinstance(img[0], tuple) else img[0]
-        rots = img[1][0] if isinstance(img[1], tuple) else img[1]
-        trans = img[2][0] if isinstance(img[2], tuple) else img[2]
-        intrins = img[3][0] if isinstance(img[3], tuple) else img[3]
-        post_rots = img[4][0] if isinstance(img[4], tuple) else img[4]
-        post_trans = img[5][0] if isinstance(img[5], tuple) else img[5]
-        bda = img[6][0] if isinstance(img[6], tuple) else img[6]
-        
-        # Add batch dimension if missing (for batch_size=1 case)
-        # Expected: rots should be [B, N, 3, 3], but might be [N, 3, 3]
-        if hasattr(rots, 'ndim') and rots.ndim == 3:
-            # Add batch dimension for all transformation matrices
-            rots = rots.unsqueeze(0)  # [N, 3, 3] -> [1, N, 3, 3]
-            trans = trans.unsqueeze(0)  # [N, 3] -> [1, N, 3]
-            intrins = intrins.unsqueeze(0)  # [N, 3, 3] -> [1, N, 3, 3]
-            post_rots = post_rots.unsqueeze(0)  # [N, 3, 3] -> [1, N, 3, 3]
-            post_trans = post_trans.unsqueeze(0)  # [N, 3] -> [1, N, 3]
-            # bda might be [3, 3], should be [B, 3, 3]
-            if bda.ndim == 2:
-                bda = bda.unsqueeze(0)  # [3, 3] -> [1, 3, 3]
-        
-        # Call image_encoder which returns a dict with 'x' and 'img_feats'
-        img_enc_feats = self.image_encoder(imgs)
+        img_enc_feats = self.image_encoder(img[0])
         x = img_enc_feats['x']
         img_feats = img_enc_feats['img_feats']
+
+        rots, trans, intrins, post_rots, post_trans, bda = img[1:7]
         
         mlp_input = self.img_view_transformer.get_mlp_input(rots, trans, intrins, post_rots, post_trans, bda)
         geo_inputs = [rots, trans, intrins, post_rots, post_trans, bda, mlp_input]
@@ -757,6 +734,8 @@ class OccNet(BaseModel):
             pts_feats=pts_feats,
             transform=transform,
         )
+
+        # breakpoint()
 
         pred_c = output['output_voxels'][0]
         

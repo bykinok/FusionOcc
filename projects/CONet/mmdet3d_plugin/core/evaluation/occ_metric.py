@@ -33,7 +33,7 @@ class OccMetric(BaseMetric):
         if class_names is None:
             # Default nuScenes occupancy classes
             self.class_names = [
-                'others', 'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle',
+                'free', 'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle',  # 'others' → 'free'
                 'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck',
                 'driveable_surface', 'other_flat', 'sidewalk',
                 'terrain', 'manmade', 'vegetation'
@@ -97,27 +97,26 @@ class OccMetric(BaseMetric):
         if not isinstance(self.SC_metric, int) or self.SC_metric != 0:
             sc_ious = cm_to_ious(self.SC_metric)
             # sc_ious[0] is empty, sc_ious[1] is non-empty
-            result_dict['SC_Precision'] = sc_ious[1] * 100  # Simplified, use non-empty IoU
-            result_dict['SC_Recall'] = sc_ious[1] * 100
-            result_dict['SC_IoU'] = sc_ious[1] * 100
+            result_dict['SC_non-empty'] = float(sc_ious[1])
+
         
         # SSC metrics (Semantic Scene Completion)
         if not isinstance(self.SSC_metric, int) or self.SSC_metric != 0:
             ssc_ious = cm_to_ious(self.SSC_metric)
             # Calculate mean IoU (excluding empty class at index 0)
             # Use nanmean to handle classes not present in GT (nan values)
-            ssc_mean = np.nanmean(ssc_ious[1:]) * 100
-            result_dict['SSC_mean'] = ssc_mean
+            ssc_mean = sum(ssc_ious[1:]) / len(ssc_ious[1:])
+            result_dict['SSC_mean'] = float(ssc_mean)
             
             # Add per-class IoU
             for i, class_name in enumerate(self.class_names):
                 if i < len(ssc_ious):
-                    result_dict[f'SSC_{class_name}'] = ssc_ious[i] * 100
+                    result_dict[f'SSC_{class_name}'] = float(ssc_ious[i])
         
         # SSC fine metrics (if available)
         if not isinstance(self.SSC_metric_fine, int) or self.SSC_metric_fine != 0:
             ssc_fine_ious = cm_to_ious(self.SSC_metric_fine)
-            ssc_fine_mean = np.nanmean(ssc_fine_ious[1:]) * 100
+            ssc_fine_mean = np.nanmean(ssc_fine_ious[1:])   
             result_dict['SSC_fine_mean'] = ssc_fine_mean
                 
         return result_dict

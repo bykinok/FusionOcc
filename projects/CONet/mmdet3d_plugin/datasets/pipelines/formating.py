@@ -2,7 +2,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import numpy as np
 from mmcv import BaseTransform
-# MMEngine does not use DataContainer in the same way
 
 from mmdet3d.registry import TRANSFORMS as PIPELINES
 from mmdet3d.datasets.transforms.formating import to_tensor
@@ -46,8 +45,32 @@ class OccDefaultFormatBundle3D(BaseTransform):
         if 'gt_vel' in results.keys():
             results['gt_vel'] = to_tensor(results['gt_vel'])
 
-        # Keep img_inputs as is for CONNet model compatibility
-
+        import torch
+        # CRITICAL: Add batch dimension to img_inputs to match original CONet behavior
+        # Original uses DataContainer with stack=True, which adds batch dimension during collate
+        # In mmengine, we add it directly here since mmengine doesn't use DataContainer
+        if 'img_inputs' in results:
+            # Handle both list and tuple (img_inputs can be either)
+            if isinstance(results['img_inputs'], (list, tuple)):
+                # Process and convert to list (tuple is immutable)
+                processed_inputs = []
+                for item in results['img_inputs']:
+                    if isinstance(item, torch.Tensor) and item.dim() > 0:
+                        # Add batch dimension to tensors
+                        processed_inputs.append(item.unsqueeze(0))
+                    elif isinstance(item, torch.Size):
+                        # Convert torch.Size to list of tensors (matching original behavior)
+                        processed_inputs.append([torch.tensor([dim]) for dim in item])
+                    else:
+                        # Keep other items as is
+                        processed_inputs.append(item)
+                
+                # Keep original type (list or tuple)
+                if isinstance(results['img_inputs'], tuple):
+                    results['img_inputs'] = tuple(processed_inputs)
+                else:
+                    results['img_inputs'] = processed_inputs
+                
         return results
 
 

@@ -272,6 +272,8 @@ class ViewTransformerLiftSplatShoot(BaseModule):
         return final
 
     def forward(self, input):
+        # breakpoint()
+
         x, rots, trans, intrins, post_rots, post_trans, bda = input
         B, N, C, H, W = x.shape
         x = x.view(B * N, C, H, W)

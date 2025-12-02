@@ -1,4 +1,4 @@
-from mmcv.utils.registry import Registry, build_from_cfg
+from mmengine.registry import Registry, build_from_cfg
 
 SAMPLER = Registry('sampler')
 
