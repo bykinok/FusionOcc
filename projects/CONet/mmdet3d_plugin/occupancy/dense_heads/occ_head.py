@@ -303,15 +303,19 @@ class OccHead(nn.Module):
             target_voxels = target_voxels.unsqueeze(0)  # Add batch dimension
 
 
-        # resize gt                       
+        # resize gt
         B, C, H, W, D = output_voxels.shape
-        # Resize ground truth to match output grid if shapes mismatch
-        if target_voxels.dim() == 4 and (target_voxels.shape[1] != H or target_voxels.shape[2] != W or target_voxels.shape[3] != D):
-            # target_voxels: [B, H_t, W_t, D_t] -> add channel dim
-            t = target_voxels.unsqueeze(1).float()  # [B,1,H_t,W_t,D_t]
-            t = F.interpolate(t, size=(H, W, D), mode='nearest')
-            target_voxels = t.squeeze(1).long()
-        # else: assume shapes already match
+        ratio = target_voxels.shape[2] // H  # 원본처럼 shape[2] 사용
+        if ratio != 1:
+            target_voxels = target_voxels.reshape(B, H, ratio, W, ratio, D, ratio).permute(0,1,3,5,2,4,6).reshape(B, H, W, D, ratio**3)
+            empty_mask = target_voxels.sum(-1) == self.empty_idx
+            target_voxels = target_voxels.to(torch.int64)
+            occ_space = target_voxels[~empty_mask]
+            occ_space[occ_space==0] = -torch.arange(len(occ_space[occ_space==0])).to(occ_space.device) - 1
+            target_voxels[~empty_mask] = occ_space
+            target_voxels = torch.mode(target_voxels, dim=-1)[0]
+            target_voxels[target_voxels<0] = 255
+            target_voxels = target_voxels.long()
 
         assert torch.isnan(output_voxels).sum().item() == 0
         assert torch.isnan(target_voxels).sum().item() == 0
@@ -319,15 +323,10 @@ class OccHead(nn.Module):
         loss_dict = {}
 
         # igore 255 = ignore noise. we keep the loss bascward for the label=0 (free voxels)
-        ce_loss = CE_ssc_loss(output_voxels, target_voxels, self.class_weights.type_as(output_voxels), ignore_index=255)
-        sem_loss = sem_scal_loss(output_voxels, target_voxels, ignore_index=255)
-        geo_loss = geo_scal_loss(output_voxels, target_voxels, ignore_index=255, non_empty_idx=self.empty_idx)
-        lovasz_loss = lovasz_softmax(torch.softmax(output_voxels, dim=1), target_voxels, ignore=255)
-        
-        loss_dict['loss_voxel_ce_{}'.format(tag)] = self.loss_voxel_ce_weight * ce_loss
-        loss_dict['loss_voxel_sem_scal_{}'.format(tag)] = self.loss_voxel_sem_scal_weight * sem_loss
-        loss_dict['loss_voxel_geo_scal_{}'.format(tag)] = self.loss_voxel_geo_scal_weight * geo_loss
-        loss_dict['loss_voxel_lovasz_{}'.format(tag)] = self.loss_voxel_lovasz_weight * lovasz_loss
+        loss_dict['loss_voxel_ce_{}'.format(tag)] = self.loss_voxel_ce_weight * CE_ssc_loss(output_voxels, target_voxels, self.class_weights.type_as(output_voxels), ignore_index=255)
+        loss_dict['loss_voxel_sem_scal_{}'.format(tag)] = self.loss_voxel_sem_scal_weight * sem_scal_loss(output_voxels, target_voxels, ignore_index=255)
+        loss_dict['loss_voxel_geo_scal_{}'.format(tag)] = self.loss_voxel_geo_scal_weight * geo_scal_loss(output_voxels, target_voxels, ignore_index=255, non_empty_idx=self.empty_idx)
+        loss_dict['loss_voxel_lovasz_{}'.format(tag)] = self.loss_voxel_lovasz_weight * lovasz_softmax(torch.softmax(output_voxels, dim=1), target_voxels, ignore=255)
 
         return loss_dict
 

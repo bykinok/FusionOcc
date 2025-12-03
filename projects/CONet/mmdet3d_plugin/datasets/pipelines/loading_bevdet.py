@@ -154,6 +154,7 @@ class LoadMultiViewImageFromFiles_BEVDet(object):
         return cam_names
 
     def sample_augmentation(self, H , W, flip=None, scale=None):
+        #np.random.seed(0)
         fH, fW = self.data_config['input_size']
         if self.is_train:
             resize = float(fW)/float(W)
@@ -284,6 +285,7 @@ class LoadMultiViewImageFromFiles_BEVDet(object):
         return sweepsensor2lidar
 
     def get_inputs(self, results, flip=None, scale=None):
+        # breakpoint()
         imgs = []
         rots = []
         trans = []
@@ -410,6 +412,7 @@ class LoadAnnotationsBEVDepth():
 
     def sample_bda_augmentation(self):
         """Generate bda augmentation values based on bda_config."""
+        #np.random.seed(0)
         if self.is_train:
             rotate_bda = np.random.uniform(*self.bda_aug_conf['rot_lim'])
             scale_bda = np.random.uniform(*self.bda_aug_conf['scale_lim'])
@@ -423,6 +426,7 @@ class LoadAnnotationsBEVDepth():
         return rotate_bda, scale_bda, flip_dx, flip_dy
 
     def __call__(self, results):
+        # breakpoint()
         rotate_bda, scale_bda, flip_dx, flip_dy = self.sample_bda_augmentation()
         
         bda_mat = torch.zeros(4, 4)
@@ -480,6 +484,8 @@ class PhotoMetricDistortionMultiViewImage(object):
         Returns:
             dict: Result dict with images distorted.
         """
+        # random.seed(0)
+        # breakpoint()
         
         # convert PIL Image to Ndarray float32
         img = np.array(img, dtype=np.float32)

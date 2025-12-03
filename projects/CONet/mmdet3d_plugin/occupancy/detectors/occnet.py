@@ -394,9 +394,14 @@ class OccNet(BaseModel):
         
         losses = {}
         
-        # Skip depth loss for now to focus on occupancy losses
-        # TODO: Implement proper depth loss calculation if needed
-        # Current focus: Get occupancy losses (CE, semantic, geometric, lovasz) working correctly
+        # Calculate depth loss (following original CONet implementation)
+        if not self.disable_loss_depth and depth is not None and img_inputs is not None:
+            # Extract depth ground truth from img_inputs
+            # img_inputs structure: (imgs, rots, trans, intrins, post_rots, post_trans, bda_rot, img_shape, gt_depths, sensor2sensors)
+            # Index -2 is gt_depths
+            if isinstance(img_inputs, (list, tuple)) and len(img_inputs) >= 9:
+                depth_gt = img_inputs[-2]  # or img_inputs[8] for gt_depths
+                losses['loss_depth'] = self.img_view_transformer.get_depth_loss(depth_gt, depth)
         
         # Get predictions from occupancy head using processed voxel_feats
         # Extract transform, handling DataLoader collation (tuple wrapping)
