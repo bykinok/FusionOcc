@@ -248,8 +248,8 @@ test_pipeline = [
 # Data loaders
 train_dataloader = dict(
     batch_size=1,
-    num_workers=0,#2,
-    persistent_workers=False, #True,
+    num_workers=4,
+    persistent_workers=True,
     sampler=dict(type='DistributedGroupSampler', seed=0),
     dataset=dict(
         type=dataset_type,
@@ -268,8 +268,8 @@ train_dataloader = dict(
 
 val_dataloader = dict(
     batch_size=1,
-    num_workers=0,
-    persistent_workers=False,
+    num_workers=4,
+    persistent_workers=True,
     drop_last=False,
     sampler=dict(type='DistributedSampler', shuffle=False, seed=0),
     dataset=dict(
