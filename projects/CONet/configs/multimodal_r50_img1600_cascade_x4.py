@@ -40,8 +40,8 @@ num_cls = 17  # 0 free, 1-16 obj
 visible_mask = False
 
 cascade_ratio = 4
-sample_from_voxel = False #True
-sample_from_img = False #True
+sample_from_voxel = True
+sample_from_img = True
 
 dataset_type = 'NuscOCCDataset'
 data_root = 'data/nuscenes/'
@@ -248,9 +248,9 @@ test_pipeline = [
 # Data loaders
 train_dataloader = dict(
     batch_size=1,
-    num_workers=2,
-    persistent_workers=True,
-    sampler=dict(type='DistributedGroupSampler', shuffle=True),
+    num_workers=0,#2,
+    persistent_workers=False, #True,
+    sampler=dict(type='DistributedGroupSampler', seed=0),
     dataset=dict(
         type=dataset_type,
         data_root=data_root,
@@ -332,3 +332,5 @@ val_evaluator = dict(
     save_best='SSC_mean',
     rule='greater')
 test_evaluator = val_evaluator
+
+#load_from = 'projects/CONet/ckpt/multi-modal-CONet.pth'

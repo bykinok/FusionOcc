@@ -62,6 +62,7 @@ class DistributedGroupSampler(Sampler):
         self.total_size = self.num_samples * self.num_replicas
 
     def __iter__(self):
+        # breakpoint()
         # deterministically shuffle based on epoch
         g = torch.Generator()
         g.manual_seed(self.epoch + self.seed)

@@ -163,6 +163,8 @@ class OccHead(nn.Module):
     def forward(self, voxel_feats, img_feats=None, pts_feats=None, transform=None, **kwargs):
         assert type(voxel_feats) is list and len(voxel_feats) == self.num_level
         
+        # breakpoint()
+
         # forward voxel 
         output = self.forward_coarse_voxel(voxel_feats)
 

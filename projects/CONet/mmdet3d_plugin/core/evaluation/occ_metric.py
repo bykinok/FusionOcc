@@ -116,8 +116,14 @@ class OccMetric(BaseMetric):
         # SSC fine metrics (if available)
         if not isinstance(self.SSC_metric_fine, int) or self.SSC_metric_fine != 0:
             ssc_fine_ious = cm_to_ious(self.SSC_metric_fine)
-            ssc_fine_mean = np.nanmean(ssc_fine_ious[1:])   
-            result_dict['SSC_fine_mean'] = ssc_fine_mean
+            # Calculate mean using sum() to match original behavior (returns nan if any class is nan)
+            ssc_fine_mean = sum(ssc_fine_ious[1:]) / len(ssc_fine_ious[1:])
+            result_dict['SSC_fine_mean'] = float(ssc_fine_mean)
+            
+            # Add per-class fine IoU (same as original)
+            for i, class_name in enumerate(self.class_names):
+                if i < len(ssc_fine_ious):
+                    result_dict[f'SSC_fine_{class_name}'] = float(ssc_fine_ious[i])
                 
         return result_dict
         

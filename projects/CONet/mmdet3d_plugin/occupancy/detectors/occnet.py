@@ -386,6 +386,8 @@ class OccNet(BaseModel):
         This method handles camera-only, LiDAR-only, and multimodal configurations.
         """
         
+        # breakpoint()
+
         # Extract features based on available modalities
         voxel_feats, img_feats, pts_feats, depth = self.extract_feat(
             points=points, img=img_inputs, img_metas=img_metas)
@@ -720,6 +722,8 @@ class OccNet(BaseModel):
     def simple_test(self, img_metas, img=None, points=None, rescale=False, points_occ=None, 
             gt_occ=None, visible_mask=None):
         
+        # breakpoint()
+
         voxel_feats, img_feats, pts_feats, depth = self.extract_feat(points, img=img, img_metas=img_metas)
 
         # Extract transform only if img is not None and has enough elements
@@ -735,7 +739,6 @@ class OccNet(BaseModel):
             transform=transform,
         )
 
-        # breakpoint()
 
         pred_c = output['output_voxels'][0]
         

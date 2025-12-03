@@ -51,8 +51,25 @@ class NuscOCCDataset(NuScenesDataset):
         self.occ_size = occ_size
         self.pc_range = pc_range
         self.occ_root = occ_root
-        # _set_group_flag method is not needed in new mmengine version
         
+        # Set group flag for DistributedGroupSampler compatibility
+        self._set_group_flag()      
+
+    def _set_group_flag(self):
+        """Set flag according to image aspect ratio.
+        
+        Images with aspect ratio greater than 1 will be set as group 1,
+        otherwise group 0. In 3D datasets, they are all the same, thus are all
+        zeros.
+        """
+        import numpy as np
+        # Use len(self.data_list) instead of len(self) to avoid initialization issues
+        if hasattr(self, 'data_list') and self.data_list:
+            self.flag = np.zeros(len(self.data_list), dtype=np.uint8)
+        else:
+            # Fallback: use 0 if data_list is not available
+            self.flag = np.zeros(0, dtype=np.uint8)
+
     def _load_data_list_direct(self):
         """Load data list directly from annotation file without parent filtering."""
         import pickle

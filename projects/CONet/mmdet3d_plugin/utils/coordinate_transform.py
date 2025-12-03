@@ -33,6 +33,17 @@ def project_points_on_img(points, rots, trans, intrins, post_rots, post_trans, b
         H_img = H_img[0]
     
     with torch.no_grad():
+        device = points.device
+        if not isinstance(W_img, torch.Tensor):
+            W_img = torch.tensor(W_img, device=device, dtype=points.dtype)
+        else:
+            W_img = W_img.to(device)
+        
+        if not isinstance(H_img, torch.Tensor):
+            H_img = torch.tensor(H_img, device=device, dtype=points.dtype)
+        else:
+            H_img = H_img.to(device)
+
         voxel_size = ((pts_range[3:] - pts_range[:3]) / torch.tensor([W_occ-1, H_occ-1, D_occ-1])).to(points.device)
         points = points * voxel_size[None, None] + pts_range[:3][None, None].to(points.device)
 
