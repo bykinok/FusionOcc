@@ -193,6 +193,8 @@ class FusionDepthSeg(nn.Module):
         # Handle different input shapes
         if imgs.ndim == 4:  # (N, C, H, W) - no batch dimension
             imgs = imgs.unsqueeze(0)  # (1, N, C, H, W)
+        elif imgs.ndim == 6:  # (1, 1, N, C, H, W) - extra batch dimension from dataloader
+            imgs = imgs.squeeze(0)  # (1, N, C, H, W)
         
         B, N, C, H, W = imgs.shape
         # Split multi-frame: N = N_cameras * num_frame
@@ -204,16 +206,34 @@ class FusionDepthSeg(nn.Module):
         # Ensure other tensors also have batch dimension
         if sensor2egos.ndim == 3:  # (N, 4, 4)
             sensor2egos = sensor2egos.unsqueeze(0)  # (1, N, 4, 4)
+        elif sensor2egos.ndim == 5:  # (1, 1, N, 4, 4) - extra batch dimension
+            sensor2egos = sensor2egos.squeeze(0)
+            
         if ego2globals.ndim == 3:  # (N, 4, 4)
             ego2globals = ego2globals.unsqueeze(0)
+        elif ego2globals.ndim == 5:  # (1, 1, N, 4, 4)
+            ego2globals = ego2globals.squeeze(0)
+            
         if intrins.ndim == 3:  # (N, 3, 3)
             intrins = intrins.unsqueeze(0)
+        elif intrins.ndim == 5:  # (1, 1, N, 3, 3)
+            intrins = intrins.squeeze(0)
+            
         if post_rots.ndim == 3:  # (N, 3, 3)
             post_rots = post_rots.unsqueeze(0)
+        elif post_rots.ndim == 5:  # (1, 1, N, 3, 3)
+            post_rots = post_rots.squeeze(0)
+            
         if post_trans.ndim == 2:  # (N, 3)
             post_trans = post_trans.unsqueeze(0)
-        if bda is not None and bda.ndim == 2:  # (3, 3)
-            bda = bda.unsqueeze(0)
+        elif post_trans.ndim == 4:  # (1, 1, N, 3)
+            post_trans = post_trans.squeeze(0)
+            
+        if bda is not None:
+            if bda.ndim == 2:  # (3, 3)
+                bda = bda.unsqueeze(0)
+            elif bda.ndim == 4:  # (1, 1, 3, 3)
+                bda = bda.squeeze(0)
         
         sensor2egos = sensor2egos.view(B, self.num_frame, N, 4, 4)
         ego2globals = ego2globals.view(B, self.num_frame, N, 4, 4)
@@ -779,6 +799,9 @@ class FusionOCC(FusionDepthSeg):
                     mask_camera = torch.stack(mask_camera, dim=0)
                 elif isinstance(mask_camera[0], np.ndarray):
                     mask_camera = torch.from_numpy(np.stack(mask_camera, axis=0))
+
+        voxel_semantics = voxel_semantics.to(occ_pred.device)
+        mask_camera = mask_camera.to(occ_pred.device)
 
         assert voxel_semantics.min() >= 0 and voxel_semantics.max() <= 17
         loss_occ = self.loss_single(voxel_semantics, mask_camera, occ_pred)

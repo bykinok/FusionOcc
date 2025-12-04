@@ -425,3 +425,6 @@ voxel_size = [0.05, 0.05, 0.05]
 # load_from = "../../ckpt/fusion_occ_mask.pth" 
 
 load_from = "./projects/FusionOcc/pretrain/bevdet-occ-stbase-4d-stereo-512x1408-24e.pth" 
+#load_from = "./projects/FusionOcc/ckpt/fusion_occ_mask.pth" 
+
+#randomness = dict(seed=0, deterministic=False)
