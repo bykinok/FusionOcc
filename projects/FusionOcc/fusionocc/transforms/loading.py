@@ -67,7 +67,7 @@ class PrepareImageSeg(object):
     
     def get_rot(self, h):
         """Get 2D rotation matrix."""
-        return np.array([
+        return torch.Tensor([
             [np.cos(h), np.sin(h)],
             [-np.sin(h), np.cos(h)],
         ])
@@ -75,24 +75,22 @@ class PrepareImageSeg(object):
     def img_transform(self, img, post_rot, post_tran, resize, resize_dims,
                       crop, flip, rotate):
         """Transform image with augmentation."""
-        from PIL import Image
-        
         # Adjust image
         img = self.img_transform_core(img, resize_dims, crop, flip, rotate)
         
-        # Post-homography transformation
+        # Post-homography transformation (CRITICAL: Use torch.Tensor like original!)
         post_rot *= resize
-        post_tran -= np.array(crop[:2])
+        post_tran -= torch.Tensor(crop[:2])  # ← torch.Tensor!
         if flip:
-            A = np.array([[-1, 0], [0, 1]])
-            b = np.array([crop[2] - crop[0], 0])
-            post_rot = A @ post_rot
-            post_tran = A @ post_tran + b
+            A = torch.Tensor([[-1, 0], [0, 1]])  # ← torch.Tensor!
+            b = torch.Tensor([crop[2] - crop[0], 0])  # ← torch.Tensor!
+            post_rot = A.matmul(post_rot)
+            post_tran = A.matmul(post_tran) + b
         A = self.get_rot(rotate / 180 * np.pi)
-        b = np.array([crop[2] - crop[0], crop[3] - crop[1]]) / 2
-        b = A @ (-b) + b
-        post_rot = A @ post_rot
-        post_tran = A @ post_tran + b
+        b = torch.Tensor([crop[2] - crop[0], crop[3] - crop[1]]) / 2  # ← torch.Tensor!
+        b = A.matmul(-b) + b
+        post_rot = A.matmul(post_rot)
+        post_tran = A.matmul(post_tran) + b
         
         return img, post_rot, post_tran
     
@@ -100,22 +98,17 @@ class PrepareImageSeg(object):
         """Core image transformation."""
         from PIL import Image
         
-        # Resize
-        img = img.resize(resize_dims, Image.BILINEAR)
-        # Crop
+        # adjust image
+        img = img.resize(resize_dims)
         img = img.crop(crop)
-        # Flip
         if flip:
-            img = img.transpose(Image.FLIP_LEFT_RIGHT)
-        # Rotate
+            img = img.transpose(method=Image.FLIP_LEFT_RIGHT)
         img = img.rotate(rotate)
         return img
     
     def get_img_seg(self, img_path):
-        """Load image segmentation - NO FALLBACK (same as original)."""
         name = img_path.split("samples")[1].replace(".jpg", ".npy")
         seg_path = self.img_seg_dir + name
-        # Load without try-except - will fail if file doesn't exist (same as original)
         seg = np.load(seg_path)
         seg = np.repeat(seg, self.restore_upsample, axis=1)
         seg = np.repeat(seg, self.restore_upsample, axis=0)
@@ -123,29 +116,24 @@ class PrepareImageSeg(object):
         return seg
     
     def format_seg(self, seg):
-        """Format segmentation for model input."""
         seg = np.array(seg)
         seg = seg[::self.downsample, ::self.downsample]
         seg = torch.from_numpy(seg)
         return seg
     
     def seg_transform_core(self, img, resize_dims, crop, flip, rotate):
-        """Transform segmentation map (same as image but with NEAREST interpolation)."""
+        """Core segmentation transformation."""
         from PIL import Image
         
-        # Resize with NEAREST to preserve labels
+        # adjust image
         img = img.resize(resize_dims, Image.NEAREST)
-        # Crop
         img = img.crop(crop)
-        # Flip
         if flip:
-            img = img.transpose(Image.FLIP_LEFT_RIGHT)
-        # Rotate (expand=0 to maintain size)
+            img = img.transpose(method=Image.FLIP_LEFT_RIGHT)
         img = img.rotate(rotate, expand=0)
         return img
     
     def sample_augmentation(self, H, W, flip=None, scale=None):
-        """Sample augmentation parameters."""
         fH, fW = self.data_config['input_size']
         if self.is_train:
             resize = float(fW) / float(W)
@@ -244,8 +232,8 @@ class PrepareImageSeg(object):
                 raise RuntimeError(f"Failed to open image {img_path}: {e}")
             
             # Sample augmentation
-            post_rot = np.eye(2)
-            post_tran = np.zeros(2)
+            post_rot = torch.eye(2)
+            post_tran = torch.zeros(2)
             
             W, H = img.size  # PIL: (W, H)
             resize, resize_dims, crop, flip_aug, rotate = self.sample_augmentation(
@@ -371,14 +359,14 @@ class PrepareImageSeg(object):
                     ego2global = np.eye(4, dtype=np.float32)
             ego2globals.append(torch.from_numpy(ego2global))
             
-            # Post transformation - expand 2D to 3D
-            post_tran_3d = torch.zeros(3)
-            post_rot_3d = torch.eye(3)
-            post_tran_3d[:2] = torch.from_numpy(post_tran2)
-            post_rot_3d[:2, :2] = torch.from_numpy(post_rot2)
+            # Post transformation - expand 2D to 3D (post_rot2, post_tran2 are already torch.Tensor)
+            post_tran = torch.zeros(3)
+            post_rot = torch.eye(3)
+            post_tran[:2] = post_tran2
+            post_rot[:2, :2] = post_rot2
             
-            post_rots.append(post_rot_3d)
-            post_trans.append(post_tran_3d)
+            post_rots.append(post_rot)
+            post_trans.append(post_tran)
         
         # After camera loop: extend intrins/post_rots/post_trans and add adjacent sensor2egos/ego2globals
         # NOTE: Original uses INTERLEAVED order for imgs but SEPARATED order for transformations!
@@ -455,6 +443,14 @@ class PrepareImageSeg(object):
         intrins = torch.stack(intrins)
         post_rots = torch.stack(post_rots)
         post_trans = torch.stack(post_trans)
+        
+        # Add batch dimension to ALL elements (original expects batch dimension)
+        imgs = imgs.unsqueeze(0)           # [N, C, H, W] -> [1, N, C, H, W]
+        sensor2egos = sensor2egos.unsqueeze(0)  # [N, 4, 4] -> [1, N, 4, 4]
+        ego2globals = ego2globals.unsqueeze(0)  # [N, 4, 4] -> [1, N, 4, 4]
+        intrins = intrins.unsqueeze(0)          # [N, 3, 3] -> [1, N, 3, 3]
+        post_rots = post_rots.unsqueeze(0)      # [N, 3, 3] -> [1, N, 3, 3]
+        post_trans = post_trans.unsqueeze(0)    # [N, 3] -> [1, N, 3]
         
         # Store segs in results for later use
         results['segs'] = segs
@@ -707,11 +703,11 @@ class FuseAdjacentSweeps(object):
         points = points[:, self.use_dim]
         
         # breakpoint()
-        # Sample points to reduce computation (deterministic for testing)
-        # Only keep points with timestamp > 16 (for deterministic comparison)
+
+        #torch.manual_seed(0)
+
         mask = points.tensor[:, 4] > 16
-        # NOTE: Original has random sampling but we disable it for reproducibility
-        mask = mask | (torch.randint(0, 10, size=mask.shape) > 7)  # random sampling
+        mask = mask | (torch.randint(0, 10, size=mask.shape) > 7)   # sample points to reduce computation
         points = points[mask]
         
         results['points'] = points
@@ -728,27 +724,111 @@ class LoadAnnotationsAll(object):
         self.classes = classes
         self.is_train = is_train
     
+    def sample_bda_augmentation(self):
+        """Generate bda augmentation values based on bda_config."""
+        if self.is_train:
+            rotate_bda = np.random.uniform(*self.bda_aug_conf['rot_lim'])
+            scale_bda = np.random.uniform(*self.bda_aug_conf['scale_lim'])
+            flip_dx = np.random.uniform() < self.bda_aug_conf['flip_dx_ratio']
+            flip_dy = np.random.uniform() < self.bda_aug_conf['flip_dy_ratio']
+        else:
+            rotate_bda = 0
+            scale_bda = 1.0
+            flip_dx = False
+            flip_dy = False
+        return rotate_bda, scale_bda, flip_dx, flip_dy
+    
+    def bev_transform(self, gt_boxes, rotate_angle, scale_ratio, flip_dx, flip_dy):
+        """Apply BEV transformation to gt_boxes and return rotation matrix."""
+        rotate_angle = torch.tensor(rotate_angle / 180 * np.pi)
+        rot_sin = torch.sin(rotate_angle)
+        rot_cos = torch.cos(rotate_angle)
+        rot_mat = torch.Tensor([[rot_cos, -rot_sin, 0], [rot_sin, rot_cos, 0],
+                                [0, 0, 1]])
+        scale_mat = torch.Tensor([[scale_ratio, 0, 0], [0, scale_ratio, 0],
+                                  [0, 0, scale_ratio]])
+        flip_mat = torch.Tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
+        if flip_dx:
+            flip_mat = flip_mat @ torch.Tensor([[-1, 0, 0], [0, 1, 0],
+                                                [0, 0, 1]])
+        if flip_dy:
+            flip_mat = flip_mat @ torch.Tensor([[1, 0, 0], [0, -1, 0],
+                                                [0, 0, 1]])
+        rot_mat = flip_mat @ (scale_mat @ rot_mat)
+        if gt_boxes.shape[0] > 0:
+            gt_boxes[:, :3] = (
+                    rot_mat @ gt_boxes[:, :3].unsqueeze(-1)).squeeze(-1)
+            gt_boxes[:, 3:6] *= scale_ratio
+            gt_boxes[:, 6] += rotate_angle
+            if flip_dx:
+                gt_boxes[:,
+                6] = 2 * torch.asin(torch.tensor(1.0)) - gt_boxes[:,
+                                                         6]
+            if flip_dy:
+                gt_boxes[:, 6] = -gt_boxes[:, 6]
+            gt_boxes[:, 7:] = (
+                    rot_mat[:2, :2] @ gt_boxes[:, 7:].unsqueeze(-1)).squeeze(-1)
+        return gt_boxes, rot_mat
+    
     def __call__(self, results):
         """Load annotations with BDA augmentation."""
+        from mmdet3d.structures import LiDARInstance3DBoxes
         
-        # The annotations should already be loaded in ann_info by the dataset
-        # Here we just ensure they're in the correct format
+        # Get gt_boxes and gt_labels from ann_infos
+        if 'ann_infos' in results:
+            gt_boxes, gt_labels = results['ann_infos']
+        elif 'ann_info' in results:
+            gt_boxes = results['ann_info'].get('gt_bboxes_3d', np.zeros((0, 7)))
+            gt_labels = results['ann_info'].get('gt_labels_3d', np.array([]))
+        else:
+            gt_boxes = np.zeros((0, 7))
+            gt_labels = np.array([])
         
-        if 'ann_info' not in results:
-            # Create empty annotations if none exist
-            results['ann_info'] = dict()
-            results['ann_info']['gt_bboxes_3d'] = np.zeros((0, 7))
-            results['ann_info']['gt_labels_3d'] = np.array([])
+        gt_boxes, gt_labels = torch.Tensor(gt_boxes), torch.tensor(gt_labels)
         
-        # Apply BDA (Bird's Eye View Data Augmentation) if needed
-        # For now, skip BDA augmentation to avoid complexity
+        # Sample BDA augmentation
+        rotate_bda, scale_bda, flip_dx, flip_dy = self.sample_bda_augmentation()
         
-        # Ensure gt_bboxes_3d and gt_labels_3d are in results for compatibility
-        # But DO NOT overwrite if they already exist and have data
-        if 'gt_bboxes_3d' not in results:
-            results['gt_bboxes_3d'] = results['ann_info'].get('gt_bboxes_3d', np.zeros((0, 7)))
-        if 'gt_labels_3d' not in results:
-            results['gt_labels_3d'] = results['ann_info'].get('gt_labels_3d', np.array([]))
+        # Create BDA matrix
+        bda_mat = torch.zeros(4, 4)
+        bda_mat[3, 3] = 1
+        
+        # Apply BEV transformation
+        gt_boxes, bda_rot = self.bev_transform(gt_boxes, rotate_bda, scale_bda,
+                                               flip_dx, flip_dy)
+        bda_mat[:3, :3] = bda_rot
+        
+        if len(gt_boxes) == 0:
+            gt_boxes = torch.zeros(0, 9)
+        
+        results['gt_bboxes_3d'] = \
+            LiDARInstance3DBoxes(gt_boxes, box_dim=gt_boxes.shape[-1],
+                                 origin=(0.5, 0.5, 0.5))
+        results['gt_labels_3d'] = gt_labels
+        
+        # Add bda_rot to img_inputs (with batch dimension to match original)
+        if 'img_inputs' in results:
+            imgs, rots, trans, intrins = results['img_inputs'][:4]
+            post_rots, post_trans = results['img_inputs'][4:]
+            # Add batch dimension to bda_rot: [3, 3] -> [1, 3, 3]
+            bda_rot_batch = bda_rot.unsqueeze(0)
+            results['img_inputs'] = (imgs, rots, trans, intrins, post_rots,
+                                     post_trans, bda_rot_batch)
+        
+        # Apply flip augmentation to voxel_semantics if present
+        if 'voxel_semantics' in results:
+            if flip_dx:
+                results['voxel_semantics'] = results['voxel_semantics'][::-1, ...].copy()
+                results['mask_lidar'] = results['mask_lidar'][::-1, ...].copy()
+                results['mask_camera'] = results['mask_camera'][::-1, ...].copy()
+                if "points" in results:
+                    results['points'].tensor[:, 0] = -results['points'].tensor[:, 0]
+            if flip_dy:
+                results['voxel_semantics'] = results['voxel_semantics'][:, ::-1, ...].copy()
+                results['mask_lidar'] = results['mask_lidar'][:, ::-1, ...].copy()
+                results['mask_camera'] = results['mask_camera'][:, ::-1, ...].copy()
+                if "points" in results:
+                    results['points'].tensor[:, 1] = -results['points'].tensor[:, 1]
         
         return results
 

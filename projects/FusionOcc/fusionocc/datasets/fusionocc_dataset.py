@@ -649,20 +649,8 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         input_dict['voxel_semantics'] = None  # Will be loaded by pipeline
         input_dict['mask_camera'] = None  # Will be loaded by pipeline
 
-        try:
-            data = self.pipeline(input_dict)
-            return data
-        except Exception as e:
-            # 디버깅을 위한 에러 로깅
-            import traceback
-            print(f"ERROR in pipeline for index {index}: {e}")
-            print(f"input_dict keys: {input_dict.keys()}")
-            if 'curr' in input_dict:
-                print(f"curr keys: {input_dict['curr'].keys() if isinstance(input_dict['curr'], dict) else 'not dict'}")
-            elif 'images' in input_dict:
-                print(f"images keys: {list(input_dict['images'].keys()) if isinstance(input_dict['images'], dict) else 'not dict'}")
-            traceback.print_exc()
-            return None  # None을 반환하면 BaseDataset이 재시도
+        data = self.pipeline(input_dict)
+        return data
 
     def prepare_test_data(self, index):
         """Testing data preparation."""
@@ -683,11 +671,5 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         if self.modality is None:
             input_dict['modality'] = dict(use_lidar=True, use_camera=True)
 
-        try:
-            data = self.pipeline(input_dict)
-            return data
-        except Exception as e:
-            import traceback
-            print(f"ERROR in test pipeline for index {index}: {e}")
-            traceback.print_exc()
-            raise  # 테스트 모드에서는 예외를 다시 발생시킴
+        data = self.pipeline(input_dict)
+        return data

@@ -74,8 +74,18 @@ class PointToMultiViewDepth(object):
         # Get points (should be in ego coordinate after PointsLidar2Ego)
         points_lidar = results['curr_points']
         
-        # Get camera information from img_inputs
-        imgs, sensor2egos, ego2globals, intrins, post_rots, post_trans = results['img_inputs']
+        # Get camera information from img_inputs (unpack in two lines to handle bda)
+        imgs, sensor2egos, ego2globals, intrins = results['img_inputs'][:4]
+        post_rots, post_trans, bda = results['img_inputs'][4:]
+        
+        # Remove batch dimension (all tensors have batch dim from PrepareImageSeg)
+        imgs = imgs.squeeze(0)              # [1, N, C, H, W] -> [N, C, H, W]
+        sensor2egos = sensor2egos.squeeze(0)  # [1, N, 4, 4] -> [N, 4, 4]
+        ego2globals = ego2globals.squeeze(0)  # [1, N, 4, 4] -> [N, 4, 4]
+        intrins = intrins.squeeze(0)          # [1, N, 3, 3] -> [N, 3, 3]
+        post_rots = post_rots.squeeze(0)      # [1, N, 3, 3] -> [N, 3, 3]
+        post_trans = post_trans.squeeze(0)    # [1, N, 3] -> [N, 3]
+        bda = bda.squeeze(0)                  # [1, 3, 3] -> [3, 3]
         
         # Support both fusionocc and occfrmwrk formats
         if 'curr' in results:

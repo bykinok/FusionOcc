@@ -229,7 +229,7 @@ class CrossModalLSS(LSSViewTransformerBEVDepth):
 
         depth_label, _ = self.get_downsampled_gt_depth(sparse_depth)
         depth_input = depth_label.clone().detach()
-        if self.is_train:
+        if self.training:
             mask = torch.randint(0, 100, size=[depth_input.shape[0]]) > 50
             depth_input[mask] = depth_input[mask] * 0
         depth_input = depth_input.reshape(B * N, H, W, -1).permute(0, 3, 1, 2)
