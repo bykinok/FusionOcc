@@ -145,9 +145,43 @@ def main():
 
     # CRITICAL: mmengine Runner does not auto-load checkpoint in test mode
     # Explicitly load checkpoint if cfg.load_from is set (general solution for all models)
-    if hasattr(cfg, 'load_from') and cfg.load_from:
+    if hasattr(cfg, 'load_from') and cfg.load_from and not cfg.get('resume', False):
         from mmengine.runner import load_checkpoint
         load_checkpoint(runner.model, cfg.load_from, map_location='cpu', strict=False)
+    
+    # Fix optimizer device issue: Register a custom hook to move optimizer state to GPU after resume
+    if cfg.get('resume', False):
+        from mmengine.hooks import Hook
+        from mmengine.registry import HOOKS
+        import torch
+        
+        @HOOKS.register_module()
+        class FixOptimizerDeviceHook(Hook):
+            """Fix optimizer state device after resume.
+            
+            MMEngine loads optimizer state to CPU but doesn't automatically move it to GPU,
+            causing device mismatch errors during training.
+            """
+            
+            def before_train(self, runner):
+                """Move optimizer state to GPU before training starts."""
+                if hasattr(runner, 'optim_wrapper') and hasattr(runner.optim_wrapper, 'optimizer'):
+                    optimizer = runner.optim_wrapper.optimizer
+                    # Check if optimizer state exists and is not empty
+                    if hasattr(optimizer, 'state') and len(optimizer.state) > 0:
+                        device = next(runner.model.parameters()).device
+                        runner.logger.info(f'[FixOptimizerDeviceHook] Moving optimizer state to {device}...')
+                        
+                        # Move all optimizer state tensors to the correct device
+                        for state in optimizer.state.values():
+                            for k, v in state.items():
+                                if isinstance(v, torch.Tensor):
+                                    state[k] = v.to(device)
+                        
+                        runner.logger.info('[FixOptimizerDeviceHook] Optimizer state moved to GPU successfully')
+        
+        # Register the hook with HIGHEST priority to ensure it runs before training
+        runner.register_hook(FixOptimizerDeviceHook(), priority='HIGHEST')
     
     # start training
     runner.train()
