@@ -285,9 +285,24 @@ class SegLabelMapping(BaseTransform):
 class LoadOccupancy(BaseTransform):
     def __init__(self,
                 use_occ3d=False,
-                pc_range=None):
+                pc_range=None,
+                data_root='data/nuscenes',
+                version='v1.0-trainval'):
        self.use_occ3d = use_occ3d
        self.pc_range = pc_range
+       self.data_root = data_root
+       
+       # Initialize NuScenes API and cache scene_token -> scene_name mapping
+       # Needed for gts (FusionOcc) format when scene_name is required
+       from nuscenes.nuscenes import NuScenes
+       print(f'Initializing NuScenes API for scene name mapping (version={version}, dataroot={data_root})...')
+       self.nusc = NuScenes(version=version, dataroot=data_root, verbose=False)
+       # Create scene_token -> scene_name cache for performance
+       self.scene_token_to_name = {
+           scene['token']: scene['name'] 
+           for scene in self.nusc.scene
+       }
+       print(f'Cached {len(self.scene_token_to_name)} scene names.')
        
     def transform(self, results: dict) -> dict:
         
@@ -307,8 +322,20 @@ class LoadOccupancy(BaseTransform):
             points = points[idx]
             results['points'] = points
             
-            occ_3d_folder = results['lidar_points']['lidar_path'].split('samples')[0] + 'Occ3D'
-            occ_3d_path = os.path.join(occ_3d_folder, results['token'], 'labels.npz')
+            # Check if occ_path is provided in results (from pkl file)
+            if 'occ_path' in results:
+                # Use pre-computed path from pkl file
+                occ_3d_path = os.path.join(results['occ_path'], 'labels.npz')
+            elif 'scene_token' in results and self.scene_token_to_name:
+                # Use FusionOcc gts format: data/nuscenes/gts/{scene_name}/{token}/labels.npz
+                scene_name = self.scene_token_to_name[results['scene_token']]
+                base_folder = results['lidar_points']['lidar_path'].split('samples')[0]
+                occ_3d_path = os.path.join(base_folder, 'gts', scene_name, results['token'], 'labels.npz')
+            else:
+                # Fallback to Occ3D format: data/nuscenes/Occ3D/{token}/labels.npz
+                occ_3d_folder = results['lidar_points']['lidar_path'].split('samples')[0] + 'Occ3D'
+                occ_3d_path = os.path.join(occ_3d_folder, results['token'], 'labels.npz')
+                
             occ_3d = np.load(occ_3d_path)
             occ_3d_semantic = occ_3d['semantics']
             occ_3d_cam_mask = occ_3d['mask_camera']

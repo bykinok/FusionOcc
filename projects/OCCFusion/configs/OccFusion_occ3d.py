@@ -129,7 +129,9 @@ train_pipeline = [
         backend_args=backend_args),
     dict(type='LoadOccupancy',
          use_occ3d=use_occ3d,
-         pc_range=point_cloud_range), # used to filter out some lidar points
+         pc_range=point_cloud_range,
+         data_root=data_root,
+         version='v1.0-trainval'), # used to filter out some lidar points
     dict(
         type='LoadAnnotations3D',
         with_bbox_3d=False,
@@ -177,7 +179,9 @@ val_pipeline = [
         backend_args=backend_args),
     dict(type='LoadOccupancy',
          use_occ3d=use_occ3d,
-         pc_range=point_cloud_range), # used to filter out some lidar points
+         pc_range=point_cloud_range,
+         data_root=data_root,
+         version='v1.0-trainval'), # used to filter out some lidar points
     dict(
         type='LoadAnnotations3D',
         with_bbox_3d=False,
