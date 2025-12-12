@@ -1,6 +1,6 @@
 import torch
 
-from projects.CONet.mmdet3d_plugin.ops.occ_pooling import occ_pool_ext
+# from projects.CONet.mmdet3d_plugin.ops.occ_pooling import occ_pool_ext
 
 __all__ = ["occ_pool"]
 
