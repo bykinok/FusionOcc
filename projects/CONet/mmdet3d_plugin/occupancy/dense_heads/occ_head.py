@@ -293,7 +293,8 @@ class OccHead(nn.Module):
         # Handle case where target_voxels might be a list
         if isinstance(target_voxels, list):
             if len(target_voxels) > 0:
-                target_voxels = target_voxels[0]
+                # Stack list of tensors into batch tensor
+                target_voxels = torch.stack(target_voxels, dim=0)
             else:
                 # No target voxels available, skip loss calculation
                 return {}
@@ -304,9 +305,16 @@ class OccHead(nn.Module):
 
 
         # resize gt
+        # output_voxels: [B, C, H, W, D]
+        # target_voxels: [B, H', W', D'] where H'=H*ratio, W'=W*ratio, D'=D*ratio
         B, C, H, W, D = output_voxels.shape
-        ratio = target_voxels.shape[2] // H  # 원본처럼 shape[2] 사용
+        
+        # Calculate downsample ratio (target is higher resolution than output)
+        ratio = target_voxels.shape[1] // H  # H' // H (shape[1] is the H dimension after batch)
+        
         if ratio != 1:
+            # Downsample target_voxels from [B, H*ratio, W*ratio, D*ratio] to [B, H, W, D]
+            # by grouping into ratio^3 sub-voxels and taking mode
             target_voxels = target_voxels.reshape(B, H, ratio, W, ratio, D, ratio).permute(0,1,3,5,2,4,6).reshape(B, H, W, D, ratio**3)
             empty_mask = target_voxels.sum(-1) == self.empty_idx
             target_voxels = target_voxels.to(torch.int64)
@@ -331,11 +339,15 @@ class OccHead(nn.Module):
         return loss_dict
 
     def loss_point(self, fine_coord, fine_output, target_voxels, tag):
+        # fine_coord: [3, N] - coordinates for N fine-grained points
+        # fine_output: [N, C] - predictions for N points with C classes
+        # target_voxels: [1, H', W', D'] - ground truth for single batch item
 
         # Handle case where target_voxels might be a list
         if isinstance(target_voxels, list):
             if len(target_voxels) > 0:
-                target_voxels = target_voxels[0]
+                # Stack list of tensors into batch tensor
+                target_voxels = torch.stack(target_voxels, dim=0)
             else:
                 # No target voxels available, skip loss calculation
                 return {}
@@ -346,13 +358,18 @@ class OccHead(nn.Module):
             # Add batch dimension if missing
             target_voxels = target_voxels.unsqueeze(0)
         
+        # Select ground truth labels at fine_coord positions
+        # target_voxels: [1, H', W', D'], fine_coord: [3, N]
+        # Result: [1, N] -> [N]
         selected_gt = target_voxels[:, fine_coord[0,:], fine_coord[1,:], fine_coord[2,:]].long()[0]
         assert torch.isnan(selected_gt).sum().item() == 0, torch.isnan(selected_gt).sum().item()
         assert torch.isnan(fine_output).sum().item() == 0, torch.isnan(fine_output).sum().item()
 
         loss_dict = {}
 
-        # igore 255 = ignore noise. we keep the loss bascward for the label=0 (free voxels)
+        # fine_output: [N, C], selected_gt: [N]
+        # CE_ssc_loss expects pred: [BS, C, ...], target: [BS, ...]
+        # Here N is treated as batch size with each point as a sample
         loss_dict['loss_voxel_ce_{}'.format(tag)] = self.loss_voxel_ce_weight * CE_ssc_loss(fine_output, selected_gt, ignore_index=255)
         loss_dict['loss_voxel_sem_scal_{}'.format(tag)] = self.loss_voxel_sem_scal_weight * sem_scal_loss(fine_output, selected_gt, ignore_index=255)
         loss_dict['loss_voxel_geo_scal_{}'.format(tag)] = self.loss_voxel_geo_scal_weight * geo_scal_loss(fine_output, selected_gt, ignore_index=255, non_empty_idx=self.empty_idx)
@@ -370,8 +387,18 @@ class OccHead(nn.Module):
         if self.cascade_ratio != 1:
             loss_batch_dict = {}
             if self.sample_from_voxel or self.sample_from_img:
+                # Prepare target_voxels for batch processing
+                if isinstance(target_voxels, list):
+                    target_voxels_batch = torch.stack(target_voxels, dim=0)
+                elif target_voxels.dim() == 3:
+                    target_voxels_batch = target_voxels.unsqueeze(0)
+                else:
+                    target_voxels_batch = target_voxels
+                
                 for index, (fine_coord, fine_output) in enumerate(zip(output_coords_fine, output_voxels_fine)):
-                    this_batch_loss = self.loss_point(fine_coord, fine_output, target_voxels, tag='fine')
+                    # Pass the corresponding batch item's target_voxels
+                    this_batch_target = target_voxels_batch[index:index+1] if target_voxels_batch.shape[0] > index else target_voxels_batch[0:1]
+                    this_batch_loss = self.loss_point(fine_coord, fine_output, this_batch_target, tag='fine')
                     for k, v in this_batch_loss.items():
                         if k not in loss_batch_dict:
                             loss_batch_dict[k] = v

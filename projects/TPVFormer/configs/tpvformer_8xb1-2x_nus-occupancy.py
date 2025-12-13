@@ -112,7 +112,7 @@ val_pipeline = [
 test_pipeline = val_pipeline
 
 train_dataloader = dict(
-    batch_size=1,  # ✅ 원본과 동일하게 batch_size=1 per GPU
+    batch_size=1,
     num_workers=4,
     persistent_workers=True,
     drop_last=True,

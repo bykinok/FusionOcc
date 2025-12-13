@@ -4,6 +4,7 @@ from mmdet3d.datasets import NuScenesDataset
 import os
 from nuscenes.eval.common.utils import quaternion_yaw, Quaternion
 from ..utils.formating import cm_to_ious, format_SC_results, format_SSC_results
+import torch
 
 @DATASETS.register_module(force=True)
 class NuscOCCDataset(NuScenesDataset):
@@ -249,3 +250,101 @@ class NuscOCCDataset(NuScenesDataset):
                 logger.info(res_table)
             
         return eval_results
+
+
+def conet_collate_fn(batch):
+    """Custom collate function for CONet that properly handles batch stacking.
+    
+    CONet's img_inputs is a list/tuple of tensors that need to be stacked properly
+    across the batch dimension. This collate function ensures correct batching for:
+    - img_inputs: list of tensors [imgs, rots, trans, intrins, post_rots, post_trans, ...]
+    - points: list of point clouds (variable length per sample)
+    - gt_occ: list of ground truth occupancy grids
+    - img_metas: list of metadata dicts
+    
+    Args:
+        batch: List of samples from dataset, each sample contains:
+               - 'inputs': dict with 'points', 'img_inputs'
+               - 'data_samples': OccDataSample with metadata and gt_occ
+    
+    Returns:
+        dict: Collated batch data with properly stacked tensors
+    """
+    if not batch:
+        return {}
+    
+    # Extract inputs and data_samples from each sample
+    batch_inputs = [sample['inputs'] for sample in batch]
+    batch_data_samples = [sample['data_samples'] for sample in batch]
+    
+    # Collate img_inputs (list of tensors)
+    # img_inputs structure: [imgs, rots, trans, intrins, post_rots, post_trans, bda_rot, img_shape, gt_depths, sensor2sensors]
+    img_inputs_list = [inp.get('img_inputs') for inp in batch_inputs if inp.get('img_inputs') is not None]
+    
+    if img_inputs_list:
+        # img_inputs is a list/tuple of tensors
+        # Each element in the list needs to be stacked across batch dimension
+        collated_img_inputs = []
+        num_elements = len(img_inputs_list[0])
+        
+        for i in range(num_elements):
+            elements = [img_inp[i] for img_inp in img_inputs_list]
+            
+            # Stack tensors if possible
+            if isinstance(elements[0], torch.Tensor):
+                try:
+                    # Stack along batch dimension
+                    stacked = torch.stack(elements, dim=0)
+                    collated_img_inputs.append(stacked)
+                except:
+                    # If stacking fails (e.g., different shapes), keep as list
+                    collated_img_inputs.append(elements)
+            else:
+                # Non-tensor elements (e.g., torch.Size, list), keep as list
+                collated_img_inputs.append(elements)
+    else:
+        collated_img_inputs = None
+    
+    # Collate points (keep as list since each sample has different number of points)
+    points_list = [inp.get('points') for inp in batch_inputs if inp.get('points') is not None]
+    
+    # Collate gt_occ
+    gt_occ_list = []
+    for data_sample in batch_data_samples:
+        if hasattr(data_sample, 'gt_occ'):
+            gt_occ = data_sample.gt_occ
+            if isinstance(gt_occ, torch.Tensor):
+                gt_occ_list.append(gt_occ)
+            elif isinstance(gt_occ, np.ndarray):
+                gt_occ_list.append(torch.from_numpy(gt_occ))
+    
+    # Stack gt_occ if available
+    if gt_occ_list:
+        try:
+            gt_occ = torch.stack(gt_occ_list, dim=0)
+        except:
+            # If shapes don't match, keep as list
+            gt_occ = gt_occ_list
+    else:
+        gt_occ = None
+    
+    # Collate img_metas (keep as list of dicts)
+    img_metas = []
+    for data_sample in batch_data_samples:
+        if hasattr(data_sample, 'metainfo'):
+            img_metas.append(data_sample.metainfo)
+        else:
+            img_metas.append({})
+    
+    # Return in MMEngine-compatible format
+    # Put everything in inputs to prevent filtering
+    result = {
+        'inputs': {
+            'points': points_list,
+            'img_inputs': collated_img_inputs,
+            'gt_occ': gt_occ,
+        },
+        'data_samples': img_metas,
+    }
+    
+    return result

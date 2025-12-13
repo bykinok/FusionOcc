@@ -247,32 +247,47 @@ class SurroundOcc(Base3DDetector):
 
         img_feats = self.extract_feat(img, img_metas)
         
-        # If no features extracted (img was None), return empty losses
-        if img_feats is None:
-            import torch
-            return dict(loss_occ=torch.tensor(0.0, requires_grad=True))
-        
         losses = dict()
         
         # Extract ground truth occupancy
-        gt_occ = []
+        # Keep as sparse format [N, 4] because multiscale_supervision expects it
+        gt_occ_list = []
         for data_sample in batch_data_samples:
             if hasattr(data_sample, 'gt_occ'):
-                gt_occ.append(data_sample.gt_occ)
-            else:
-                # Fallback to extract from metainfo
-                if hasattr(data_sample, 'metainfo'):
-                    gt_occ.append(data_sample.metainfo.get('gt_occ', None))
+                gt_occ = data_sample.gt_occ
+                if isinstance(gt_occ, torch.Tensor):
+                    gt_occ_list.append(gt_occ)
+                elif isinstance(gt_occ, np.ndarray):
+                    gt_occ_list.append(torch.from_numpy(gt_occ))
                 else:
-                    gt_occ.append(None)
+                    # No valid GT, use empty placeholder
+                    gt_occ_list.append(torch.zeros((0, 4), dtype=torch.float32))
+            else:
+                # No GT found, use empty placeholder
+                gt_occ_list.append(torch.zeros((0, 4), dtype=torch.float32))
         
-        if any(gt is None for gt in gt_occ):
-            return dict(loss_occ=torch.tensor(0.0, requires_grad=True))
+        # Convert list to tensor batch: pad to max length and stack
+        # This is necessary because each sample has different number of occupied voxels (N)
+        # Find max N
+        max_n = max([gt.shape[0] for gt in gt_occ_list])
+        gt_occ_padded = []
+        for gt in gt_occ_list:
+            if gt.shape[0] < max_n:
+                # Pad with zeros (same device and dtype as gt)
+                padding = torch.zeros((max_n - gt.shape[0], 4), dtype=gt.dtype, device=gt.device)
+                padding[:, 3] = 255  # Set class to 255 (ignore)
+                gt_padded = torch.cat([gt, padding], dim=0)
+            else:
+                gt_padded = gt
+            gt_occ_padded.append(gt_padded)
         
-        import torch
+        # Stack into batch tensor [B, N, 4] and move to device
         try:
-            gt_occ = torch.stack(gt_occ) if not isinstance(gt_occ[0], torch.Tensor) else torch.stack(gt_occ)
+            gt_occ = torch.stack(gt_occ_padded, dim=0).to(img_feats[0].device)
         except Exception as e:
+            print(f"[SurroundOcc] Error stacking gt_occ: {e}")
+            print(f"[SurroundOcc] GT shapes: {[gt.shape for gt in gt_occ_padded]}")
+            print(f"[SurroundOcc] Batch size: {len(batch_data_samples)}")
             return dict(loss_occ=torch.tensor(0.0, requires_grad=True))
         
         if hasattr(self, 'pts_bbox_head') and self.pts_bbox_head is not None:
@@ -427,8 +442,6 @@ class SurroundOcc(Base3DDetector):
 
     def simple_test(self, img_metas, img=None, rescale=False):
         """Test function without augmentation."""
-
-        # breakpoint()
 
         img_feats = self.extract_feat(img, img_metas)
         

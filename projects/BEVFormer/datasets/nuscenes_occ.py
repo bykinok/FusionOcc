@@ -431,4 +431,82 @@ class NuSceneOcc(NuScenesDataset):
         print('\nFinished.')
 
 
+def bevformer_collate_fn(batch):
+    """Optimized collate function for BEVFormer that unwraps DataContainer and converts to tensors.
+    
+    This function performs all DataContainer unwrapping and tensor conversion at collate time
+    to avoid repeated processing in forward_train, significantly improving training speed.
+    
+    Args:
+        batch: List of samples from dataset, each sample is a dict with keys like:
+               'img', 'voxel_semantics', 'mask_camera', 'img_metas', etc.
+        
+    Returns:
+        dict: Collated batch data with unwrapped tensors ready for training
+    """
+    if not batch:
+        return {}
+    
+    import numpy as np
+    import torch
+    
+    keys = batch[0].keys()
+    collated = {}
+    
+    for key in keys:
+        samples = [sample[key] for sample in batch]
+        
+        # Handle different data types
+        if key in ['img', 'voxel_semantics', 'mask_camera']:
+            # These need DataContainer unwrapping and tensor conversion
+            tensors = []
+            for sample in samples:
+                # Unwrap DataContainer
+                if hasattr(sample, 'data'):
+                    data = sample.data
+                else:
+                    data = sample
+                
+                # Convert to torch.Tensor if needed
+                if isinstance(data, np.ndarray):
+                    data = torch.from_numpy(data)
+                elif not isinstance(data, torch.Tensor):
+                    # Handle memoryview or other types
+                    data = torch.from_numpy(np.asarray(data))
+                
+                tensors.append(data)
+            
+            # Stack tensors into batch
+            if key == 'img':
+                # img: [queue_length, N_cams, C, H, W] -> [B, queue_length, N_cams, C, H, W]
+                collated[key] = torch.stack(tensors, dim=0)
+            else:
+                # voxel_semantics, mask_camera: [H, W, D] -> [B, H, W, D]
+                try:
+                    collated[key] = torch.stack(tensors, dim=0)
+                except RuntimeError:
+                    # If shapes don't match, keep as list (shouldn't happen normally)
+                    collated[key] = tensors
+        
+        elif key == 'img_metas':
+            # Unwrap img_metas from DataContainer but keep as list
+            unwrapped = []
+            for sample in samples:
+                if hasattr(sample, 'data'):
+                    unwrapped.append(sample.data)
+                else:
+                    unwrapped.append(sample)
+            collated[key] = unwrapped
+        
+        else:
+            # Other keys - use default collate behavior
+            if isinstance(samples[0], torch.Tensor):
+                try:
+                    collated[key] = torch.stack(samples, dim=0)
+                except:
+                    collated[key] = samples
+            else:
+                collated[key] = samples
+    
+    return collated
 

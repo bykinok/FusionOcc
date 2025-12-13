@@ -290,13 +290,29 @@ class BEVFormerOccHead(BaseModule):
         loss_dict=dict()
         occ=preds_dicts['occ']
         
-        # Convert voxel_semantics to tensor if it's a list
+        # voxel_semantics and mask_camera should already be batch tensors from forward_train
+        # No need to unwrap from list - they are already proper batch tensors
+        # Just ensure they are tensors, not lists
         if isinstance(voxel_semantics, list):
-            voxel_semantics = voxel_semantics[0]
-        if isinstance(mask_camera, list):
-            mask_camera = mask_camera[0]
+            # This shouldn't happen with proper collate_fn, but handle it
+            if len(voxel_semantics) == 1:
+                voxel_semantics = voxel_semantics[0]
+            else:
+                # Multiple items - they should already be stacked in forward_train
+                raise ValueError(f"voxel_semantics should be a tensor, got list of {len(voxel_semantics)} items")
         
-        assert voxel_semantics.min()>=0 and voxel_semantics.max()<=17
+        if isinstance(mask_camera, list):
+            # This shouldn't happen with proper collate_fn, but handle it
+            if len(mask_camera) == 1:
+                mask_camera = mask_camera[0]
+            else:
+                # Multiple items - they should already be stacked in forward_train
+                raise ValueError(f"mask_camera should be a tensor, got list of {len(mask_camera)} items")
+        
+        # Validate shape and range
+        assert voxel_semantics.min()>=0 and voxel_semantics.max()<=17, \
+            f"voxel_semantics range error: min={voxel_semantics.min()}, max={voxel_semantics.max()}"
+        
         losses = self.loss_single(voxel_semantics,mask_camera,occ)
         loss_dict['loss_occ']=losses
         return loss_dict
