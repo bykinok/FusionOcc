@@ -4,6 +4,36 @@ import numpy as np
 from torch import nn
 import torch.nn.functional as F
 from mmcv.cnn.bricks.conv_module import ConvModule
+import subprocess
+import sys
+
+# Check and uninstall spconv-cu113 if installed
+def check_and_uninstall_spconv_cu113():
+    """Check if spconv-cu113 is installed and uninstall it if found."""
+    try:
+        result = subprocess.run(
+            [sys.executable, '-m', 'pip', 'show', 'spconv-cu113'],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        if result.returncode == 0:
+            print("spconv-cu113이 설치되어 있습니다. 제거 중...")
+            uninstall_result = subprocess.run(
+                [sys.executable, '-m', 'pip', 'uninstall', 'spconv-cu113', '-y'],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if uninstall_result.returncode == 0:
+                print("spconv-cu113이 성공적으로 제거되었습니다.")
+            else:
+                print(f"spconv-cu113 제거 중 오류 발생: {uninstall_result.stderr}")
+    except Exception as e:
+        print(f"spconv-cu113 확인 중 오류 발생: {e}")
+
+# Execute check on module import
+check_and_uninstall_spconv_cu113()
 try:
     from mmcv.runner import auto_fp16, force_fp32
 except ImportError:
@@ -193,8 +223,8 @@ class FusionDepthSeg(nn.Module):
         # Handle different input shapes
         if imgs.ndim == 4:  # (N, C, H, W) - no batch dimension
             imgs = imgs.unsqueeze(0)  # (1, N, C, H, W)
-        elif imgs.ndim == 6:  # (1, 1, N, C, H, W) - extra batch dimension from dataloader
-            imgs = imgs.squeeze(0)  # (1, N, C, H, W)
+        elif imgs.ndim == 6:  # (B, 1, N, C, H, W) - extra dimension from batch stacking
+            imgs = imgs.squeeze(1)  # (B, N, C, H, W)
         
         B, N, C, H, W = imgs.shape
         # Split multi-frame: N = N_cameras * num_frame
@@ -206,34 +236,34 @@ class FusionDepthSeg(nn.Module):
         # Ensure other tensors also have batch dimension
         if sensor2egos.ndim == 3:  # (N, 4, 4)
             sensor2egos = sensor2egos.unsqueeze(0)  # (1, N, 4, 4)
-        elif sensor2egos.ndim == 5:  # (1, 1, N, 4, 4) - extra batch dimension
-            sensor2egos = sensor2egos.squeeze(0)
+        elif sensor2egos.ndim == 5:  # (B, 1, N, 4, 4) - extra dimension from batch stacking
+            sensor2egos = sensor2egos.squeeze(1)  # (B, N, 4, 4)
             
         if ego2globals.ndim == 3:  # (N, 4, 4)
             ego2globals = ego2globals.unsqueeze(0)
-        elif ego2globals.ndim == 5:  # (1, 1, N, 4, 4)
-            ego2globals = ego2globals.squeeze(0)
+        elif ego2globals.ndim == 5:  # (B, 1, N, 4, 4)
+            ego2globals = ego2globals.squeeze(1)  # (B, N, 4, 4)
             
         if intrins.ndim == 3:  # (N, 3, 3)
             intrins = intrins.unsqueeze(0)
-        elif intrins.ndim == 5:  # (1, 1, N, 3, 3)
-            intrins = intrins.squeeze(0)
+        elif intrins.ndim == 5:  # (B, 1, N, 3, 3)
+            intrins = intrins.squeeze(1)  # (B, N, 3, 3)
             
         if post_rots.ndim == 3:  # (N, 3, 3)
             post_rots = post_rots.unsqueeze(0)
-        elif post_rots.ndim == 5:  # (1, 1, N, 3, 3)
-            post_rots = post_rots.squeeze(0)
+        elif post_rots.ndim == 5:  # (B, 1, N, 3, 3)
+            post_rots = post_rots.squeeze(1)  # (B, N, 3, 3)
             
         if post_trans.ndim == 2:  # (N, 3)
             post_trans = post_trans.unsqueeze(0)
-        elif post_trans.ndim == 4:  # (1, 1, N, 3)
-            post_trans = post_trans.squeeze(0)
+        elif post_trans.ndim == 4:  # (B, 1, N, 3)
+            post_trans = post_trans.squeeze(1)  # (B, N, 3)
             
         if bda is not None:
             if bda.ndim == 2:  # (3, 3)
-                bda = bda.unsqueeze(0)
-            elif bda.ndim == 4:  # (1, 1, 3, 3)
-                bda = bda.squeeze(0)
+                bda = bda.unsqueeze(0)  # (1, 3, 3)
+            elif bda.ndim == 4:  # (B, 1, 3, 3) - extra dimension from batch stacking
+                bda = bda.squeeze(1)  # (B, 3, 3)
         
         sensor2egos = sensor2egos.view(B, self.num_frame, N, 4, 4)
         ego2globals = ego2globals.view(B, self.num_frame, N, 4, 4)
