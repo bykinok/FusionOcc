@@ -151,3 +151,4 @@ Ref/
 # debug
 debug_outputs
 work_dirs
+pre_ckpt
