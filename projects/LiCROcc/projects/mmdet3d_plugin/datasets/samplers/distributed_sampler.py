@@ -2,10 +2,10 @@ import math
 
 import torch
 from torch.utils.data import DistributedSampler as _DistributedSampler
-from .sampler import SAMPLER
+from mmdet3d.registry import DATA_SAMPLERS
 
 
-@SAMPLER.register_module()
+@DATA_SAMPLERS.register_module()
 class DistributedSampler(_DistributedSampler):
 
     def __init__(self,

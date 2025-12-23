@@ -6,10 +6,74 @@ import random
 from functools import partial
 
 import numpy as np
+import torch
 try:
     from mmcv.parallel import collate
 except ImportError:
-    from mmengine.dataset import pseudo_collate as collate
+    # MMEngine 2.x: pseudo_collate has different behavior
+    # We need a custom collate function to maintain list[dict] format
+    def collate(batch):
+        """
+        Custom collate function to maintain MMDetection 0.x format.
+        Returns list[dict] instead of dict[list].
+        """
+
+        if not isinstance(batch, list):
+            raise TypeError(f'batch must be a list, but got {type(batch)}')
+        
+        # For each sample in batch, convert to the expected format
+        # batch is a list of dicts from __getitem__
+        img_metas_list = []
+        points_list = []
+        radar_pc_list = []
+        target_list = []
+        img_inputs_dict = {
+            'imgs': [],
+            'intrins': [],
+            'sensor2egos': [],
+            'post_rots': [],
+            'post_trans': [],
+            'flip_type': [],
+            'gt_depth': []
+        }
+        
+        for sample in batch:
+            # img_metas should be a list of dicts
+            img_metas_list.append(sample['img_metas'])
+            points_list.append(sample['points'])
+            radar_pc_list.append(sample['radar_pc'])
+            # Convert target to tensor if it's numpy array
+            if isinstance(sample['target'], np.ndarray):
+                target_list.append(torch.from_numpy(sample['target']))
+            else:
+                target_list.append(sample['target'])
+            
+            # Stack img_inputs
+            for key in img_inputs_dict.keys():
+                if key in sample['img_inputs']:
+                    img_inputs_dict[key].append(sample['img_inputs'][key])
+        
+        # Stack tensors in img_inputs
+        for key in img_inputs_dict.keys():
+            if len(img_inputs_dict[key]) > 0:
+                if isinstance(img_inputs_dict[key][0], torch.Tensor):
+                    img_inputs_dict[key] = torch.stack(img_inputs_dict[key], dim=0)
+                elif isinstance(img_inputs_dict[key][0], (list, tuple)):
+                    img_inputs_dict[key] = img_inputs_dict[key]
+        
+        # Stack target if they are tensors
+        if len(target_list) > 0 and isinstance(target_list[0], torch.Tensor):
+            target_stacked = torch.stack(target_list, dim=0)
+        else:
+            target_stacked = target_list
+        
+        return dict(
+            img_metas=img_metas_list,
+            points=points_list,
+            radar_pc=radar_pc_list,
+            target=target_stacked,
+            img_inputs=img_inputs_dict
+        )
 
 try:
     from mmcv.runner import get_dist_info
@@ -26,7 +90,11 @@ except ImportError:
     from mmengine.registry import Registry, build_from_cfg
 from torch.utils.data import DataLoader
 
-from mmdet.datasets.samplers import GroupSampler
+try:
+    from mmdet.datasets.samplers import GroupSampler
+except ImportError:
+    # MMEngine 2.x: GroupSampler is removed
+    GroupSampler = None
 from .samplers.group_sampler import DistributedGroupSampler
 from .samplers.distributed_sampler import DistributedSampler
 from .samplers.sampler import build_sampler
@@ -114,48 +182,3 @@ def worker_init_fn(worker_id, num_workers, rank, seed):
     worker_seed = num_workers * rank + worker_id + seed
     np.random.seed(worker_seed)
     random.seed(worker_seed)
-
-
-# Copyright (c) OpenMMLab. All rights reserved.
-import platform
-from mmcv.utils import Registry, build_from_cfg
-
-from mmdet.datasets import DATASETS
-from mmdet.datasets.builder import _concat_dataset
-
-if platform.system() != 'Windows':
-    # https://github.com/pytorch/pytorch/issues/973
-    import resource
-    rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
-    base_soft_limit = rlimit[0]
-    hard_limit = rlimit[1]
-    soft_limit = min(max(4096, base_soft_limit), hard_limit)
-    resource.setrlimit(resource.RLIMIT_NOFILE, (soft_limit, hard_limit))
-
-OBJECTSAMPLERS = Registry('Object sampler')
-
-
-def custom_build_dataset(cfg, default_args=None):
-    from mmdet3d.datasets.dataset_wrappers import CBGSDataset
-    from mmdet.datasets.dataset_wrappers import (ClassBalancedDataset,
-                                                 ConcatDataset, RepeatDataset)
-    if isinstance(cfg, (list, tuple)):
-        dataset = ConcatDataset([custom_build_dataset(c, default_args) for c in cfg])
-    elif cfg['type'] == 'ConcatDataset':
-        dataset = ConcatDataset(
-            [custom_build_dataset(c, default_args) for c in cfg['datasets']],
-            cfg.get('separate_eval', True))
-    elif cfg['type'] == 'RepeatDataset':
-        dataset = RepeatDataset(
-            custom_build_dataset(cfg['dataset'], default_args), cfg['times'])
-    elif cfg['type'] == 'ClassBalancedDataset':
-        dataset = ClassBalancedDataset(
-            custom_build_dataset(cfg['dataset'], default_args), cfg['oversample_thr'])
-    elif cfg['type'] == 'CBGSDataset':
-        dataset = CBGSDataset(custom_build_dataset(cfg['dataset'], default_args))
-    elif isinstance(cfg.get('ann_file'), (list, tuple)):
-        dataset = _concat_dataset(cfg, default_args)
-    else:
-        dataset = build_from_cfg(cfg, DATASETS, default_args)
-
-    return dataset

@@ -201,17 +201,25 @@ model = dict(
         sizes=sizes)
 )
 
+# Import custom collate function directly (no functools.partial needed)
+from projects.LiCROcc.projects.mmdet3d_plugin.datasets.builder import collate
+
 # Dataset configuration
 dataset_type = 'nuScenesDataset'
 data_root = './data/nuscenes/'
 occ_root = './data/nuScenes-Occupancy'
 
+train_batch_size = 1 #4
+val_batch_size = 1 #4
+test_batch_size = 1
+
 # MMEngine 2.x: Dataloader configuration
 train_dataloader = dict(
-    batch_size=4,
-    num_workers=20,
-    persistent_workers=True,
-    sampler=dict(type='DefaultSampler', shuffle=True),
+    batch_size=train_batch_size,
+    num_workers=0,#20,
+    persistent_workers=False,#True,
+    sampler=dict(type='DistributedGroupSampler', samples_per_gpu=train_batch_size, seed=10),
+    collate_fn=collate,  # Add custom collate function
     dataset=dict(
         type=dataset_type,
         split="train",
@@ -230,11 +238,12 @@ train_dataloader = dict(
 )
 
 val_dataloader = dict(
-    batch_size=4,
+    batch_size=val_batch_size,
     num_workers=20,
     persistent_workers=True,
     drop_last=False,
-    sampler=dict(type='DefaultSampler', shuffle=False),
+    sampler=dict(type='DistributedSampler', shuffle=False, seed=10),
+    collate_fn=collate,  # Add custom collate function
     dataset=dict(
         type=dataset_type,
         split="val",
@@ -253,11 +262,12 @@ val_dataloader = dict(
 )
 
 test_dataloader = dict(
-    batch_size=4,
+    batch_size=test_batch_size,
     num_workers=20,
     persistent_workers=True,
     drop_last=False,
-    sampler=dict(type='DefaultSampler', shuffle=False),
+    sampler=dict(type='DistributedSampler', shuffle=False, seed=10),
+    collate_fn=collate,  # Add custom collate function
     dataset=dict(
         type=dataset_type,
         split="val",
@@ -339,8 +349,10 @@ env_cfg = dict(
 log_processor = dict(type='LogProcessor', window_size=50, by_epoch=True)
 log_level = 'INFO'
 
-# Load checkpoint
-load_from = 'projects/LiCROcc/ckpt/rc_licrocc_epoch_24.pth'
+# Load checkpoint (converted to spconv 1.x format so hook can convert it to 2.x)
+load_from = 'projects/LiCROcc/pre_ckpt/merged_model_distill_spconv1.pth'
+# load_from = 'projects/LiCROcc/ckpt/rc_licrocc_epoch_24.pth'
+# Original: load_from = 'projects/LiCROcc/pre_ckpt/merged_model_distill.pth'
 resume = False
 
 # Visualization
@@ -353,3 +365,5 @@ visualizer = dict(
 
 # Sync BN
 sync_bn = 'torch'
+
+randomness = dict(seed=10, deterministic=False)

@@ -1,7 +1,9 @@
-from mmcv.utils.registry import Registry, build_from_cfg
+from mmdet3d.registry import DATA_SAMPLERS
+from mmengine.registry import build_from_cfg
 
-SAMPLER = Registry('sampler')
+# For backward compatibility
+SAMPLER = DATA_SAMPLERS
 
 
 def build_sampler(cfg, default_args):
-    return build_from_cfg(cfg, SAMPLER, default_args)
+    return build_from_cfg(cfg, DATA_SAMPLERS, default_args)

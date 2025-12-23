@@ -4,14 +4,14 @@ import math
 
 import numpy as np
 import torch
-from mmcv.runner import get_dist_info
+from mmengine.dist import get_dist_info
 from torch.utils.data import Sampler
-from .sampler import SAMPLER
+from mmdet3d.registry import DATA_SAMPLERS
 import random
 from IPython import embed
 
 
-@SAMPLER.register_module()
+@DATA_SAMPLERS.register_module()
 class DistributedGroupSampler(Sampler):
     """Sampler that restricts data loading to a subset of the dataset.
     It is especially useful in conjunction with

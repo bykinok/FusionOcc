@@ -95,15 +95,25 @@ class SSC_RS(MVXTwoStageDetector):
                 img_neck_distill=None,
                 img_view_transformer_distill=None,
                 img_bev_encoder_backbone_distill = None,
-
+                init_cfg=None,
+                data_preprocessor=None,
                 ):
 
         super(SSC_RS,
-            self).__init__(pts_voxel_layer, pts_voxel_encoder,
-                            pts_middle_encoder, pts_fusion_layer,
-                            img_backbone, pts_backbone, img_neck, pts_neck,
-                            pts_bbox_head, img_roi_head, img_rpn_head,
-                            train_cfg, test_cfg, pretrained, 
+            self).__init__(pts_voxel_encoder=pts_voxel_encoder,
+                            pts_middle_encoder=pts_middle_encoder, 
+                            pts_fusion_layer=pts_fusion_layer,
+                            img_backbone=img_backbone, 
+                            pts_backbone=pts_backbone, 
+                            img_neck=img_neck, 
+                            pts_neck=pts_neck,
+                            pts_bbox_head=pts_bbox_head, 
+                            img_roi_head=img_roi_head, 
+                            img_rpn_head=img_rpn_head,
+                            train_cfg=train_cfg, 
+                            test_cfg=test_cfg, 
+                            init_cfg=init_cfg, 
+                            data_preprocessor=data_preprocessor
                             )
         self.use_image = True if img_backbone!=None else False
         self.use_lidar = True if pts_voxel_encoder!=None else False
@@ -149,8 +159,6 @@ class SSC_RS(MVXTwoStageDetector):
             self.img_bev_encoder_neck = MODELS.build(img_bev_encoder_neck)
         if occ_head:
             self.occ_head = MODELS.build(occ_head)
-            
-
 
 
     def forward(self, inputs=None, data_samples=None, mode='tensor', return_loss=None, **kwargs):
@@ -475,6 +483,53 @@ class SSC_RS(MVXTwoStageDetector):
         Returns:
             dict: Losses of different branches.
         """
+        
+        # Convert img_metas from dict to list[dict] format (MMEngine 2.x compatibility)
+        if isinstance(img_metas, dict):
+            # MMEngine 2.x format: dict with lists
+            # Convert to MMDetection 0.x format: list of dicts
+            # First, check if values are lists/tuples and get batch size
+            first_key = list(img_metas.keys())[0]
+            first_value = img_metas[first_key]
+            
+            if isinstance(first_value, (list, tuple)) and len(first_value) > 0:
+                # Check if first element is also a list/tuple (nested structure)
+                if isinstance(first_value[0], (list, tuple)):
+                    # Nested structure: {'key': [('val1', 'val2', 'val3', 'val4')]}
+                    batch_size = len(first_value[0])
+                    img_metas_list = []
+                    for i in range(batch_size):
+                        meta_dict = {}
+                        for key, value in img_metas.items():
+                            if isinstance(value, (list, tuple)) and len(value) > 0:
+                                if isinstance(value[0], (list, tuple)):
+                                    meta_dict[key] = [value[0][i]]
+                                else:
+                                    meta_dict[key] = [value[i]]
+                            else:
+                                meta_dict[key] = value
+                        img_metas_list.append(meta_dict)
+                    img_metas = img_metas_list
+                else:
+                    # Simple list: {'key': ['val1', 'val2', 'val3', 'val4']}
+                    batch_size = len(first_value)
+                    img_metas_list = []
+                    for i in range(batch_size):
+                        meta_dict = {}
+                        for key, value in img_metas.items():
+                            if isinstance(value, (list, tuple)):
+                                extracted = value[i]
+                                # Unwrap single-element lists (e.g., [[array]] -> [array] -> array)
+                                if isinstance(extracted, (list, tuple)) and len(extracted) == 1:
+                                    extracted = extracted[0]
+                                meta_dict[key] = extracted
+                            else:
+                                meta_dict[key] = value
+                        img_metas_list.append(meta_dict)
+                    img_metas = img_metas_list
+
+        #breakpoint()
+
         if self.use_image:
             img_feats, occ_bev_feature, depth = self.extract_img_feat(img_inputs)
             if self.Distill_1 or self.Distill_2 or self.Distill_3:
@@ -644,6 +699,50 @@ class SSC_RS(MVXTwoStageDetector):
             dict: Completion result.
         """
         breakpoint()
+        
+        # Convert img_metas from dict to list[dict] format (MMEngine 2.x compatibility)
+        if isinstance(img_metas, dict):
+            # MMEngine 2.x format: dict with lists
+            # Convert to MMDetection 0.x format: list of dicts
+            # First, check if values are lists/tuples and get batch size
+            first_key = list(img_metas.keys())[0]
+            first_value = img_metas[first_key]
+            
+            if isinstance(first_value, (list, tuple)) and len(first_value) > 0:
+                # Check if first element is also a list/tuple (nested structure)
+                if isinstance(first_value[0], (list, tuple)):
+                    # Nested structure: {'key': [('val1', 'val2', 'val3', 'val4')]}
+                    batch_size = len(first_value[0])
+                    img_metas_list = []
+                    for i in range(batch_size):
+                        meta_dict = {}
+                        for key, value in img_metas.items():
+                            if isinstance(value, (list, tuple)) and len(value) > 0:
+                                if isinstance(value[0], (list, tuple)):
+                                    meta_dict[key] = [value[0][i]]
+                                else:
+                                    meta_dict[key] = [value[i]]
+                            else:
+                                meta_dict[key] = value
+                        img_metas_list.append(meta_dict)
+                    img_metas = img_metas_list
+                else:
+                    # Simple list: {'key': ['val1', 'val2', 'val3', 'val4']}
+                    batch_size = len(first_value)
+                    img_metas_list = []
+                    for i in range(batch_size):
+                        meta_dict = {}
+                        for key, value in img_metas.items():
+                            if isinstance(value, (list, tuple)):
+                                extracted = value[i]
+                                # Unwrap single-element lists (e.g., [[array]] -> [array] -> array)
+                                if isinstance(extracted, (list, tuple)) and len(extracted) == 1:
+                                    extracted = extracted[0]
+                                meta_dict[key] = extracted
+                            else:
+                                meta_dict[key] = value
+                        img_metas_list.append(meta_dict)
+                    img_metas = img_metas_list
 
         if self.use_image:
             img_feats, occ_bev_feature, depth = self.extract_img_feat(img_inputs)

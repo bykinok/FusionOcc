@@ -21,15 +21,15 @@ try:
     from mmdet3d.registry import DATASETS
 except ImportError:
     from mmdet.datasets import DATASETS
-try:
-    from mmcv.parallel import DataContainer as DC
-except ImportError:
-    # MMEngine 2.x doesn't use DataContainer
-    # Create a simple wrapper
-    class DataContainer:
-        def __init__(self, data, *args, **kwargs):
-            self.data = data
-    DC = DataContainer
+# MMEngine 2.x doesn't use DataContainer
+# Remove DataContainer usage entirely
+# try:
+#     from mmcv.parallel import DataContainer as DC
+# except ImportError:
+#     class DataContainer:
+#         def __init__(self, data, *args, **kwargs):
+#             self.data = data
+#     DC = DataContainer
 from ..ssc_rs.utils.ssc_metric import SSCMetrics
 from numba import njit, prange
 import skimage
@@ -177,9 +177,11 @@ class nuScenesDataset(Dataset):
         points = torch.from_numpy(points[:, :4]).float() 
         radar_pc = torch.from_numpy(radar_pc[:, :7]).float()
 
-        points = DC(points, cpu_only=False, stack=False)
-        radar_pc = DC(radar_pc, cpu_only=False, stack=False)
-        meta_dict = DC(meta_dict, cpu_only=True)
+        # MMEngine 2.x: Don't use DataContainer, return raw data
+        # points = DC(points, cpu_only=False, stack=False)
+        # radar_pc = DC(radar_pc, cpu_only=False, stack=False)
+        # meta_dict = DC(meta_dict, cpu_only=True)
+        # Just use the raw data without wrapping
 
         data_info = dict(
             img_metas = meta_dict,
