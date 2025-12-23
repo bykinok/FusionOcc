@@ -286,9 +286,21 @@ test_dataloader = dict(
 )
 
 # MMEngine 2.x: Evaluator configuration
-# Use a simple dummy evaluator for testing
-val_evaluator = [dict(type='DumpResults', out_file_path='val_results.pkl')]
-test_evaluator = [dict(type='DumpResults', out_file_path='test_results.pkl')]
+# Use SSCEvaluator for metric calculation
+val_evaluator = [
+    dict(
+        type='SSCEvaluator',
+        # save_results=True,
+        # out_file_path='val_results.pkl'
+    )
+]
+test_evaluator = [
+    dict(
+        type='SSCEvaluator',
+        # save_results=True,
+        # out_file_path='test_results.pkl'
+    )
+]
 
 # MMEngine 2.x: Optimizer wrapper
 optim_wrapper = dict(

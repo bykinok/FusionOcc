@@ -180,8 +180,28 @@ class SSC_RS(MVXTwoStageDetector):
             # Training mode
             return self.forward_train(**kwargs)
         elif mode == 'predict':
-            # Inference mode
-            return self.forward_test(**kwargs)
+            # Inference mode: return list of data_samples
+            result = self.forward_test(**kwargs)
+            # Convert single result dict to list of data_samples for batch processing
+            # Extract batch_size from output_voxels
+            if 'output_voxels' in result and result['output_voxels'] is not None:
+                output_voxels = result['output_voxels']
+                target_voxels = result.get('target_voxels', None)
+                
+                # Split batch into individual samples for evaluator
+                batch_size = output_voxels.shape[0]
+                data_samples_list = []
+                for i in range(batch_size):
+                    sample_dict = {
+                        'output_voxels': output_voxels[i:i+1],  # Keep batch dimension
+                    }
+                    if target_voxels is not None:
+                        sample_dict['target_voxels'] = target_voxels[i:i+1]  # Keep batch dimension
+                    data_samples_list.append(sample_dict)
+                return data_samples_list
+            else:
+                # Fallback: return single result as list
+                return [result]
         elif mode == 'tensor':
             # Pure forward (return raw tensors)
             return self.forward_test(**kwargs)
@@ -698,8 +718,7 @@ class SSC_RS(MVXTwoStageDetector):
         Returns:
             dict: Completion result.
         """
-        breakpoint()
-        
+                
         # Convert img_metas from dict to list[dict] format (MMEngine 2.x compatibility)
         if isinstance(img_metas, dict):
             # MMEngine 2.x format: dict with lists
