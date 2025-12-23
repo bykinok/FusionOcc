@@ -749,7 +749,25 @@ class FusionOCC(FusionDepthSeg):
         
         if img_inputs is not None:
             if isinstance(img_inputs, (list, tuple)):
-                img_inputs = [inp.to(device) if isinstance(inp, torch.Tensor) else inp for inp in img_inputs]
+                # Handle batch collation: if each element is a tuple, stack them
+                processed_inputs = []
+                for inp in img_inputs:
+                    if isinstance(inp, (tuple, list)):
+                        # Each element is a tuple of batch samples, need to stack
+                        if len(inp) > 0 and isinstance(inp[0], torch.Tensor):
+                            # Stack batch samples: (tensor[1,...], tensor[1,...]) -> tensor[2,...]
+                            stacked = torch.stack(inp, dim=0).to(device)
+                            # If stacked has an extra dimension (e.g., [2,1,...]), squeeze it
+                            if stacked.shape[1] == 1 and stacked.dim() > 2:
+                                stacked = stacked.squeeze(1)
+                            processed_inputs.append(stacked)
+                        else:
+                            processed_inputs.append(inp)
+                    elif isinstance(inp, torch.Tensor):
+                        processed_inputs.append(inp.to(device))
+                    else:
+                        processed_inputs.append(inp)
+                img_inputs = processed_inputs
             elif isinstance(img_inputs, torch.Tensor):
                 img_inputs = img_inputs.to(device)
         
@@ -787,7 +805,7 @@ class FusionOCC(FusionDepthSeg):
                 elif isinstance(segs[0], np.ndarray):
                     segs = torch.from_numpy(np.stack(segs, axis=0)).to(device)
         
-        # breakpoint()
+        breakpoint()
 
         lidar_feat, x_list, x_sparse_out = self.lidar_encoder(points)
         lidar_feat = lidar_feat.permute(0, 1, 2, 4, 3).contiguous()
@@ -1381,21 +1399,47 @@ class FusionOCC(FusionDepthSeg):
         sparse_depth = data.get('sparse_depth', None)
         img_metas = data.get('img_metas', data.get('data_samples', {}))
         
-        # Unpack sparse_depth if it's a list (like in original simple_test)
-        if sparse_depth is not None and isinstance(sparse_depth, (list, tuple)):
-            sparse_depth = sparse_depth[0]
+        # Handle sparse_depth: stack if it's a list of tensors (batch collation)
+        if sparse_depth is not None:
+            if isinstance(sparse_depth, (list, tuple)):
+                if len(sparse_depth) > 0 and isinstance(sparse_depth[0], torch.Tensor):
+                    # Stack batch samples: [tensor[N,H,W], tensor[N,H,W]] -> tensor[B,N,H,W]
+                    sparse_depth = torch.stack(sparse_depth, dim=0).to(device)
+                elif len(sparse_depth) > 0 and isinstance(sparse_depth[0], np.ndarray):
+                    sparse_depth = torch.from_numpy(np.stack(sparse_depth, axis=0)).to(device)
+                else:
+                    # Fallback: take first element for backward compatibility
+                    sparse_depth = sparse_depth[0]
+            
+            # Ensure sparse_depth has batch dimension [B, N, H, W]
+            # If it's [N, H, W], add batch dimension
+            if isinstance(sparse_depth, torch.Tensor):
+                if sparse_depth.ndim == 3:
+                    sparse_depth = sparse_depth.unsqueeze(0)  # [N, H, W] -> [1, N, H, W]
+                # Move sparse_depth to device
+                sparse_depth = sparse_depth.to(device)
         
-        # Ensure sparse_depth has batch dimension [B, N, H, W]
-        # If it's [N, H, W], add batch dimension
-        if sparse_depth is not None and isinstance(sparse_depth, torch.Tensor):
-            if sparse_depth.ndim == 3:
-                sparse_depth = sparse_depth.unsqueeze(0)  # [N, H, W] -> [1, N, H, W]
-            # Move sparse_depth to device
-            sparse_depth = sparse_depth.to(device)
-        
-        # Move imgs to device
+        # Move imgs to device and handle batch collation
         if isinstance(imgs, (tuple, list)):
-            imgs = tuple(x.to(device) if hasattr(x, 'to') and isinstance(x, torch.Tensor) else x for x in imgs)
+            # Handle batch collation: if each element is a tuple, stack them
+            processed_inputs = []
+            for inp in imgs:
+                if isinstance(inp, (tuple, list)):
+                    # Each element is a tuple of batch samples, need to stack
+                    if len(inp) > 0 and isinstance(inp[0], torch.Tensor):
+                        # Stack batch samples: (tensor[1,...], tensor[1,...]) -> tensor[2,...]
+                        stacked = torch.stack(inp, dim=0).to(device)
+                        # If stacked has an extra dimension (e.g., [2,1,...]), squeeze it
+                        if stacked.shape[1] == 1 and stacked.dim() > 2:
+                            stacked = stacked.squeeze(1)
+                        processed_inputs.append(stacked)
+                    else:
+                        processed_inputs.append(inp)
+                elif isinstance(inp, torch.Tensor):
+                    processed_inputs.append(inp.to(device))
+                else:
+                    processed_inputs.append(inp)
+            imgs = processed_inputs
         elif isinstance(imgs, torch.Tensor):
             imgs = imgs.to(device)
         
