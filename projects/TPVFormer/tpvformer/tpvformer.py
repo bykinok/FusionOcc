@@ -23,6 +23,7 @@ class TPVFormer(Base3DSegmentor):
                  ignore_label=0,
                  lovasz_input='voxel',
                  ce_input='voxel',
+                 dataset_name=None,  # 'occ3d' or None for traditional GT
                  init_cfg=None):
 
         super().__init__(data_preprocessor=data_preprocessor, init_cfg=init_cfg)
@@ -41,6 +42,7 @@ class TPVFormer(Base3DSegmentor):
         self.lovasz_input = lovasz_input  # 'voxel' or 'points'
         self.ce_input = ce_input  # 'voxel' or 'points'
         self.ce_loss_func = nn.CrossEntropyLoss(ignore_index=ignore_label)
+        self.dataset_name = dataset_name  # Store dataset_name for predict method
 
         self.grid_mask = GridMask(
             True, True, rotate=1, offset=False, ratio=0.5, mode=1, prob=0.7)
@@ -154,23 +156,17 @@ class TPVFormer(Base3DSegmentor):
                     # Voxel-level labels
                     if hasattr(gt_pts_seg, 'voxel_semantic_mask'):
                         sample_voxel_labels = gt_pts_seg.voxel_semantic_mask
-                        if not isinstance(sample_voxel_labels, torch.Tensor):
-                            sample_voxel_labels = torch.from_numpy(sample_voxel_labels)
                         sample_voxel_labels = sample_voxel_labels.long().to(img_feats[0].device)
                         voxel_labels_list.append(sample_voxel_labels)
                     
                     # Point-level labels
                     if hasattr(gt_pts_seg, 'pts_semantic_mask'):
                         sample_point_labels = gt_pts_seg.pts_semantic_mask
-                        if not isinstance(sample_point_labels, torch.Tensor):
-                            sample_point_labels = torch.from_numpy(sample_point_labels)
                         sample_point_labels = sample_point_labels.long().to(img_feats[0].device)
                         point_labels_list.append(sample_point_labels)
                 
                 # Add voxel_coords
                 if sample_voxel_coords is not None:
-                    if not isinstance(sample_voxel_coords, torch.Tensor):
-                        sample_voxel_coords = torch.from_numpy(sample_voxel_coords)
                     sample_voxel_coords = sample_voxel_coords.float().to(img_feats[0].device)
                     voxel_coords_list.append(sample_voxel_coords)
             
@@ -342,29 +338,75 @@ class TPVFormer(Base3DSegmentor):
             # Forward through aggregator (returns tuple if point_coords, single tensor if not)
             outputs = self.tpv_aggregator(tpv_queries, point_coords_float)
             
-            # Store predictions in data_samples
-            if isinstance(outputs, tuple):
-                # (logits_vox, logits_pts) - following original implementation
-                logits_vox, logits_pts = outputs
-                for i, data_sample in enumerate(batch_data_samples):
-                    # Store both voxel and point predictions (logits)
-                    data_sample.pred_logits_vox = logits_vox[i]  # (C, W, H, Z)
-                    data_sample.pred_logits_pts = logits_pts[i]  # (C, N, 1, 1)
-                    
-                    # Also store argmax results for metrics
-                    # Following original eval.py: predict_labels_vox = torch.argmax(predict_labels_vox, dim=1)
-                    pred_sem_seg = torch.argmax(logits_vox[i], dim=0)  # (W, H, Z)
-                    data_sample.pred_occ_sem_seg = pred_sem_seg
-            else:
-                # Voxel-only prediction
-                logits_vox = outputs
-                for i, data_sample in enumerate(batch_data_samples):
-                    data_sample.pred_logits_vox = logits_vox[i]
-                    # Store argmax result
-                    pred_sem_seg = torch.argmax(logits_vox[i], dim=0)  # (W, H, Z)
-                    data_sample.pred_occ_sem_seg = pred_sem_seg
+            # Check if we should use occ3d format (STCOcc compatible)
+            use_occ3d_format = (self.dataset_name == 'occ3d')
             
-            return batch_data_samples
+            if use_occ3d_format:
+                # STCOcc 형식으로 반환 (occ3d용)
+                import numpy as np
+                
+                if isinstance(outputs, tuple):
+                    logits_vox, logits_pts = outputs
+                else:
+                    logits_vox = outputs
+                
+                # Get batch size
+                batch_size = logits_vox.shape[0]
+                
+                # Convert to numpy and get argmax
+                pred_occ = torch.argmax(logits_vox, dim=1)  # (B, W, H, Z)
+                pred_occ_np = pred_occ.cpu().numpy().astype(np.uint8)
+                
+                # Get indices from img_metas
+                img_metas = []
+                for data_sample in batch_data_samples:
+                    if hasattr(data_sample, 'metainfo'):
+                        img_metas.append(data_sample.metainfo)
+                    else:
+                        img_metas.append({})
+                
+                # Create STCOcc-compatible return format
+                return_dict = dict()
+                return_dict['occ_results'] = pred_occ_np  # (B, W, H, Z) numpy array
+                return_dict['index'] = [
+                    img_meta.get('index', i) if isinstance(img_meta, dict) else i
+                    for i, img_meta in enumerate(img_metas)
+                ]
+                
+                # Also store in data_samples for backward compatibility
+                for i, data_sample in enumerate(batch_data_samples):
+                    if isinstance(outputs, tuple):
+                        data_sample.pred_logits_vox = logits_vox[i]
+                        data_sample.pred_logits_pts = logits_pts[i]
+                    else:
+                        data_sample.pred_logits_vox = logits_vox[i]
+                    data_sample.pred_occ_sem_seg = pred_occ[i]
+                
+                return [return_dict]  # Return list of dict (STCOcc format)
+            else:
+                # 기존 형식으로 반환 (traditional GT용)
+                if isinstance(outputs, tuple):
+                    # (logits_vox, logits_pts) - following original implementation
+                    logits_vox, logits_pts = outputs
+                    for i, data_sample in enumerate(batch_data_samples):
+                        # Store both voxel and point predictions (logits)
+                        data_sample.pred_logits_vox = logits_vox[i]  # (C, W, H, Z)
+                        data_sample.pred_logits_pts = logits_pts[i]  # (C, N, 1, 1)
+                        
+                        # Also store argmax results for metrics
+                        # Following original eval.py: predict_labels_vox = torch.argmax(predict_labels_vox, dim=1)
+                        pred_sem_seg = torch.argmax(logits_vox[i], dim=0)  # (W, H, Z)
+                        data_sample.pred_occ_sem_seg = pred_sem_seg
+                else:
+                    # Voxel-only prediction
+                    logits_vox = outputs
+                    for i, data_sample in enumerate(batch_data_samples):
+                        data_sample.pred_logits_vox = logits_vox[i]
+                        # Store argmax result
+                        pred_sem_seg = torch.argmax(logits_vox[i], dim=0)  # (W, H, Z)
+                        data_sample.pred_occ_sem_seg = pred_sem_seg
+                
+                return batch_data_samples
         else:
             # TPVFormerHead만 있는 경우 dummy predictions 생성
             batch_size = len(batch_data_samples)

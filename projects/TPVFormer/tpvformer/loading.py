@@ -5,6 +5,7 @@ from typing import Optional, Union
 
 import mmcv
 import numpy as np
+import torch
 import torch.nn as nn
 from mmcv.transforms.base import BaseTransform
 from mmengine.fileio import get
@@ -366,8 +367,8 @@ class LoadOccupancyAnnotations(BaseTransform):
         """Convert point cloud to voxel grid following tpv04 implementation.
         
         Args:
-            points: Point cloud coordinates [N, 3] in (x, y, z) order
-            labels: Point-wise semantic labels [N,]
+            points: Point cloud coordinates [N, 3] in (x, y, z) order (numpy array or torch Tensor)
+            labels: Point-wise semantic labels [N,] (numpy array)
             results: Results dict containing metadata
             
         Returns:
@@ -380,6 +381,12 @@ class LoadOccupancyAnnotations(BaseTransform):
         max_bound = np.array([51.2, 51.2, 3.0])
         grid_size = np.array([100, 100, 8])  # (W, H, Z)
         fill_label = 17  # Empty voxel label
+        
+        # Convert points to numpy if it's a torch Tensor
+        if isinstance(points, torch.Tensor):
+            points = points.cpu().numpy()
+        if isinstance(labels, torch.Tensor):
+            labels = labels.cpu().numpy()
         
         # Calculate voxel indices (원본과 동일)
         crop_range = max_bound - min_bound
@@ -546,3 +553,175 @@ class GridMask(nn.Module):
         # This is a placeholder implementation
         # In practice, you would implement the actual GridMask augmentation
         return img
+
+
+@TRANSFORMS.register_module()
+class LoadOccupancy(BaseTransform):
+    """Load occupancy ground truth data for occ3d format.
+    
+    This transform loads occupancy ground truth from occ3d format (labels.npz)
+    and converts it to the format required by the model.
+    
+    Args:
+        use_occ3d (bool): Whether to use occ3d format. Defaults to False.
+        pc_range (list): Point cloud range [x_min, y_min, z_min, x_max, y_max, z_max].
+    """
+    
+    def __init__(self,
+                 use_occ3d: bool = False,
+                 pc_range: Optional[list] = None):
+        super().__init__()
+        self.use_occ3d = use_occ3d
+        self.pc_range = pc_range
+    
+    def transform(self, results: dict) -> dict:
+        """Transform function to load occupancy data.
+        
+        Args:
+            results (dict): Result dict from previous transforms.
+            
+        Returns:
+            dict: Result dict with loaded occupancy data.
+        """
+        # breakpoint()
+
+        if self.use_occ3d:
+            # Filter points by point cloud range
+            if self.pc_range is not None and 'points' in results:
+                lidar2ego_rotation = np.array(results['lidar_points']['lidar2ego'])[:3, :3]
+                lidar2ego_translation = np.array(results['lidar_points']['lidar2ego'])[:3, -1]
+                points = results['points'].numpy()
+                points[:, :3] = points[:, :3] @ lidar2ego_rotation.T
+                points[:, :3] += lidar2ego_translation
+                points = torch.from_numpy(points)
+                idx = torch.where(
+                    (points[:, 0] > self.pc_range[0]) &
+                    (points[:, 1] > self.pc_range[1]) &
+                    (points[:, 2] > self.pc_range[2]) &
+                    (points[:, 0] < self.pc_range[3]) &
+                    (points[:, 1] < self.pc_range[4]) &
+                    (points[:, 2] < self.pc_range[5])
+                )
+                points = points[idx]
+                results['points'] = points
+                
+                # Filter pts_semantic_mask if it exists (to match filtered points)
+                if 'pts_semantic_mask' in results:
+                    pts_semantic_mask = results['pts_semantic_mask']
+                    if isinstance(pts_semantic_mask, np.ndarray):
+                        if len(idx[0]) == len(pts_semantic_mask):
+                            # idx is a tuple of tensors, extract first element
+                            idx_np = idx[0].cpu().numpy() if hasattr(idx[0], 'cpu') else idx[0].numpy()
+                            results['pts_semantic_mask'] = pts_semantic_mask[idx_np]
+                        elif len(idx[0]) < len(pts_semantic_mask):
+                            # Points were filtered, filter semantic mask accordingly
+                            idx_np = idx[0].cpu().numpy() if hasattr(idx[0], 'cpu') else idx[0].numpy()
+                            results['pts_semantic_mask'] = pts_semantic_mask[idx_np]
+            
+            # Determine occ3d path from ann_file (occ_path is already provided)
+            if 'occ_path' in results:
+                # Use pre-computed path from pkl file
+                occ_3d_path = os.path.join(results['occ_path'], 'labels.npz')
+            else:
+                # Fallback: try to construct path from token
+                occ_3d_folder = results['lidar_points']['lidar_path'].split('samples')[0] + 'Occ3D'
+                occ_3d_path = os.path.join(occ_3d_folder, results['token'], 'labels.npz')
+            
+            # Load occ3d data
+            if not os.path.exists(occ_3d_path):
+                print(f"Warning: occ3d file not found: {occ_3d_path}")
+                # Create dummy data
+                results['occ_3d'] = torch.zeros((0, 4), dtype=torch.long)
+                results['occ_3d_masked'] = torch.zeros((0, 4), dtype=torch.long)
+                return results
+            
+            occ_3d = np.load(occ_3d_path)
+            occ_3d_semantic = occ_3d['semantics']
+            occ_3d_cam_mask = occ_3d['mask_camera']
+            
+            # Process semantic labels: 0 -> 18 (others), then 18 -> 17 (empty)
+            occ_3d_semantic[occ_3d_semantic == 0] = 18  # now class 1~18, with 18:others
+            
+            # Create masked version
+            occ_3d_gt_masked = occ_3d_semantic * occ_3d_cam_mask
+            occ_3d_gt_masked[occ_3d_gt_masked == 0] = 255  # invisible voxels
+            occ_3d_gt_masked[occ_3d_gt_masked == 17] = 0
+            occ_3d_gt_masked[occ_3d_gt_masked == 18] = 17
+            
+            occ_3d_gt_masked = torch.from_numpy(occ_3d_gt_masked)
+            idx_masked = torch.where(occ_3d_gt_masked > 0)
+            label_masked = occ_3d_gt_masked[idx_masked[0], idx_masked[1], idx_masked[2]]
+            occ_3d_masked = torch.stack([
+                idx_masked[0], idx_masked[1], idx_masked[2], label_masked
+            ], dim=1).long()
+            
+            # Create unmasked version
+            occ_3d_semantic[occ_3d_semantic == 17] = 0
+            occ_3d_semantic[occ_3d_semantic == 18] = 17
+            occ_3d_gt = torch.from_numpy(occ_3d_semantic)
+            idx = torch.where(occ_3d_gt > 0)
+            label = occ_3d_gt[idx[0], idx[1], idx[2]]
+            occ3d = torch.stack([idx[0], idx[1], idx[2], label], dim=1).long()
+            
+            results['occ_3d_masked'] = occ_3d_masked
+            results['occ_3d'] = occ3d
+            
+            # Also create voxel_semantic_mask for TPVFormer loss calculation
+            # Convert occ3d (200x200x16) to dense voxel grid for loss
+            voxel_semantic_mask = occ_3d_gt.numpy()  # (200, 200, 16)
+            results['voxel_semantic_mask'] = voxel_semantic_mask
+            
+            # Create pts_semantic_mask from voxel_semantic_mask for point-level loss
+            if 'points' in results:
+                points = results['points']
+                if isinstance(points, torch.Tensor):
+                    points_np = points.cpu().numpy()
+                else:
+                    points_np = points
+                
+                # occ3d range and grid size
+                occ3d_range = np.array([-40.0, -40.0, -1.0, 40.0, 40.0, 5.4])
+                occ3d_grid_size = np.array([200, 200, 16])
+                
+                # Convert points to voxel indices
+                xyz = points_np[:, :3] if points_np.shape[1] > 3 else points_np
+                min_bound = occ3d_range[:3]
+                max_bound = occ3d_range[3:]
+                crop_range = max_bound - min_bound
+                intervals = crop_range / occ3d_grid_size
+                
+                # Clip and convert to grid indices
+                grid_ind_float = (np.clip(xyz, min_bound, max_bound) - min_bound) / intervals
+                grid_ind = np.floor(grid_ind_float).astype(np.int32)
+                
+                # Clip indices to valid range
+                grid_ind[:, 0] = np.clip(grid_ind[:, 0], 0, occ3d_grid_size[0] - 1)
+                grid_ind[:, 1] = np.clip(grid_ind[:, 1], 0, occ3d_grid_size[1] - 1)
+                grid_ind[:, 2] = np.clip(grid_ind[:, 2], 0, occ3d_grid_size[2] - 1)
+                
+                # Get semantic labels from voxel grid
+                pts_semantic_mask = voxel_semantic_mask[grid_ind[:, 0], grid_ind[:, 1], grid_ind[:, 2]]
+                results['pts_semantic_mask'] = pts_semantic_mask.astype(np.uint8)
+        else:
+            # Load traditional format (occ_200)
+            occ_file_name = results['lidar_points']['lidar_path'].split('/')[-1] + '.npy'
+            occ_200_folder = results['lidar_points']['lidar_path'].split('samples')[0] + 'occ_samples'
+            occ_200_path = os.path.join(occ_200_folder, occ_file_name)
+            
+            if os.path.exists(occ_200_path):
+                occ_200 = np.load(occ_200_path)
+                occ_200[:, 3][occ_200[:, 3] == 0] = 255
+                occ_200 = torch.from_numpy(occ_200)
+                results['occ_200'] = occ_200
+            else:
+                print(f"Warning: occ_200 file not found: {occ_200_path}")
+                results['occ_200'] = torch.zeros((0, 4), dtype=torch.long)
+        
+        return results
+    
+    def __repr__(self) -> str:
+        """str: Return a string that describes the module."""
+        repr_str = self.__class__.__name__
+        repr_str += f'(use_occ3d={self.use_occ3d}, '
+        repr_str += f'pc_range={self.pc_range})'
+        return repr_str
