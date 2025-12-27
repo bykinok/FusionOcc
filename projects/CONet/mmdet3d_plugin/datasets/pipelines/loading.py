@@ -18,11 +18,13 @@ import copy
 class LoadOccupancy(object):
 
     def __init__(self, to_float32=True, use_semantic=False, occ_path=None, grid_size=[512, 512, 40], unoccupied=0,
-            pc_range=[-51.2, -51.2, -5.0, 51.2, 51.2, 3.0], gt_resize_ratio=1, cal_visible=False, use_vel=False):
+            pc_range=[-51.2, -51.2, -5.0, 51.2, 51.2, 3.0], gt_resize_ratio=1, cal_visible=False, use_vel=False, 
+            use_occ3d=False):
         self.to_float32 = to_float32
         self.use_semantic = use_semantic
         self.occ_path = occ_path
         self.cal_visible = cal_visible
+        self.use_occ3d = use_occ3d
 
         self.grid_size = np.array(grid_size)
         self.unoccupied = unoccupied
@@ -32,6 +34,11 @@ class LoadOccupancy(object):
         self.use_vel = use_vel
     
     def __call__(self, results):
+        # occ3d 형식 지원: pkl 파일의 occ_path 키 사용
+        if self.use_occ3d and 'occ_path' in results:
+            return self._load_occ3d(results)
+        
+        # 기존 nuScenes-Occupancy 형식
         rel_path = 'scene_{0}/occupancy/{1}.npy'.format(results['scene_token'], results['lidar_token'])
         if self.occ_path is None:
             raise ValueError("occ_path must be provided")
@@ -159,6 +166,111 @@ class LoadOccupancy(object):
         points_uvd = torch.cat((points_uv, points_d), dim=2)
         
         return points_uvd
+    
+    def _load_occ3d(self, results):
+        """occ3d 형식 GT 로드 (pkl의 occ_path 키 사용)
+        
+        Occ3D 원본 클래스 정의:
+        - 0: others (occupied but not classified)
+        - 1-16: semantic classes (barrier, bicycle, bus, car, ...)
+        - 17: free (empty space)
+        
+        변환 후 (SurroundOcc 방식):
+        - 0: free (empty space)
+        - 1-16: semantic classes (동일)
+        - 17: others (occupied but not classified)
+        """
+        # breakpoint()
+        occ_path = results['occ_path']
+        
+        # occ3d 데이터 로드
+        occ_gt_path = os.path.join(occ_path, 'labels.npz')
+            
+        # labels.npz 로드
+        occ_labels = np.load(occ_gt_path)
+        occ_semantics = occ_labels['semantics']  # [200, 200, 16]
+        
+        # Camera mask 로드 (npz 파일에서 직접 확인)
+        occ_cam_mask = None
+        if 'mask_camera' in occ_labels.files:
+            occ_cam_mask = occ_labels['mask_camera'].astype(bool)  # Explicit boolean conversion
+        
+        # Label 변환 (SurroundOcc 방식): 0→18→17 (others), 17→0 (free), 18→17 (others)
+        # 이렇게 하면 free=0, semantic=1-16, others=17로 통일됨
+        gt_occ = occ_semantics.copy().astype(np.int32)  # int32 for intermediate computation
+        gt_occ[occ_semantics == 0] = 18   # others: 0 → 18 (temporary)
+        gt_occ[occ_semantics == 17] = 0   # free: 17 → 0
+        gt_occ[gt_occ == 18] = 17         # others: 18 → 17 (final)
+        gt_occ = gt_occ.astype(np.uint8)
+        
+        # Store dense GT for evaluation (STCOcc metric compatible)
+        gt_occ_dense = gt_occ.copy()
+        
+        # Apply camera mask for evaluation (invisible voxels → 255)
+        if occ_cam_mask is not None:
+            gt_occ_masked = gt_occ_dense.copy()
+            # Use numpy.where for safer indexing (SurroundOcc style)
+            gt_occ_masked = np.where(occ_cam_mask, gt_occ_dense, 255).astype(np.uint8)
+            results['occ_3d_masked'] = gt_occ_masked  # Dense format with mask
+        
+        results['occ_3d'] = gt_occ_dense  # Full dense GT
+        
+        # BEVDet augmentation 적용 (with vectorization) - Training에서만 활성화
+        if 'bda_mat' in results:
+            # Vectorized sparse conversion (100-200x faster than Python loop)
+            # Convert to torch for faster processing
+            gt_occ_torch = torch.from_numpy(gt_occ)
+            
+            # Find all occupied voxels (non-free: class 1-17)
+            # free=0을 제외한 모든 voxel
+            occupied_coords = torch.nonzero(gt_occ_torch > 0, as_tuple=False)  # (N, 3)
+            
+            if len(occupied_coords) > 0:
+                # Vectorized label extraction (all at once, no loop!)
+                labels = gt_occ_torch[occupied_coords[:, 0], occupied_coords[:, 1], occupied_coords[:, 2]]  # (N,)
+                
+                # voxel to world coordinates (vectorized)
+                pcd_np_cor = occupied_coords.numpy().astype(np.float32) + 0.5
+                pcd_np_cor = self.voxel2world(pcd_np_cor)
+                
+                # Apply BDA augmentation (vectorized)
+                pcd_np_cor = (results['bda_mat'] @ torch.from_numpy(pcd_np_cor).unsqueeze(-1).float()).squeeze(-1).numpy()
+                pcd_np_cor = self.world2voxel(pcd_np_cor)
+                
+                # Clip to grid boundaries (ensure all coordinates are within valid range)
+                pcd_np_cor = np.clip(pcd_np_cor, np.array([0,0,0]), self.grid_size - 1)
+                
+                # Combine coordinates and labels (vectorized)
+                pcd_np = np.concatenate([pcd_np_cor, labels.numpy().reshape(-1, 1)], axis=-1)
+                
+                # Velocity processing (if needed, similar to nuScenes-Occupancy)
+                # Note: occ3d doesn't provide velocity data, but keep structure for compatibility
+                if self.use_vel:
+                    # occ3d doesn't have velocity, so we skip this
+                    # For future compatibility, keep the structure
+                    pass
+                
+                # Sort by coordinates (required for nb_process_label)
+                pcd_np = pcd_np[np.lexsort((pcd_np_cor[:, 0], pcd_np_cor[:, 1], pcd_np_cor[:, 2])), :]
+                pcd_np = pcd_np.astype(np.int64)
+                
+                # Create dense grid (255: noise/ignore, 0-16: semantic classes, 17: others)
+                processed_label = np.zeros(self.grid_size, dtype=np.uint8)  # free=0
+                processed_label = nb_process_label(processed_label, pcd_np)
+                gt_occ = processed_label
+        else:
+            # No BDA augmentation (test mode)
+            # Sanity check: ensure gt_occ shape matches grid_size
+            if tuple(gt_occ.shape) != tuple(self.grid_size):
+                print(f"Warning: gt_occ shape {gt_occ.shape} != grid_size {self.grid_size}")
+        
+        results['gt_occ'] = gt_occ
+        
+        # visible mask 계산 (선택적)
+        if self.cal_visible and occ_cam_mask is not None:
+            results['visible_mask'] = occ_cam_mask.astype(np.uint8)
+        
+        return results
     
 # b1:boolean, u1: uint8, i2: int16, u2: uint16
 @nb.jit('b1[:](i2[:,:],u2[:,:],b1[:])', nopython=True, cache=True, parallel=False)

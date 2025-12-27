@@ -169,6 +169,10 @@ class NuscOCCDataset(NuScenesDataset):
             lidarseg=info['lidarseg'],
             curr=info,
         )
+        
+        # occ3d 지원: pkl 파일의 occ_path 키 전달
+        if 'occ_path' in info:
+            input_dict['occ_path'] = info['occ_path']
 
         if self.modality['use_camera']:
             image_paths = []

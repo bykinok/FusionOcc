@@ -52,6 +52,9 @@ voxel_out_indices = (0, 1, 2, 3)
 model = dict(
     type='OccNet',
     loss_norm=True,
+    # nuScenes-Occupancy configuration
+    num_cls=num_cls,  # Pass num_cls to model for correct class handling
+    empty_idx=empty_idx,  # Pass empty_idx to model
     pts_voxel_layer=dict(
         max_num_points=10, 
         point_cloud_range=point_cloud_range,

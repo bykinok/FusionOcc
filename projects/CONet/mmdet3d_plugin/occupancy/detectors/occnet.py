@@ -49,6 +49,7 @@ class OccNet(BaseModel):
             loss_cfg=None,
             disable_loss_depth=False,
             empty_idx=0,
+            num_cls=17,  # Number of classes (17 for nuScenes-Occupancy, 18 for occ3d)
             occ_fuser=None,
             occ_encoder_backbone=None,
             occ_encoder_neck=None,
@@ -73,6 +74,7 @@ class OccNet(BaseModel):
         self.record_time = False
         self.time_stats = collections.defaultdict(list)
         self.empty_idx = empty_idx
+        self.num_cls = num_cls  # Store number of classes
         
         # Build core components
         self.occ_encoder_backbone = MODELS.build(occ_encoder_backbone)
@@ -877,12 +879,24 @@ class OccNet(BaseModel):
                     fine_coord = output['output_coords_fine'][b]  # [3, N]
                     ncls = fine_pred.shape[1]
                     
-                    # Create empty prediction grid for this batch: [1, ncls, H, W, D]
-                    pred_f_b = self.empty_idx * torch.ones(1, ncls, H, W, D, device=fine_pred.device, dtype=torch.float32)
+                    # Filter out coordinates that are out of bounds
+                    valid_mask = (
+                        (fine_coord[0] >= 0) & (fine_coord[0] < H) &
+                        (fine_coord[1] >= 0) & (fine_coord[1] < W) &
+                        (fine_coord[2] >= 0) & (fine_coord[2] < D)
+                    )
                     
-                    # Fill in fine predictions at their coordinates
-                    # fine_pred: [N, ncls] -> permute: [ncls, N] -> unsqueeze: [1, ncls, N]
-                    pred_f_b[0, :, fine_coord[0], fine_coord[1], fine_coord[2]] = fine_pred.permute(1, 0)
+                    fine_coord_valid = fine_coord[:, valid_mask]
+                    fine_pred_valid = fine_pred[valid_mask]
+                    
+                    # Create empty prediction grid for this batch: [1, ncls, H, W, D]
+                    # Use 0 for initialization (free space) for occ3d format
+                    pred_f_b = torch.zeros(1, ncls, H, W, D, device=fine_pred.device, dtype=torch.float32)
+                    
+                    # Fill in fine predictions at their valid coordinates
+                    if fine_coord_valid.shape[1] > 0:
+                        # fine_pred: [N, ncls] -> permute: [ncls, N] -> unsqueeze: [1, ncls, N]
+                        pred_f_b[0, :, fine_coord_valid[0], fine_coord_valid[1], fine_coord_valid[2]] = fine_pred_valid.permute(1, 0)
                     
                     pred_f_list.append(pred_f_b)
                 
@@ -947,6 +961,17 @@ class OccNet(BaseModel):
         B, H, W, D = gt.shape
         pred = F.interpolate(pred, size=[H, W, D], mode='trilinear', align_corners=False).contiguous()
         
+        # Handle class mismatch: if pred has fewer classes than expected, pad with zeros
+        # This happens when checkpoint has 17 classes but model expects 18 classes
+        if pred.shape[1] < self.num_cls:
+            # Add zero-filled channels for missing classes
+            padding = torch.zeros(
+                (pred.shape[0], self.num_cls - pred.shape[1], pred.shape[2], pred.shape[3], pred.shape[4]),
+                device=pred.device,
+                dtype=pred.dtype
+            )
+            pred = torch.cat([pred, padding], dim=1)
+        
         # Process all batches together for comprehensive evaluation
         hist_total = None
         hist_occ_total = None
@@ -976,14 +1001,14 @@ class OccNet(BaseModel):
                 if visible_mask is not None:
                     visible_mask_b = visible_mask[b].cpu().numpy()
                     mask = noise_mask & (visible_mask_b != 0)
-                    hist_occ = fast_hist(pred_b[mask], gt_b[mask], max_label=17)
+                    hist_occ = fast_hist(pred_b[mask], gt_b[mask], max_label=self.num_cls)
                     
                     if hist_occ_total is None:
                         hist_occ_total = hist_occ
                     elif hist_occ is not None:
                         hist_occ_total += hist_occ
 
-                hist = fast_hist(pred_b[noise_mask], gt_b[noise_mask], max_label=17)
+                hist = fast_hist(pred_b[noise_mask], gt_b[noise_mask], max_label=self.num_cls)
                 
                 if hist_total is None:
                     hist_total = hist

@@ -83,6 +83,9 @@ model = dict(
         bgr_to_rgb=False,
         pad_size_divisor=32),
     loss_norm=True,
+    # nuScenes-Occupancy configuration
+    num_cls=num_cls,  # Pass num_cls to model for correct class handling
+    empty_idx=empty_idx,  # Pass empty_idx to model
     img_backbone=dict(
         pretrained='torchvision://resnet50',
         type='ResNet',

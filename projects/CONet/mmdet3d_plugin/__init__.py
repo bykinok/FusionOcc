@@ -21,6 +21,8 @@ MODELS.register_module(module=ResNet, force=True)
 from .datasets import *
 # Import only the OccMetric directly to avoid eval_hooks import issues
 from .core.evaluation.occ_metric import OccMetric
+# Import evaluation metrics (including OccupancyMetricHybrid for occ3d support)
+from .evaluation import *
 # Import pipelines for transform registration
 from .datasets.pipelines import *
 
