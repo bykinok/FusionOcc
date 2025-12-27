@@ -85,6 +85,7 @@ class SurroundOcc(Base3DDetector):
                  use_grid_mask: bool = False,
                  use_semantic: bool = True,
                  is_vis: bool = False,
+                 dataset_name: Optional[str] = None,
                  init_cfg: Optional[dict] = None,
                  data_preprocessor: Optional[dict] = None,
                  **kwargs):
@@ -132,6 +133,7 @@ class SurroundOcc(Base3DDetector):
         self.use_grid_mask = use_grid_mask
         self.use_semantic = use_semantic
         self.is_vis = is_vis
+        self.dataset_name = dataset_name
     
     @property
     def with_img_backbone(self):
@@ -330,6 +332,7 @@ class SurroundOcc(Base3DDetector):
             else:
                 img_metas.append({})
         
+
         img = batch_inputs.get('imgs', None) if batch_inputs is not None else None
         output = self.simple_test(img_metas, img)
         
@@ -358,6 +361,9 @@ class SurroundOcc(Base3DDetector):
             self.generate_output(pred_occ, img_metas)
             return batch_data_samples
         
+        # Check if we're using occ3d evaluation from config or data_sample attributes
+        use_occ3d = (self.dataset_name == 'occ3d') or any(hasattr(ds, 'occ_3d') or hasattr(ds, 'occ_3d_masked') for ds in batch_data_samples)
+        
         # Use the same evaluation approach as the original SurroundOcc
         # Import evaluation function
         from projects.SurroundOcc.surroundocc.evaluation.evaluation_metrics import evaluation_semantic
@@ -366,6 +372,24 @@ class SurroundOcc(Base3DDetector):
             class_num = pred_occ.shape[1]
             pred_softmax = torch.softmax(pred_occ, dim=1)
             _, pred_occ_class = torch.max(pred_softmax, dim=1)
+            
+            # If using occ3d evaluation, store predictions directly (already in occ3d 18 classes format)
+            if use_occ3d:
+                # Model outputs 18 classes (0=noise, 1-16=semantic, 17=empty)
+                # Store directly for metric evaluation
+                for i, data_sample in enumerate(batch_data_samples):
+                    pred_sem_seg = pred_occ_class[i].cpu().numpy().astype(np.uint8)  # (200, 200, 16)
+                    
+                    # Handle both dict and object types
+                    if isinstance(data_sample, dict):
+                        data_sample['occ_results'] = pred_sem_seg
+                        metainfo = data_sample.get('metainfo', {})
+                        data_sample['index'] = metainfo.get('sample_idx', i) if isinstance(metainfo, dict) else i
+                    else:
+                        data_sample.occ_results = pred_sem_seg
+                        data_sample.index = data_sample.metainfo.get('sample_idx', i) if hasattr(data_sample, 'metainfo') else i
+                
+                return batch_data_samples
             
             # Collect GT occupancy from data samples
             # Keep as list because sparse GT has different N for each sample

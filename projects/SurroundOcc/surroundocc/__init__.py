@@ -4,10 +4,12 @@ from .modules import PerceptionTransformer, SpatialCrossAttention, MSDeformableA
 from .datasets import CustomNuScenesOccDataset
 from .transforms import LoadOccupancy
 from .evaluation import OccupancyMetric
+from .evaluation.occupancy_metric_hybrid import OccupancyMetricHybrid
 from .loss import multiscale_supervision, geo_scal_loss, sem_scal_loss
 
 __all__ = [
     'SurroundOcc', 'OccHead', 'PerceptionTransformer', 'SpatialCrossAttention', 
     'MSDeformableAttention3D', 'OccEncoder', 'OccLayer', 'CustomNuScenesOccDataset',
-    'LoadOccupancy', 'OccupancyMetric', 'multiscale_supervision', 'geo_scal_loss', 'sem_scal_loss'
+    'LoadOccupancy', 'OccupancyMetric', 'OccupancyMetricHybrid', 
+    'multiscale_supervision', 'geo_scal_loss', 'sem_scal_loss'
 ]

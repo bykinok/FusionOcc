@@ -20,8 +20,10 @@ input_modality = dict(
 # Data configuration
 occ_path = "./data/nuScenes-Occupancy"
 depth_gt_path = './data/depth_gt'
-train_ann_file = "nuscenes_occ_infos_train.pkl"
-val_ann_file = "nuscenes_occ_infos_val.pkl"
+#train_ann_file = "nuscenes_occ_infos_train.pkl"
+train_ann_file = "occfrmwrk-nuscenes_infos_train.pkl"
+#val_ann_file = "nuscenes_occ_infos_val.pkl"
+val_ann_file = "occfrmwrk-nuscenes_infos_val.pkl"
 
 # For nuScenes we usually do 10-class detection
 class_names = [

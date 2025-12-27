@@ -20,10 +20,12 @@ class LoadOccupancy(BaseTransform):
     def __init__(self, 
                  use_semantic=True, 
                  occ_size=[200, 200, 16],
-                 pc_range=[-50, -50, -5.0, 50, 50, 3.0]):
+                 pc_range=[-50, -50, -5.0, 50, 50, 3.0],
+                 use_occ3d=False):
         self.use_semantic = use_semantic
         self.occ_size = occ_size
         self.pc_range = pc_range
+        self.use_occ3d = use_occ3d
     
     def transform(self, results):
         """Transform function to load occupancy data.
@@ -38,6 +40,58 @@ class LoadOccupancy(BaseTransform):
         
         # Try to load real occupancy data first
         gt_occ = None
+        
+        # breakpoint()
+        # Load occ3d format if specified
+        if self.use_occ3d and 'occ3d_gt_path' in results:
+            occ_3d_path = os.path.join(results['occ3d_gt_path'], 'labels.npz')
+            workspace_root = os.getcwd()
+            if occ_3d_path.startswith('./data/'):
+                occ_3d_path = occ_3d_path.replace('./data/', os.path.join(workspace_root, 'data') + '/')
+            elif not occ_3d_path.startswith('/'):
+                occ_3d_path = os.path.join(workspace_root, occ_3d_path)
+            
+            if os.path.exists(occ_3d_path):
+                import torch
+                occ_3d = np.load(occ_3d_path)
+                occ_3d_semantic = occ_3d['semantics']  # (200, 200, 16), occ3d format: 0=others, 1-16=semantic, 17=free
+                occ_3d_cam_mask = occ_3d['mask_camera']  # (200, 200, 16) boolean mask
+                
+                # Process semantic labels for occ3d format: 0 -> 18 (others), then 18 -> 17 (empty)
+                occ_3d_semantic_processed = occ_3d_semantic.copy()
+                occ_3d_semantic_processed[occ_3d_semantic_processed == 0] = 18
+                occ_3d_semantic_processed[occ_3d_semantic_processed == 17] = 0
+                occ_3d_semantic_processed[occ_3d_semantic_processed == 18] = 17
+                
+                # Convert to torch tensor for processing
+                occ_3d_gt = torch.from_numpy(occ_3d_semantic_processed).long()  # (200, 200, 16)
+                occ_3d_cam_mask = torch.from_numpy(occ_3d_cam_mask).bool()  # (200, 200, 16) - must be bool for indexing
+                
+                # ===== occ3d format (18 classes: 0=noise, 1-16=semantic, 17=free) =====
+                # Create masked version (visible by camera) - DENSE format (200, 200, 16)
+                # Apply camera mask: invisible voxels -> 255 (ignore)
+                occ_3d_gt_masked = occ_3d_gt.clone()  # (200, 200, 16)
+                occ_3d_gt_masked[~occ_3d_cam_mask] = 255  # Set invisible voxels to 255 (ignore)
+                
+                # Store dense GT for evaluation (compatible with STCOcc metric)
+                results['occ_3d_masked'] = occ_3d_gt_masked.numpy().astype(np.uint8)  # (200, 200, 16)
+                results['occ_3d'] = occ_3d_gt.numpy().astype(np.uint8)  # (200, 200, 16)
+                
+                # For training, create sparse format from full GT
+                # STCOcc uses full GT for training, camera mask only for evaluation
+                all_coords = torch.nonzero(occ_3d_gt < 17, as_tuple=False)  # All non-empty voxels (0-16), shape: (N, 3)
+                
+                if len(all_coords) > 0:
+                    # Vectorized sparse conversion (100-200x faster than Python loop)
+                    # Extract labels for all coordinates at once
+                    labels = occ_3d_gt[all_coords[:, 0], all_coords[:, 1], all_coords[:, 2]]  # (N,)
+                    # Stack coordinates [x, y, z] and labels [class] -> [N, 4]
+                    occ3d_sparse = torch.cat([all_coords.float(), labels.unsqueeze(1).float()], dim=1)
+                    results['gt_occ'] = occ3d_sparse.cpu().numpy().astype(np.float32)
+                else:
+                    results['gt_occ'] = np.zeros((0, 4), dtype=np.float32)
+                
+                return results
         
         if 'occ_path' in results:
             occ_path = results['occ_path']

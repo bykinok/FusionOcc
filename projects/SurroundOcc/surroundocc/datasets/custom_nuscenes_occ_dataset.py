@@ -121,6 +121,7 @@ class CustomNuScenesOccDataset(NuScenesDataset):
         """Load data list directly from annotation file without parent filtering."""
         import pickle
         import os.path as osp
+        import sys
         
         ann_file_path = osp.join(self.data_root, self.ann_file)
         
@@ -129,6 +130,13 @@ class CustomNuScenesOccDataset(NuScenesDataset):
             raise FileNotFoundError(f"Annotation file not found: {ann_file_path}")
             
         try:
+            # Add numpy compatibility patch for different numpy versions
+            # pkl files created with old numpy may reference numpy._core
+            # but current numpy 2.x uses numpy.core
+            import numpy.core as core
+            sys.modules['numpy._core'] = core
+            sys.modules['numpy._core.numeric'] = core.numeric
+            
             with open(ann_file_path, 'rb') as f:
                 data = pickle.load(f)
         except Exception as e:
@@ -421,6 +429,10 @@ class CustomNuScenesOccDataset(NuScenesDataset):
         # Add occ_path if available in original data
         if 'occ_path' in info:
             input_dict['occ_path'] = info['occ_path']
+        
+        # Add occ3d_gt_path if available (for occ3d GT format)
+        if 'occ3d_gt_path' in info:
+            input_dict['occ3d_gt_path'] = info['occ3d_gt_path']
 
         if self.modality.get('use_camera', True):
             image_paths = []

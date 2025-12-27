@@ -75,6 +75,11 @@ class OccupancyMetric(BaseMetric):
             else:
                 # Fallback: compute metrics here
                 pred_occ = data_sample.get('pred_occ', None) if isinstance(data_sample, dict) else getattr(data_sample, 'pred_occ', None)
+                
+                # Also try occ_results (for occ3d mode)
+                if pred_occ is None:
+                    pred_occ = data_sample.get('occ_results', None) if isinstance(data_sample, dict) else getattr(data_sample, 'occ_results', None)
+                
                 gt_occ = data_sample.get('gt_occ', None) if isinstance(data_sample, dict) else getattr(data_sample, 'gt_occ', None)
                 
                 # Try alternative locations for GT
