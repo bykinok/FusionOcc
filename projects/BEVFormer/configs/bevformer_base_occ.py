@@ -195,8 +195,8 @@ test_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=1,
-    workers_per_gpu=4,
+    samples_per_gpu=4,#1,
+    workers_per_gpu=8,#4,
     train=dict(
         type=dataset_type,
         data_root=data_root,
@@ -361,7 +361,7 @@ default_hooks = dict(
     timer=dict(type='IterTimerHook'),
     logger=dict(type='LoggerHook', interval=50),
     param_scheduler=dict(type='ParamSchedulerHook'),
-    checkpoint=dict(type='CheckpointHook', interval=1, max_keep_ckpts=3),
+    checkpoint=dict(type='CheckpointHook', interval=1),#, max_keep_ckpts=3),
     sampler_seed=dict(type='DistSamplerSeedHook'),
 )
 
