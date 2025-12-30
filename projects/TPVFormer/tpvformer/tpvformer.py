@@ -126,23 +126,7 @@ class TPVFormer(Base3DSegmentor):
 
         # Extract features
         img_feats = self.extract_feat(img)
-        
-        # IMPORTANT: Process each sample individually for TPV head (same as predict)
-        if len(batch_data_samples) > 1:
-            tpv_queries_list = []
-            for i in range(len(batch_data_samples)):
-                img_feats_single = [feat[i:i+1] for feat in img_feats]
-                tpv_queries_single = self.tpv_head(img_feats_single, [batch_data_samples[i]])
-                tpv_queries_list.append(tpv_queries_single)
-            
-            # Concatenate results
-            tpv_queries = [
-                torch.cat([tq[0] for tq in tpv_queries_list], dim=0),  # tpv_hw
-                torch.cat([tq[1] for tq in tpv_queries_list], dim=0),  # tpv_zh
-                torch.cat([tq[2] for tq in tpv_queries_list], dim=0)   # tpv_wz
-            ]
-        else:
-            tpv_queries = self.tpv_head(img_feats, batch_data_samples)
+        tpv_queries = self.tpv_head(img_feats, batch_data_samples)
         
         if hasattr(self, 'tpv_aggregator'):
             # Get voxel coordinates and labels from data samples
@@ -191,63 +175,26 @@ class TPVFormer(Base3DSegmentor):
             voxel_labels = voxel_labels_list if voxel_labels_list else None  # List of (N_i,) or (W, H, Z)
             point_labels = point_labels_list if point_labels_list else None  # List of (N_i,)
             
-            # IMPORTANT: Process each sample individually for aggregator (same as predict)
-            use_individual_processing = (len(batch_data_samples) > 1 and 
-                                        voxel_coords is not None and 
-                                        len(voxel_coords) == len(batch_data_samples))
+            # Pad voxel_coords to tensor for tpv_aggregator
+            # tpv_aggregator expects (B, N, 3) tensor
+            voxel_coords_padded = None
+            if voxel_coords is not None and len(voxel_coords) > 0:
+                max_points = max(coords.size(0) for coords in voxel_coords)
+                B = len(voxel_coords)
+                voxel_coords_padded = torch.zeros(B, max_points, 3, 
+                                                   device=voxel_coords[0].device,
+                                                   dtype=voxel_coords[0].dtype)
+                for i, coords in enumerate(voxel_coords):
+                    voxel_coords_padded[i, :coords.size(0)] = coords
             
-            if use_individual_processing:
-                # Process samples individually to avoid padding issues
-                outputs_vox_list = []
-                outputs_pts_list = []
-                
-                for i in range(len(batch_data_samples)):
-                    # Get single sample's TPV features
-                    tpv_queries_single = [tpv[i:i+1] for tpv in tpv_queries]
-                    
-                    # Get single sample's voxel coords (no padding needed)
-                    if i < len(voxel_coords) and voxel_coords[i].size(0) > 0:
-                        voxel_coords_single = voxel_coords[i].unsqueeze(0)  # (1, N_i, 3)
-                    else:
-                        voxel_coords_single = None
-                    
-                    # Forward single sample
-                    output_single = self.tpv_aggregator(tpv_queries_single, voxel_coords_single)
-                    
-                    if isinstance(output_single, tuple):
-                        outputs_vox_list.append(output_single[0])
-                        outputs_pts_list.append(output_single[1])
-                    else:
-                        outputs_vox_list.append(output_single)
-                
-                # Concatenate results
-                outputs_vox = torch.cat(outputs_vox_list, dim=0)
-                if outputs_pts_list:
-                    # Points have different lengths, keep as list
-                    outputs_pts = outputs_pts_list
-                else:
-                    outputs_pts = None
+            # Forward through aggregator (returns voxel and point predictions)
+            outputs = self.tpv_aggregator(tpv_queries, voxel_coords_padded)
+            
+            if isinstance(outputs, tuple):
+                outputs_vox, outputs_pts = outputs
             else:
-                # Batch processing (batch_size=1 or when individual processing not needed)
-                # Pad voxel_coords for batch processing
-                voxel_coords_padded = None
-                if voxel_coords is not None and len(voxel_coords) > 0:
-                    max_points = max(coords.size(0) for coords in voxel_coords)
-                    B = len(voxel_coords)
-                    voxel_coords_padded = torch.zeros(B, max_points, 3, 
-                                                       device=voxel_coords[0].device,
-                                                       dtype=voxel_coords[0].dtype)
-                    for i, coords in enumerate(voxel_coords):
-                        voxel_coords_padded[i, :coords.size(0)] = coords
-                
-                # Forward through aggregator
-                outputs = self.tpv_aggregator(tpv_queries, voxel_coords_padded)
-                
-                if isinstance(outputs, tuple):
-                    outputs_vox, outputs_pts = outputs
-                else:
-                    outputs_vox = outputs
-                    outputs_pts = None
+                outputs_vox = outputs
+                outputs_pts = None
             
             # Compute loss following original TPVFormer
             losses = {}
@@ -273,18 +220,7 @@ class TPVFormer(Base3DSegmentor):
                 lovasz_input_tensor = outputs_vox
                 lovasz_label_tensor = voxel_label_tensor  # Dense voxel labels (B, W, H, Z)
             else:  # 'points'
-                # Handle outputs_pts being a list (from individual processing)
-                if isinstance(outputs_pts, list):
-                    # Pad to uniform size for loss calculation
-                    max_pts = max(pts.size(2) for pts in outputs_pts)
-                    B = len(outputs_pts)
-                    C = outputs_pts[0].size(1)
-                    lovasz_input_tensor = torch.zeros(B, C, max_pts, 1, 1, device=outputs_pts[0].device)
-                    for i, pts in enumerate(outputs_pts):
-                        n = pts.size(2)
-                        lovasz_input_tensor[i, :, :n, :, :] = pts.squeeze(0)
-                else:
-                    lovasz_input_tensor = outputs_pts
+                lovasz_input_tensor = outputs_pts
                 # point_labels는 list이므로 그대로 유지
                 lovasz_label_tensor = point_label_list
             
@@ -292,18 +228,7 @@ class TPVFormer(Base3DSegmentor):
                 ce_input_tensor = outputs_vox
                 ce_label_tensor = voxel_label_tensor  # Dense voxel labels (B, W, H, Z)
             else:  # 'points'
-                # Handle outputs_pts being a list (from individual processing)
-                if isinstance(outputs_pts, list):
-                    # Pad to uniform size for loss calculation
-                    max_pts = max(pts.size(2) for pts in outputs_pts)
-                    B = len(outputs_pts)
-                    C = outputs_pts[0].size(1)
-                    ce_input_tensor = torch.zeros(B, C, max_pts, 1, 1, device=outputs_pts[0].device)
-                    for i, pts in enumerate(outputs_pts):
-                        n = pts.size(2)
-                        ce_input_tensor[i, :, :n, :, :] = pts.squeeze(0)
-                else:
-                    ce_input_tensor = outputs_pts
+                ce_input_tensor = outputs_pts
                 ce_label_tensor = point_label_list
 
             # breakpoint()
@@ -371,41 +296,15 @@ class TPVFormer(Base3DSegmentor):
         # breakpoint()
 
         img_feats = self.extract_feat(img)
-        
-        # IMPORTANT: Process each sample individually to avoid batch mixing in TPVFormer encoder
-        if len(batch_data_samples) > 1:
-            tpv_queries_list = []
-            for i in range(len(batch_data_samples)):
-                # Extract single sample's features
-                img_feats_single = [feat[i:i+1] for feat in img_feats]
-                batch_data_samples_single = [batch_data_samples[i]]
-                
-                # Forward TPV head for single sample
-                tpv_queries_single = self.tpv_head(img_feats_single, batch_data_samples_single)
-                tpv_queries_list.append(tpv_queries_single)
-            
-            # Concatenate results: tpv_queries is a list of [tpv_hw, tpv_zh, tpv_wz]
-            tpv_queries = [
-                torch.cat([tq[0] for tq in tpv_queries_list], dim=0),  # tpv_hw
-                torch.cat([tq[1] for tq in tpv_queries_list], dim=0),  # tpv_zh
-                torch.cat([tq[2] for tq in tpv_queries_list], dim=0)   # tpv_wz
-            ]
-        else:
-            tpv_queries = self.tpv_head(img_feats, batch_data_samples)
+        tpv_queries = self.tpv_head(img_feats, batch_data_samples)
         
         if hasattr(self, 'tpv_aggregator'):
             # Get point coordinates for point-wise prediction (following original eval.py)
             # In original eval.py, val_grid (each point's voxel coordinate) is passed as "points"
             # NOTE: We need point_coors (all points), NOT voxel_coors (unique voxels)
             point_coords_float = None
-            
-            # Process all samples in the batch (same as loss function)
-            # IMPORTANT: Ensure all samples have point_coords, even if empty
-            point_coords_list = []
-            num_points_per_sample = []  # Track actual number of points per sample
-            
-            # First pass: collect all point_coords
-            for data_sample in batch_data_samples:
+            if len(batch_data_samples) > 0:
+                data_sample = batch_data_samples[0]
                 point_coords = None
                 
                 # Get point_coors - these are voxel coordinates for EACH point
@@ -419,75 +318,25 @@ class TPVFormer(Base3DSegmentor):
                         point_coords = gt_pts_seg.point_coors
                 
                 if point_coords is not None:
-                    # Convert to float tensor
+                    # Convert to float tensor for model forward (like val_grid_float in original)
                     if isinstance(point_coords, torch.Tensor):
-                        point_coords = point_coords.float()
+                        point_coords_float = point_coords.float()
                     else:
-                        point_coords = torch.from_numpy(point_coords).float()
+                        point_coords_float = torch.from_numpy(point_coords).float()
                     
-                    # Move to correct device  
-                    point_coords = point_coords.to(img_feats[0].device)
-                    point_coords_list.append(point_coords)
-                    num_points_per_sample.append(point_coords.size(0))
-                else:
-                    # Create empty tensor for samples without points
-                    empty_coords = torch.zeros(0, 3, device=img_feats[0].device, dtype=torch.float32)
-                    point_coords_list.append(empty_coords)
-                    num_points_per_sample.append(0)
-            
-            # Forward through aggregator
-            # IMPORTANT: Always process samples individually when batch_size > 1 to avoid padding issues
-            use_individual_processing = (len(batch_data_samples) > 1 and 
-                                        len(num_points_per_sample) == len(batch_data_samples) and
-                                        len(point_coords_list) == len(batch_data_samples))
-            
-            if use_individual_processing:
-                # Process samples individually to avoid padding affecting predictions
-                outputs_vox_list = []
-                outputs_pts_list = []
-                
-                for i in range(len(batch_data_samples)):
-                    # Get single sample's TPV features
-                    tpv_queries_single = [tpv[i:i+1] for tpv in tpv_queries]
+                    # Move to correct device
+                    point_coords_float = point_coords_float.to(img_feats[0].device)
                     
-                    # Get single sample's point coords (no padding needed)
-                    if num_points_per_sample[i] > 0:
-                        point_coords_single = point_coords_list[i].unsqueeze(0)  # (1, N_i, 3)
-                    else:
-                        point_coords_single = None
+                    # Add batch dimension if needed (assuming batch_size=1)
+                    if point_coords_float.dim() == 2:
+                        point_coords_float = point_coords_float.unsqueeze(0)
                     
-                    # Forward single sample
-                    output_single = self.tpv_aggregator(tpv_queries_single, point_coords_single)
-                    
-                    if isinstance(output_single, tuple):
-                        outputs_vox_list.append(output_single[0])
-                        outputs_pts_list.append(output_single[1])
-                    else:
-                        outputs_vox_list.append(output_single)
-                
-                # Concatenate results
-                if outputs_pts_list:
-                    # Stack voxel outputs
-                    logits_vox = torch.cat(outputs_vox_list, dim=0)
-                    # Points have different lengths, keep as list for now
-                    outputs = (logits_vox, outputs_pts_list)
-                else:
-                    outputs = torch.cat(outputs_vox_list, dim=0)
-            else:
-                # Batch processing (batch_size=1 or when individual processing not needed)
-                # Need to pad point_coords for batch processing
-                point_coords_float = None
-                if point_coords_list and max(num_points_per_sample) > 0:
-                    max_points = max(num_points_per_sample)
-                    B = len(point_coords_list)
-                    point_coords_float = torch.zeros(B, max_points, 3,
-                                                      device=point_coords_list[0].device,
-                                                      dtype=point_coords_list[0].dtype)
-                    for i, coords in enumerate(point_coords_list):
-                        if coords.size(0) > 0:
-                            point_coords_float[i, :coords.size(0)] = coords
-                
-                outputs = self.tpv_aggregator(tpv_queries, point_coords_float)
+                    # print(f"[DEBUG TPVFormer.predict] point_coords_float shape: {point_coords_float.shape}, min: {point_coords_float.min()}, max: {point_coords_float.max()}")
+
+            # breakpoint()
+   
+            # Forward through aggregator (returns tuple if point_coords, single tensor if not)
+            outputs = self.tpv_aggregator(tpv_queries, point_coords_float)
             
             # Check if we should use occ3d format (STCOcc compatible)
             use_occ3d_format = (self.dataset_name == 'occ3d')
@@ -539,29 +388,13 @@ class TPVFormer(Base3DSegmentor):
                 if isinstance(outputs, tuple):
                     # (logits_vox, logits_pts) - following original implementation
                     logits_vox, logits_pts = outputs
-                    
-                    # Check if logits_pts is a list (from individual processing)
-                    logits_pts_is_list = isinstance(logits_pts, list)
-                    
                     for i, data_sample in enumerate(batch_data_samples):
                         # Store both voxel and point predictions (logits)
                         data_sample.pred_logits_vox = logits_vox[i]  # (C, W, H, Z)
-                        
-                        # Store point predictions
-                        if logits_pts_is_list:
-                            # Already processed individually, no padding to remove
-                            if i < len(logits_pts):
-                                data_sample.pred_logits_pts = logits_pts[i].squeeze(0)  # Remove batch dim: (C, N, 1, 1)
-                        else:
-                            # Padded batch, need to truncate
-                            if i < len(num_points_per_sample) and num_points_per_sample[i] > 0:
-                                n_pts = num_points_per_sample[i]
-                                data_sample.pred_logits_pts = logits_pts[i, :, :n_pts, :, :]  # (C, N_actual, 1, 1)
-                                data_sample.num_points = n_pts
-                            else:
-                                data_sample.pred_logits_pts = logits_pts[i]  # (C, N, 1, 1)
+                        data_sample.pred_logits_pts = logits_pts[i]  # (C, N, 1, 1)
                         
                         # Also store argmax results for metrics
+                        # Following original eval.py: predict_labels_vox = torch.argmax(predict_labels_vox, dim=1)
                         pred_sem_seg = torch.argmax(logits_vox[i], dim=0)  # (W, H, Z)
                         data_sample.pred_occ_sem_seg = pred_sem_seg
                 else:

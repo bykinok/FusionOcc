@@ -109,13 +109,6 @@ class OccupancyMetric(BaseMetric):
                 pred_pts = torch.argmax(pred_logits_pts.squeeze(-1).squeeze(-1), dim=0).numpy()
                 gt_pts = gt_pts_labels.squeeze() if gt_pts_labels.ndim > 1 else gt_pts_labels
                 
-                # Ensure pred_pts and gt_pts have the same length
-                # (in case of padding, truncate to actual number of points)
-                min_len = min(len(pred_pts), len(gt_pts))
-                if len(pred_pts) != len(gt_pts):
-                    pred_pts = pred_pts[:min_len]
-                    gt_pts = gt_pts[:min_len]
-                
                 self._update_confusion_matrix(pred_pts, gt_pts, self.confusion_matrix_pts)
             
             # Voxel-wise evaluation (sample voxel predictions at point locations)
@@ -138,12 +131,6 @@ class OccupancyMetric(BaseMetric):
                 # Sample voxel predictions at point locations
                 pred_vox_at_pts = pred_vox_full[voxel_coords_int[:, 0], voxel_coords_int[:, 1], voxel_coords_int[:, 2]].numpy()
                 gt_pts = gt_pts_labels.squeeze() if gt_pts_labels.ndim > 1 else gt_pts_labels
-                
-                # Ensure pred_vox_at_pts and gt_pts have the same length
-                min_len = min(len(pred_vox_at_pts), len(gt_pts))
-                if len(pred_vox_at_pts) != len(gt_pts):
-                    pred_vox_at_pts = pred_vox_at_pts[:min_len]
-                    gt_pts = gt_pts[:min_len]
                 
                 self._update_confusion_matrix(pred_vox_at_pts, gt_pts, self.confusion_matrix_vox)
     
