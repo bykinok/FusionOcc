@@ -310,23 +310,48 @@ class BEVFormerOcc(MVXTwoStageDetector):
             dict: Losses of different branches.
         """
         
-        # After optimized collate_fn, img is already [B, queue_length, N_cams, C, H, W]
-        # and img_metas is already unwrapped list. Only handle dimension checks.
+        # CRITICAL: Handle img input format for train mode
+        # In train mode, img might come as a list containing DataContainer
+        if isinstance(img, list) and len(img) > 0:
+            # Unwrap DataContainer if present
+            if hasattr(img[0], 'data'):
+                img = img[0].data
+            else:
+                # img is a list of tensors - stack them
+                img = torch.stack(img, dim=0) if len(img) > 1 else img[0]
         
-        # Ensure correct dimensions
+        # CRITICAL: Handle different img formats
+        # If img is 5D [queue_length, N_cams, C, H, W], add batch dimension
+        # Expected format: [B, queue_length, N_cams, C, H, W]
         if img.dim() == 5:
-            # Missing batch dimension: [queue_length, N_cams, C, H, W]
+            # Add batch dimension: [queue_length, N_cams, C, H, W] -> [1, queue_length, N_cams, C, H, W]
             img = img.unsqueeze(0)
-        elif img.dim() == 4:
-            # Missing both batch and queue: [N_cams, C, H, W]
-            img = img.unsqueeze(0).unsqueeze(0)
         
+        # CRITICAL: Unwrap img_metas from DataContainer if needed
+        if isinstance(img_metas, list) and len(img_metas) > 0 and hasattr(img_metas[0], 'data'):
+            img_metas = img_metas[0].data
+        
+        # CRITICAL: Convert img_metas from dict to list format to match original BEVFormer
+        # Original format: img_metas is a list with single dict: [dict]
+        # Current format: img_metas might be a dict
+        if isinstance(img_metas, dict):
+            # Convert dict to list format: [dict]
+            img_metas = [img_metas]
+        
+        # breakpoint()
+
+        # img should now be a tensor [B, queue_length, N_cams, C, H, W]
         len_queue = img.size(1)
         prev_img = img[:, :-1, ...]
         img = img[:, -1, ...]
 
-        # Use img_metas directly without deepcopy for prev_bev (obtain_history_bev doesn't modify it)
-        prev_bev = self.obtain_history_bev(prev_img, img_metas)
+        prev_img_metas = copy.deepcopy(img_metas)
+        prev_bev = self.obtain_history_bev(prev_img, prev_img_metas)
+        
+        # Ensure prev_bev is on the same device as the model
+        if prev_bev is not None and hasattr(self.pts_bbox_head, 'transformer'):
+            device = next(self.pts_bbox_head.transformer.parameters()).device
+            prev_bev = prev_bev.to(device)
 
         # CRITICAL: Follow original BEVFormer's img_metas indexing
         # img_metas is a list of lists: [[meta0_cam0, meta0_cam1, ...], [meta1_cam0, meta1_cam1, ...], ...]
@@ -336,35 +361,10 @@ class BEVFormerOcc(MVXTwoStageDetector):
             prev_bev = None
         img_feats = self.extract_feat(img=img, img_metas=img_metas)
         
-        # After optimized collate_fn, voxel_semantics and mask_camera are already
-        # unwrapped and stacked as [B, H, W, D] tensors. Only handle edge cases.
-        if isinstance(voxel_semantics, list):
-            # Fallback: if collate_fn couldn't stack (shouldn't happen normally)
-            voxel_semantics_list = []
-            for item in voxel_semantics:
-                if isinstance(item, np.ndarray):
-                    item = torch.from_numpy(item)
-                elif not isinstance(item, torch.Tensor):
-                    item = torch.from_numpy(np.asarray(item))
-                voxel_semantics_list.append(item)
-            voxel_semantics = torch.stack(voxel_semantics_list, dim=0)
-        elif voxel_semantics.dim() == 3:
-            # Add batch dimension if missing
-            voxel_semantics = voxel_semantics.unsqueeze(0)
-        
-        if isinstance(mask_camera, list):
-            # Fallback: if collate_fn couldn't stack (shouldn't happen normally)
-            mask_camera_list = []
-            for item in mask_camera:
-                if isinstance(item, np.ndarray):
-                    item = torch.from_numpy(item)
-                elif not isinstance(item, torch.Tensor):
-                    item = torch.from_numpy(np.asarray(item))
-                mask_camera_list.append(item)
-            mask_camera = torch.stack(mask_camera_list, dim=0)
-        elif mask_camera.dim() == 3:
-            # Add batch dimension if missing
-            mask_camera = mask_camera.unsqueeze(0)
+        # Ensure img_feats are on the same device as the model
+        if len(img_feats) > 0 and hasattr(self.pts_bbox_head, 'transformer'):
+            device = next(self.pts_bbox_head.transformer.parameters()).device
+            img_feats = [feat.to(device) for feat in img_feats]
         
         losses = dict()
         losses_pts = self.forward_pts_train(img_feats, gt_bboxes_3d,

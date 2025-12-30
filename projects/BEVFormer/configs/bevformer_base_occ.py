@@ -24,7 +24,7 @@ default_hooks = dict(
     timer=dict(type='IterTimerHook'),
     logger=dict(type='LoggerHook', interval=50),
     param_scheduler=dict(type='ParamSchedulerHook'),
-    checkpoint=dict(type='CheckpointHook', interval=1),
+    checkpoint=dict(type='CheckpointHook', interval=1, max_keep_ckpts=3),
     sampler_seed=dict(type='DistSamplerSeedHook'),
 )
 
@@ -195,8 +195,8 @@ test_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=4,#1,
-    workers_per_gpu=8,#4,
+    samples_per_gpu=1,
+    workers_per_gpu=4,  # 원본과 동일하게 4로 설정
     train=dict(
         type=dataset_type,
         data_root=data_root,
@@ -249,9 +249,6 @@ evaluation = dict(interval=1, pipeline=test_pipeline)
 
 runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
 
-# Import custom collate function from datasets module
-from projects.BEVFormer.datasets import bevformer_collate_fn
-
 # Convert old-style data config to new-style dataloader config for mmengine
 # 원본 BEVFormer와 동일한 설정 사용 (persistent_workers, prefetch_factor 제거)
 # CRITICAL: Use DistributedGroupSampler to match original BEVFormer sampling order
@@ -259,7 +256,6 @@ train_dataloader = dict(
     batch_size=data['samples_per_gpu'],
     num_workers=data['workers_per_gpu'],
     persistent_workers=True, #False,
-    collate_fn=bevformer_collate_fn,  # Add custom collate function
     sampler=dict(
         type='DistributedGroupSampler',
         # shuffle=False
@@ -275,20 +271,19 @@ val_dataloader = dict(
     batch_size=data['samples_per_gpu'],
     num_workers=data['workers_per_gpu'],  # Changed from 4 to 0 to match CONet and avoid multiprocessing issues
     persistent_workers=True, #False,
-    collate_fn=bevformer_collate_fn,  # Add custom collate function
     sampler=dict(
         type='DistributedSampler',
         shuffle=False,
         # samples_per_gpu=1,  # validation batch size
         # seed=0  # 원본과 동일한 seed 사용
     ),
+    # Removed collate_fn to use default behavior like CONet
     dataset=data['val']
 )
 
 test_dataloader = dict(
     batch_size=data['samples_per_gpu'],
     num_workers=data['workers_per_gpu'],  # Changed from 4 to 0 to match CONet and avoid multiprocessing issues
-    collate_fn=bevformer_collate_fn,  # Add custom collate function
     persistent_workers=True, #False,
     sampler=dict(
         type='DistributedSampler',

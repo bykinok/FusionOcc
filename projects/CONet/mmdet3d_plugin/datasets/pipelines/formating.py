@@ -46,13 +46,30 @@ class OccDefaultFormatBundle3D(BaseTransform):
             results['gt_vel'] = to_tensor(results['gt_vel'])
 
         import torch
-        # Note: Batch dimension will be added by the custom collate function (conet_collate_fn)
-        # We keep img_inputs as-is here without adding batch dimension
-        # The collate function will properly stack tensors across the batch
+        # CRITICAL: Add batch dimension to img_inputs to match original CONet behavior
+        # Original uses DataContainer with stack=True, which adds batch dimension during collate
+        # In mmengine, we add it directly here since mmengine doesn't use DataContainer
         if 'img_inputs' in results:
-            # Convert img_inputs to list if it's a tuple for easier handling
-            if isinstance(results['img_inputs'], tuple):
-                results['img_inputs'] = list(results['img_inputs'])
+            # Handle both list and tuple (img_inputs can be either)
+            if isinstance(results['img_inputs'], (list, tuple)):
+                # Process and convert to list (tuple is immutable)
+                processed_inputs = []
+                for item in results['img_inputs']:
+                    if isinstance(item, torch.Tensor) and item.dim() > 0:
+                        # Add batch dimension to tensors
+                        processed_inputs.append(item.unsqueeze(0))
+                    elif isinstance(item, torch.Size):
+                        # Convert torch.Size to list of tensors (matching original behavior)
+                        processed_inputs.append([torch.tensor([dim]) for dim in item])
+                    else:
+                        # Keep other items as is
+                        processed_inputs.append(item)
+                
+                # Keep original type (list or tuple)
+                if isinstance(results['img_inputs'], tuple):
+                    results['img_inputs'] = tuple(processed_inputs)
+                else:
+                    results['img_inputs'] = processed_inputs
                 
         return results
 

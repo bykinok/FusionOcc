@@ -129,7 +129,7 @@ test_pipeline = [
 
 # New style data loaders
 train_dataloader = dict(
-    batch_size=1,
+    batch_size=1,  # 원본과 동일. GPU 메모리 충분하면 2로 증가 가능
     num_workers=4,
     persistent_workers=True,
     sampler=dict(

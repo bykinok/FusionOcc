@@ -77,7 +77,14 @@ voxel_out_indices = (0, 1, 2, 3)
 # Model configuration
 model = dict(
     type='OccNet',
-    data_preprocessor=None,  # Disable data_preprocessor to preserve img_inputs and gt_occ
+    data_preprocessor=dict(
+        type='Det3DDataPreprocessor',
+        voxel=True,
+        voxel_layer=dict(
+            max_num_points=10,
+            point_cloud_range=point_cloud_range,
+            voxel_size=[0.1, 0.1, 0.1],
+            max_voxels=(90000, 120000))),
     loss_norm=True,
     # nuScenes-Occupancy configuration
     num_cls=num_cls,  # Pass num_cls to model for correct class handling
@@ -247,7 +254,6 @@ train_dataloader = dict(
     batch_size=1,
     num_workers=4,
     persistent_workers=True,
-    collate_fn=dict(type='conet_collate_fn'),  # Custom collate function registered in FUNCTIONS registry
     sampler=dict(type='DistributedGroupSampler', seed=0),
     dataset=dict(
         type=dataset_type,
@@ -269,7 +275,6 @@ val_dataloader = dict(
     num_workers=4,
     persistent_workers=True,
     drop_last=False,
-    collate_fn=dict(type='conet_collate_fn'),  # Custom collate function registered in FUNCTIONS registry
     sampler=dict(type='DistributedSampler', shuffle=False, seed=0),
     dataset=dict(
         type=dataset_type,
@@ -321,7 +326,7 @@ param_scheduler = [
 train_cfg = dict(
     type='EpochBasedTrainLoop',
     max_epochs=15,
-    val_interval=16)
+    val_interval=1)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 

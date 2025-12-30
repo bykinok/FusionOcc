@@ -175,29 +175,11 @@ class OccNet(BaseModel):
         import torch
         # Note: record_time is not used in re-implementation, but kept for compatibility
         
-        # Handle both stacked tensor and list inputs
-        imgs = img[0]
-        img_enc_feats = self.image_encoder(imgs)
+        img_enc_feats = self.image_encoder(img[0])
         x = img_enc_feats['x']
         img_feats = img_enc_feats['img_feats']
 
-        # Extract geometric transformation parameters
-        # These might be stacked tensors or lists depending on collation
         rots, trans, intrins, post_rots, post_trans, bda = img[1:7]
-        
-        # Convert lists to stacked tensors if needed
-        if isinstance(rots, list):
-            rots = torch.stack(rots, dim=0)
-        if isinstance(trans, list):
-            trans = torch.stack(trans, dim=0)
-        if isinstance(intrins, list):
-            intrins = torch.stack(intrins, dim=0)
-        if isinstance(post_rots, list):
-            post_rots = torch.stack(post_rots, dim=0)
-        if isinstance(post_trans, list):
-            post_trans = torch.stack(post_trans, dim=0)
-        if isinstance(bda, list):
-            bda = torch.stack(bda, dim=0)
         
         mlp_input = self.img_view_transformer.get_mlp_input(rots, trans, intrins, post_rots, post_trans, bda)
         geo_inputs = [rots, trans, intrins, post_rots, post_trans, bda, mlp_input]
@@ -251,52 +233,24 @@ class OccNet(BaseModel):
         return x_3d
     
     def extract_pts_feat(self, pts):
-        """Extract point cloud features with proper batch handling."""
+        """Extract point cloud features (copied from original CONet_ori)."""
         # For camera-only mode, point encoders may not be configured
         if self.pts_voxel_encoder is None or self.pts_middle_encoder is None:
             return None, None
         
         # Handle case where pts is a list (from DataLoader collation)
         if isinstance(pts, list):
-            batch_size = len(pts)
-            
-            if batch_size == 1:
-                # Single sample case
+            if len(pts) == 1:
                 pts = pts[0]
-                voxels, num_points, coors = self.voxelize(pts)
-                voxel_features = self.pts_voxel_encoder(voxels, num_points, coors)
-                batch_size = coors[-1, 0] + 1
-                pts_enc_feats = self.pts_middle_encoder(voxel_features, coors, batch_size)
             else:
-                # Multiple samples case - process each and combine
-                all_voxels = []
-                all_num_points = []
-                all_coors = []
-                
-                for batch_idx, pts_single in enumerate(pts):
-                    voxels, num_points, coors = self.voxelize(pts_single)
-                    
-                    # Set batch index for all voxels from this sample
-                    coors[:, 0] = batch_idx
-                    
-                    all_voxels.append(voxels)
-                    all_num_points.append(num_points)
-                    all_coors.append(coors)
-                
-                # Concatenate all batches
-                voxels = torch.cat(all_voxels, dim=0)
-                num_points = torch.cat(all_num_points, dim=0)
-                coors = torch.cat(all_coors, dim=0)
-                
-                # Process all batches together
-                voxel_features = self.pts_voxel_encoder(voxels, num_points, coors)
-                pts_enc_feats = self.pts_middle_encoder(voxel_features, coors, batch_size)
-        else:
-            # Single point cloud (not a list)
-            voxels, num_points, coors = self.voxelize(pts)
-            voxel_features = self.pts_voxel_encoder(voxels, num_points, coors)
-            batch_size = coors[-1, 0] + 1
-            pts_enc_feats = self.pts_middle_encoder(voxel_features, coors, batch_size)
+                # For batch_size > 1, need to handle differently
+                # For now, just use the first sample
+                pts = pts[0]
+        
+        voxels, num_points, coors = self.voxelize(pts)
+        voxel_features = self.pts_voxel_encoder(voxels, num_points, coors)
+        batch_size = coors[-1, 0] + 1
+        pts_enc_feats = self.pts_middle_encoder(voxel_features, coors, batch_size)
         
         pts_feats = pts_enc_feats['pts_feats']
         return pts_enc_feats['x'], pts_feats
@@ -464,13 +418,10 @@ class OccNet(BaseModel):
         """Override forward_train to ensure correct loss calculation for all modalities.
         
         This method handles camera-only, LiDAR-only, and multimodal configurations.
-        img_inputs is now properly batched by conet_collate_fn:
-        - img_inputs[0]: imgs [B, N_cams, C, H, W]
-        - img_inputs[1:7]: rots, trans, intrins, post_rots, post_trans, bda_rot [B, ...]
-        - img_inputs[8]: gt_depths [B, ...]
         """
         
         # breakpoint()
+
         # Extract features based on available modalities
         voxel_feats, img_feats, pts_feats, depth = self.extract_feat(
             points=points, img=img_inputs, img_metas=img_metas)
@@ -481,29 +432,22 @@ class OccNet(BaseModel):
         if not self.disable_loss_depth and depth is not None and img_inputs is not None:
             # Extract depth ground truth from img_inputs
             # img_inputs structure: (imgs, rots, trans, intrins, post_rots, post_trans, bda_rot, img_shape, gt_depths, sensor2sensors)
-            # Index 8 or -2 is gt_depths
+            # Index -2 is gt_depths
             if isinstance(img_inputs, (list, tuple)) and len(img_inputs) >= 9:
-                depth_gt = img_inputs[8]  # gt_depths
-                
-                # depth is in [B*N_cams, D, H, W] format (flattened batch and cameras)
-                # depth_gt needs to be in [B, N_cams, H, W] format for generate_guassian_depth_target
-                # which internally does flatten(0, 1) to get [B*N_cams, H, W]
-                
-                # If depth_gt is already [B*N_cams, H, W], reshape to [B, N_cams, H, W]
-                if depth_gt.dim() == 3:
-                    # depth_gt is [B*N_cams, H, W], need to reshape to [B, N_cams, H, W]
-                    B_times_N = depth_gt.shape[0]
-                    # Assume N_cams = 6 (standard for nuScenes)
-                    N_cams = 6
-                    B = B_times_N // N_cams
-                    depth_gt = depth_gt.reshape(B, N_cams, *depth_gt.shape[1:])
-                
+                depth_gt = img_inputs[-2]  # or img_inputs[8] for gt_depths
                 losses['loss_depth'] = self.img_view_transformer.get_depth_loss(depth_gt, depth)
         
         # Get predictions from occupancy head using processed voxel_feats
-        # Extract transform from img_inputs (already properly batched)
+        # Extract transform, handling DataLoader collation (tuple wrapping)
         if img_inputs is not None:
-            transform = img_inputs[1:8]  # [rots, trans, intrins, post_rots, post_trans, bda_rot, img_shape]
+            transform = []
+            for i in range(1, min(8, len(img_inputs))):
+                item = img_inputs[i]
+                # Handle tuple wrapping from DataLoader collation
+                if isinstance(item, tuple) and len(item) == 1:
+                    transform.append(item[0])
+                else:
+                    transform.append(item)
         else:
             transform = None
         
@@ -726,21 +670,6 @@ class OccNet(BaseModel):
                 if key in kwargs and kwargs[key] is not None:
                     kwargs['gt_occ'] = kwargs[key]
                     break
-        
-        # Check for img_inputs directly at top level (from conet_collate_fn)
-        if 'img_inputs' not in kwargs or kwargs['img_inputs'] is None:
-            # Try alternative keys at top level
-            for key in ['img', 'imgs', 'images']:
-                if key in kwargs and kwargs[key] is not None:
-                    kwargs['img_inputs'] = kwargs[key]
-                    break
-        
-        # Handle img_metas from data_samples if it's a list of dicts
-        if 'img_metas' not in kwargs or kwargs['img_metas'] is None:
-            if 'data_samples' in kwargs and isinstance(kwargs['data_samples'], list):
-                # Check if it's a list of dicts (from conet_collate_fn)
-                if len(kwargs['data_samples']) > 0 and isinstance(kwargs['data_samples'][0], dict):
-                    kwargs['img_metas'] = kwargs['data_samples']
                     
         return kwargs
     
