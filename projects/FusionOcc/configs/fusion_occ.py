@@ -284,7 +284,7 @@ param_scheduler = [
 # MMEngine Training/Validation/Test Configuration
 # 원본 설정: evaluation = dict(interval=1) → val_interval=1 (매 epoch마다 검증)
 # val_interval을 0으로 설정하면 ZeroDivisionError 발생 (self._epoch % val_interval)
-train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=24, val_interval=1)
+train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=24, val_interval=999999)#1)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
@@ -404,7 +404,7 @@ default_hooks = dict(
     timer=dict(type='IterTimerHook'),
     logger=dict(type='LoggerHook', interval=50),
     param_scheduler=dict(type='ParamSchedulerHook'),
-    checkpoint=dict(type='CheckpointHook', interval=1, max_keep_ckpts=3),  # Save checkpoint every epoch
+    checkpoint=dict(type='CheckpointHook', interval=1),#, max_keep_ckpts=3),  # Save checkpoint every epoch
     sampler_seed=dict(type='DistSamplerSeedHook'),
     visualization=dict(type='Det3DVisualizationHook'))
 

@@ -775,7 +775,7 @@ class FusionOCC(FusionDepthSeg):
                 elif isinstance(segs[0], np.ndarray):
                     segs = torch.from_numpy(np.stack(segs, axis=0)).to(device)
         
-        breakpoint()
+        # breakpoint()
 
         lidar_feat, x_list, x_sparse_out = self.lidar_encoder(points)
         lidar_feat = lidar_feat.permute(0, 1, 2, 4, 3).contiguous()
