@@ -216,8 +216,8 @@ test_batch_size = 1
 # MMEngine 2.x: Dataloader configuration
 train_dataloader = dict(
     batch_size=train_batch_size,
-    num_workers=0,#20,
-    persistent_workers=False,#True,
+    num_workers=4,
+    persistent_workers=True,
     sampler=dict(type='DistributedGroupSampler', samples_per_gpu=train_batch_size, seed=10),
     collate_fn=collate,  # Add custom collate function
     dataset=dict(
@@ -239,7 +239,7 @@ train_dataloader = dict(
 
 val_dataloader = dict(
     batch_size=val_batch_size,
-    num_workers=20,
+    num_workers=4,
     persistent_workers=True,
     drop_last=False,
     sampler=dict(type='DistributedSampler', shuffle=False, seed=10),
@@ -263,7 +263,7 @@ val_dataloader = dict(
 
 test_dataloader = dict(
     batch_size=test_batch_size,
-    num_workers=20,
+    num_workers=4,
     persistent_workers=True,
     drop_last=False,
     sampler=dict(type='DistributedSampler', shuffle=False, seed=10),
