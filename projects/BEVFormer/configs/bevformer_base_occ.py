@@ -327,7 +327,7 @@ optim_wrapper = dict(
 train_cfg = dict(
     by_epoch=True,
     max_epochs=total_epochs,
-    val_interval=1  # Validate every epoch
+    val_interval=999999 # No validation
 )
 
 # Enable val_cfg and test_cfg

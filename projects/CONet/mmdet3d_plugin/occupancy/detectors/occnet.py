@@ -10,6 +10,38 @@ from mmdet3d.registry import MODELS
 import numpy as np
 import time
 import copy
+import subprocess
+import sys
+
+# Check and install spconv-cu113 if not installed
+def check_and_install_spconv_cu113():
+    """Check if spconv-cu113 is installed and install it if not found."""
+    try:
+        result = subprocess.run(
+            [sys.executable, '-m', 'pip', 'show', 'spconv-cu113'],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        if result.returncode != 0:
+            print("spconv-cu113이 설치되어 있지 않습니다. 설치 중...")
+            install_result = subprocess.run(
+                [sys.executable, '-m', 'pip', 'install', 'spconv-cu113'],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if install_result.returncode == 0:
+                print("spconv-cu113이 성공적으로 설치되었습니다.")
+            else:
+                print(f"spconv-cu113 설치 중 오류 발생: {install_result.stderr}")
+        else:
+            print("spconv-cu113이 이미 설치되어 있습니다.")
+    except Exception as e:
+        print(f"spconv-cu113 확인 중 오류 발생: {e}")
+
+# Execute check on module import
+check_and_install_spconv_cu113()
 
 @DETECTORS.register_module(force=True)
 class OccNet(BaseModel):
