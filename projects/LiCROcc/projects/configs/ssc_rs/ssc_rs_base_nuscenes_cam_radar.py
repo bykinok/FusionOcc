@@ -1,12 +1,14 @@
+# MMEngine 2.x Style Configuration
 work_dir = './work_dirs/ssc_rs_base_nuscenes_cam_radar'
-_base_ = [
-    '../_base_/default_runtime.py'
-]
+
 # Custom imports for mmdet3d 2.x (mmengine)
 custom_imports = dict(
     imports=['projects.LiCROcc.projects.mmdet3d_plugin'],
     allow_failed_imports=False
 )
+
+# Set default scope
+default_scope = 'mmdet3d'
 
 _sweeps_num_ = 10
 _temporal_ = []
@@ -135,87 +137,180 @@ model = dict(
 )
 
 
-load_from = 'pre_ckpt/bevdet-r50-4d-depth-cbgs.pth' # from bevdet: https://github.com/HuangJunJie2017/BEVDet?tab=readme-ov-file
+# Import custom collate function directly (no functools.partial needed)
+from projects.LiCROcc.projects.mmdet3d_plugin.datasets.builder import collate
 
+# Dataset configuration
 dataset_type = 'nuScenesDataset'
 data_root = './data/nuscenes/'
 occ_root = './data/nuScenes-Occupancy'
-file_client_args = dict(backend='disk')
 
-data = dict(
-   samples_per_gpu=1,
-   workers_per_gpu=24,
-   train=dict(
-       type=dataset_type,
-       split = "train",
-       test_mode=False,
-       data_root=data_root,
-       occ_root=occ_root,
-       lims=lims,
-       sizes=sizes,
-       temporal = _temporal_,
-       sweeps_num=_sweeps_num_,
-       augmentation=True,
-       shuffle_index=True,
-       data_config=data_config,
-       grid_config=grid_config,
-       ),
-   val=dict(
-       type=dataset_type,
-       split = "val",
-       test_mode=True,
-       data_root=data_root,
-       occ_root=occ_root,
-       lims=lims,
-       sizes=sizes,
-       temporal = _temporal_,
-       sweeps_num=_sweeps_num_,
-       augmentation=False,
-       shuffle_index=False,
-       data_config=data_config,
-       grid_config=grid_config,
+train_batch_size = 1
+val_batch_size = 1
+test_batch_size = 1
 
-       ),
-   test=dict(
-       type=dataset_type,
-       split = "val",
-       test_mode=True,
-       data_root=data_root,
-       occ_root=occ_root,
-       lims=lims,
-       sizes=sizes,
-       temporal = _temporal_,
-       sweeps_num=_sweeps_num_,
-       augmentation=False,
-       shuffle_index=False,
-       data_config=data_config,
-       grid_config=grid_config,
-        ),
-   shuffler_sampler=dict(type='DistributedGroupSampler'),
-   nonshuffler_sampler=dict(type='DistributedSampler')
+# MMEngine 2.x: Dataloader configuration
+train_dataloader = dict(
+    batch_size=train_batch_size,
+    num_workers=4,
+    persistent_workers=True,
+    sampler=dict(type='DistributedGroupSampler', samples_per_gpu=train_batch_size, seed=10),
+    collate_fn=collate,  # Add custom collate function
+    dataset=dict(
+        type=dataset_type,
+        split="train",
+        test_mode=False,
+        data_root=data_root,
+        occ_root=occ_root,
+        lims=lims,
+        sizes=sizes,
+        temporal=_temporal_,
+        sweeps_num=_sweeps_num_,
+        augmentation=True,
+        shuffle_index=True,
+        data_config=data_config,
+        grid_config=grid_config,
+    )
 )
-optimizer = dict(
-   type='AdamW',
-   lr=2e-4,
-   weight_decay=0.01)
 
-optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
-lr_config = dict(
-   policy='CosineAnnealing',
-   warmup='linear',
-   warmup_iters=500,
-   warmup_ratio=1.0 / 3,
-   min_lr_ratio=1e-3)
-total_epochs = 24
-evaluation = dict(interval=1)
+val_dataloader = dict(
+    batch_size=val_batch_size,
+    num_workers=4,
+    persistent_workers=True,
+    drop_last=False,
+    sampler=dict(type='DistributedSampler', shuffle=False, seed=10),
+    collate_fn=collate,  # Add custom collate function
+    dataset=dict(
+        type=dataset_type,
+        split="val",
+        test_mode=True,
+        data_root=data_root,
+        occ_root=occ_root,
+        lims=lims,
+        sizes=sizes,
+        temporal=_temporal_,
+        sweeps_num=_sweeps_num_,
+        augmentation=False,
+        shuffle_index=False,
+        data_config=data_config,
+        grid_config=grid_config,
+    )
+)
 
-runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
-log_config = dict(
-   interval=50,
-   hooks=[
-       dict(type='TextLoggerHook'),
-       dict(type='TensorboardLoggerHook')
-   ])
+test_dataloader = dict(
+    batch_size=test_batch_size,
+    num_workers=4,
+    persistent_workers=True,
+    drop_last=False,
+    sampler=dict(type='DistributedSampler', shuffle=False, seed=10),
+    collate_fn=collate,  # Add custom collate function
+    dataset=dict(
+        type=dataset_type,
+        split="val",
+        test_mode=True,
+        data_root=data_root,
+        occ_root=occ_root,
+        lims=lims,
+        sizes=sizes,
+        temporal=_temporal_,
+        sweeps_num=_sweeps_num_,
+        augmentation=False,
+        shuffle_index=False,
+        data_config=data_config,
+        grid_config=grid_config,
+    )
+)
 
-# checkpoint_config = None
-checkpoint_config = dict(interval=1)
+# MMEngine 2.x: Evaluator configuration
+# Use SSCEvaluator for metric calculation
+val_evaluator = [
+    dict(
+        type='SSCEvaluator',
+        # save_results=True,
+        # out_file_path='val_results.pkl'
+    )
+]
+test_evaluator = [
+    dict(
+        type='SSCEvaluator',
+        # save_results=True,
+        # out_file_path='test_results.pkl'
+    )
+]
+
+# MMEngine 2.x: Optimizer wrapper
+optim_wrapper = dict(
+    type='OptimWrapper',
+    optimizer=dict(
+        type='AdamW',
+        lr=2e-4,
+        weight_decay=0.01
+    ),
+    clip_grad=dict(max_norm=35, norm_type=2)
+)
+
+# MMEngine 2.x: Parameter scheduler
+param_scheduler = [
+    dict(
+        type='LinearLR',
+        start_factor=1.0 / 3,
+        by_epoch=False,
+        begin=0,
+        end=500
+    ),
+    dict(
+        type='CosineAnnealingLR',
+        by_epoch=True,
+        begin=0,
+        end=24,
+        eta_min=2e-7  # lr * min_lr_ratio
+    )
+]
+
+# MMEngine 2.x: Training configuration
+train_cfg = dict(
+    type='EpochBasedTrainLoop',
+    max_epochs=24,
+    val_interval=1
+)
+
+val_cfg = dict(type='ValLoop')
+test_cfg = dict(type='TestLoop')
+
+# MMEngine 2.x: Default hooks
+default_hooks = dict(
+    timer=dict(type='IterTimerHook'),
+    logger=dict(type='LoggerHook', interval=50),
+    param_scheduler=dict(type='ParamSchedulerHook'),
+    checkpoint=dict(type='CheckpointHook', interval=1, save_best='auto'),
+    sampler_seed=dict(type='DistSamplerSeedHook'),
+)
+
+# Environment configuration
+env_cfg = dict(
+    cudnn_benchmark=False,
+    mp_cfg=dict(mp_start_method='fork', opencv_num_threads=0),
+    dist_cfg=dict(backend='nccl'),
+)
+
+# Logging
+log_processor = dict(type='LogProcessor', window_size=50, by_epoch=True)
+log_level = 'INFO'
+
+# Load checkpoint
+# load_from = './projects/LiCROcc/pre_ckpt/bevdet-r50-4d-depth-cbgs.pth' # from bevdet: https://github.com/HuangJunJie2017/BEVDet?tab=readme-ov-file
+load_from = './projects/LiCROcc/ckpt/ori_fusion_cam_radar_epoch_24_spconv1.pth'
+resume = False
+
+# Visualization
+vis_backends = [dict(type='LocalVisBackend')]
+visualizer = dict(
+    type='Det3DLocalVisualizer',
+    vis_backends=vis_backends,
+    name='visualizer'
+)
+
+# Sync BN
+sync_bn = 'torch'
+
+randomness = dict(seed=10, deterministic=False)
