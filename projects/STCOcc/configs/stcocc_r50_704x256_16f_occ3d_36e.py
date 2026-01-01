@@ -331,9 +331,13 @@ train_dataloader = dict(
 val_dataloader = dict(
     batch_size=1,
     num_workers=workers_per_gpu,
-    persistent_workers=False, #True,
+    persistent_workers=False,
     drop_last=False,
-    sampler=dict(type='DefaultSampler', shuffle=False),
+    # Use sampler instead of batch_sampler (MMEngine default way)
+    sampler=dict(
+        type='InfiniteGroupEachSampleInBatchSamplerEval',
+        batch_size=1,
+        seed=0),
     dataset=dict(
         type=dataset_type,
         data_root=data_root,
