@@ -331,7 +331,7 @@ train_dataloader = dict(
 val_dataloader = dict(
     batch_size=1,
     num_workers=workers_per_gpu,
-    persistent_workers=False, #True,
+    persistent_workers=True,
     drop_last=False,
     sampler=dict(type='DefaultSampler', shuffle=False),
     dataset=dict(
