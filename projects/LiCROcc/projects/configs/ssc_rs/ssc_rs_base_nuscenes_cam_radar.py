@@ -298,8 +298,8 @@ log_processor = dict(type='LogProcessor', window_size=50, by_epoch=True)
 log_level = 'INFO'
 
 # Load checkpoint
-# load_from = './projects/LiCROcc/pre_ckpt/bevdet-r50-4d-depth-cbgs.pth' # from bevdet: https://github.com/HuangJunJie2017/BEVDet?tab=readme-ov-file
-load_from = './projects/LiCROcc/ckpt/ori_fusion_cam_radar_epoch_24_spconv1.pth'
+load_from = './projects/LiCROcc/pre_ckpt/bevdet-r50-4d-depth-cbgs.pth' # from bevdet: https://github.com/HuangJunJie2017/BEVDet?tab=readme-ov-file
+# load_from = './projects/LiCROcc/ckpt/ori_fusion_cam_radar_epoch_24_spconv1.pth'
 resume = False
 
 # Visualization
