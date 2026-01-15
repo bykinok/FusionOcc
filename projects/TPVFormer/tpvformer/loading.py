@@ -636,40 +636,44 @@ class LoadOccupancy(BaseTransform):
                 return results
             
             occ_3d = np.load(occ_3d_path)
-            occ_3d_semantic = occ_3d['semantics']
+            occ_3d_semantic = occ_3d['semantics']  # Keep original labels (0-17)
             occ_3d_cam_mask = occ_3d['mask_camera']
             
-            # Process semantic labels: 0 -> 18 (others), then 18 -> 17 (empty)
-            occ_3d_semantic[occ_3d_semantic == 0] = 18  # now class 1~18, with 18:others
+            # ✅ FIX: Use semantics as-is, following BEVFormer approach
+            # Original format:
+            # - Class 0: noise/others (ignore in training)
+            # - Class 1-16: actual semantic classes
+            # - Class 17: free space (empty)
+            # This format is correct and should NOT be modified!
             
-            # Create masked version
+            # Create voxel_semantic_mask for TPVFormer loss calculation
+            # Use original semantics without any transformation
+            voxel_semantic_mask = occ_3d_semantic  # (200, 200, 16)
+            results['voxel_semantic_mask'] = voxel_semantic_mask
+            
+            # Create masked version (for visualization/debug if needed)
             occ_3d_gt_masked = occ_3d_semantic * occ_3d_cam_mask
-            occ_3d_gt_masked[occ_3d_gt_masked == 0] = 255  # invisible voxels
-            occ_3d_gt_masked[occ_3d_gt_masked == 17] = 0
-            occ_3d_gt_masked[occ_3d_gt_masked == 18] = 17
-            
             occ_3d_gt_masked = torch.from_numpy(occ_3d_gt_masked)
             idx_masked = torch.where(occ_3d_gt_masked > 0)
-            label_masked = occ_3d_gt_masked[idx_masked[0], idx_masked[1], idx_masked[2]]
-            occ_3d_masked = torch.stack([
-                idx_masked[0], idx_masked[1], idx_masked[2], label_masked
-            ], dim=1).long()
+            if len(idx_masked[0]) > 0:
+                label_masked = occ_3d_gt_masked[idx_masked[0], idx_masked[1], idx_masked[2]]
+                occ_3d_masked = torch.stack([
+                    idx_masked[0], idx_masked[1], idx_masked[2], label_masked
+                ], dim=1).long()
+            else:
+                occ_3d_masked = torch.zeros((0, 4), dtype=torch.long)
             
             # Create unmasked version
-            occ_3d_semantic[occ_3d_semantic == 17] = 0
-            occ_3d_semantic[occ_3d_semantic == 18] = 17
             occ_3d_gt = torch.from_numpy(occ_3d_semantic)
             idx = torch.where(occ_3d_gt > 0)
-            label = occ_3d_gt[idx[0], idx[1], idx[2]]
-            occ3d = torch.stack([idx[0], idx[1], idx[2], label], dim=1).long()
+            if len(idx[0]) > 0:
+                label = occ_3d_gt[idx[0], idx[1], idx[2]]
+                occ3d = torch.stack([idx[0], idx[1], idx[2], label], dim=1).long()
+            else:
+                occ3d = torch.zeros((0, 4), dtype=torch.long)
             
             results['occ_3d_masked'] = occ_3d_masked
             results['occ_3d'] = occ3d
-            
-            # Also create voxel_semantic_mask for TPVFormer loss calculation
-            # Convert occ3d (200x200x16) to dense voxel grid for loss
-            voxel_semantic_mask = occ_3d_gt.numpy()  # (200, 200, 16)
-            results['voxel_semantic_mask'] = voxel_semantic_mask
             
             # Create pts_semantic_mask from voxel_semantic_mask for point-level loss
             if 'points' in results:
