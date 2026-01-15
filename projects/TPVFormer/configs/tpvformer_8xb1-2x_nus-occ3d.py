@@ -110,8 +110,8 @@ test_pipeline = val_pipeline
 
 train_dataloader = dict(
     batch_size=1,
-    num_workers=0,#4,
-    persistent_workers=False,#True,
+    num_workers=4,
+    persistent_workers=True,
     drop_last=True,
     sampler=dict(type='DefaultSampler', shuffle=True),
     dataset=dict(
