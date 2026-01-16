@@ -40,18 +40,18 @@ class LoadOccGTFromFileCVPR2023(object):
         self.flow_gt_path = flow_gt_path
 
     def __call__(self, results):
-        # Safely access occ_gt_path, check for occ_gt_path or occ_path and provide fallback path
+        # Safely access occ_gt_path, check for occ_gt_path or occ_path
         if 'occ_gt_path' in results:
             occ_gt_path = results['occ_gt_path']
         elif 'occ_path' in results:
             occ_gt_path = results['occ_path']
         else:
-            # Provide a fallback path for occ3d dataset
-            occ_gt_path = "./data/nuscenes/occ3d"
-            # Only print this warning once per session
-            if not hasattr(self, '_fallback_warned'):
-                print(f"Warning: No occ_gt_path or occ_path found, using fallback: {occ_gt_path}")
-                self._fallback_warned = True
+            raise ValueError(
+                f"[STCOcc LoadOccGTFromFileCVPR2023] occ_gt_path not found in results!\n"
+                f"Expected keys: 'occ_gt_path' or 'occ_path'\n"
+                f"Available keys: {list(results.keys())}\n"
+                f"Please check if the dataset configuration is correct."
+            )
         occ_gt_label = os.path.join(occ_gt_path, "labels.npz")
         occ_gt_label_1_2 = os.path.join(occ_gt_path, "labels_1_2.npz")
         occ_gt_label_1_4 = os.path.join(occ_gt_path, "labels_1_4.npz")
@@ -59,69 +59,70 @@ class LoadOccGTFromFileCVPR2023(object):
 
         # Check if main labels file exists
         if not os.path.exists(occ_gt_label):
-            # Only print this warning once per session
-            if not hasattr(self, '_gt_file_warned'):
-                print(f"Warning: Ground truth files not found, using dummy data")
-                self._gt_file_warned = True
-            # Create dummy semantics data
-            semantics = np.zeros((200, 200, 16), dtype=np.uint8)  # dummy occupancy shape
-            voxel_mask = np.ones((200, 200, 16), dtype=np.uint8)  # dummy mask
-        else:
-            occ_labels = np.load(occ_gt_label)
-            semantics = occ_labels['semantics']
-            if self.load_mask:
-                voxel_mask = occ_labels['mask_camera']
-                results['voxel_mask_camera'] = voxel_mask.astype(bool)
-                if self.ignore_invisible:
-                    semantics[voxel_mask==0] = 255
+            raise FileNotFoundError(
+                f"[STCOcc] Ground truth file not found: {occ_gt_label}\n"
+                f"Please check if the occupancy GT data exists.\n"
+                f"Expected path: {occ_gt_path}/labels.npz"
+            )
+        
+        occ_labels = np.load(occ_gt_label)
+        semantics = occ_labels['semantics']
+        if self.load_mask:
+            voxel_mask = occ_labels['mask_camera']
+            results['voxel_mask_camera'] = voxel_mask.astype(bool)
+            if self.ignore_invisible:
+                semantics[voxel_mask==0] = 255
         results['voxel_semantics'] = semantics
 
         if self.scale_1_2:
             if not os.path.exists(occ_gt_label_1_2):
-                semantics_1_2 = np.zeros((100, 100, 8), dtype=np.uint8)  # dummy data
-                if self.load_mask:
-                    voxel_mask_1_2 = np.ones((100, 100, 8), dtype=np.uint8)
-                    results['voxel_mask_camera_1_2'] = voxel_mask_1_2
-            else:
-                occ_labels_1_2 = np.load(occ_gt_label_1_2)
-                semantics_1_2 = occ_labels_1_2['semantics']
-                if self.load_mask:
-                    voxel_mask = occ_labels_1_2['mask_camera']
-                    if self.ignore_invisible:
-                        semantics_1_2[voxel_mask==0] = 255
-                    results['voxel_mask_camera_1_2'] = voxel_mask
+                raise FileNotFoundError(
+                    f"[STCOcc] Multi-scale GT (1/2) not found: {occ_gt_label_1_2}\n"
+                    f"This file is required for multi-scale supervision.\n"
+                    f"Expected path: {occ_gt_path}/labels_1_2.npz"
+                )
+            
+            occ_labels_1_2 = np.load(occ_gt_label_1_2)
+            semantics_1_2 = occ_labels_1_2['semantics']
+            if self.load_mask:
+                voxel_mask = occ_labels_1_2['mask_camera']
+                if self.ignore_invisible:
+                    semantics_1_2[voxel_mask==0] = 255
+                results['voxel_mask_camera_1_2'] = voxel_mask
             results['voxel_semantics_1_2'] = semantics_1_2
 
         if self.scale_1_4:
             if not os.path.exists(occ_gt_label_1_4):
-                semantics_1_4 = np.zeros((50, 50, 4), dtype=np.uint8)  # dummy data
-                if self.load_mask:
-                    voxel_mask_1_4 = np.ones((50, 50, 4), dtype=np.uint8)
-                    results['voxel_mask_camera_1_4'] = voxel_mask_1_4
-            else:
-                occ_labels_1_4 = np.load(occ_gt_label_1_4)
-                semantics_1_4 = occ_labels_1_4['semantics']
-                if self.load_mask:
-                    voxel_mask = occ_labels_1_4['mask_camera']
-                    if self.ignore_invisible:
-                        semantics_1_4[voxel_mask==0] = 255
-                    results['voxel_mask_camera_1_4'] = voxel_mask
+                raise FileNotFoundError(
+                    f"[STCOcc] Multi-scale GT (1/4) not found: {occ_gt_label_1_4}\n"
+                    f"This file is required for multi-scale supervision.\n"
+                    f"Expected path: {occ_gt_path}/labels_1_4.npz"
+                )
+            
+            occ_labels_1_4 = np.load(occ_gt_label_1_4)
+            semantics_1_4 = occ_labels_1_4['semantics']
+            if self.load_mask:
+                voxel_mask = occ_labels_1_4['mask_camera']
+                if self.ignore_invisible:
+                    semantics_1_4[voxel_mask==0] = 255
+                results['voxel_mask_camera_1_4'] = voxel_mask
             results['voxel_semantics_1_4'] = semantics_1_4
 
         if self.scale_1_8:
             if not os.path.exists(occ_gt_label_1_8):
-                semantics_1_8 = np.zeros((25, 25, 2), dtype=np.uint8)  # dummy data
-                if self.load_mask:
-                    voxel_mask_1_8 = np.ones((25, 25, 2), dtype=np.uint8)
-                    results['voxel_mask_camera_1_8'] = voxel_mask_1_8
-            else:
-                occ_labels_1_8 = np.load(occ_gt_label_1_8)
-                semantics_1_8 = occ_labels_1_8['semantics']
-                if self.load_mask:
-                    voxel_mask = occ_labels_1_8['mask_camera']
-                    if self.ignore_invisible:
-                        semantics_1_8[voxel_mask==0] = 255
-                    results['voxel_mask_camera_1_8'] = voxel_mask
+                raise FileNotFoundError(
+                    f"[STCOcc] Multi-scale GT (1/8) not found: {occ_gt_label_1_8}\n"
+                    f"This file is required for multi-scale supervision.\n"
+                    f"Expected path: {occ_gt_path}/labels_1_8.npz"
+                )
+            
+            occ_labels_1_8 = np.load(occ_gt_label_1_8)
+            semantics_1_8 = occ_labels_1_8['semantics']
+            if self.load_mask:
+                voxel_mask = occ_labels_1_8['mask_camera']
+                if self.ignore_invisible:
+                    semantics_1_8[voxel_mask==0] = 255
+                results['voxel_mask_camera_1_8'] = voxel_mask
             results['voxel_semantics_1_8'] = semantics_1_8
 
         return results
@@ -141,10 +142,13 @@ class LoadOccGTFromFileOpenOcc(object):
         elif 'occ_path' in results:
             gts_occ_gt_path = results['occ_path']
         else:
-            # Try to infer from other keys or provide a fallback
             sample_idx = results.get('sample_idx', 'unknown')
-            print(f"Warning: occ_gt_path not found for sample {sample_idx}, using fallback path")
-            gts_occ_gt_path = 'data/nuscenes/gts/unknown'  # Fallback path
+            raise ValueError(
+                f"[STCOcc LoadOccGTFromFileOpenOcc] occ_gt_path not found for sample {sample_idx}!\n"
+                f"Expected keys: 'occ_gt_path' or 'occ_path'\n"
+                f"Available keys: {list(results.keys())}\n"
+                f"Please check if the dataset configuration is correct."
+            )
 
         occ_ray_mask_path = gts_occ_gt_path.replace('gts', 'openocc_v2_ray_mask')
         occ_ray_mask = os.path.join(occ_ray_mask_path, 'labels.npz')
@@ -157,82 +161,105 @@ class LoadOccGTFromFileOpenOcc(object):
         occ_gt_label_1_2 = os.path.join(occ_gt_path, "labels_1_2.npz")
         occ_gt_label_1_4 = os.path.join(occ_gt_path, "labels_1_4.npz")
         occ_gt_label_1_8 = os.path.join(occ_gt_path, "labels_1_8.npz")
-        # Safely load occupancy labels
-        if os.path.exists(occ_gt_label):
-            occ_labels = np.load(occ_gt_label)
-            semantics = occ_labels['semantics']
-            flow = occ_labels['flow']
-        else:
-            print(f"Warning: Ground truth file not found: {occ_gt_label}, using dummy data")
-            # Create dummy data
-            semantics = np.zeros((200, 200, 16), dtype=np.uint8)
-            flow = np.zeros((200, 200, 16, 2), dtype=np.float32)
+        
+        # Check if main labels file exists
+        if not os.path.exists(occ_gt_label):
+            raise FileNotFoundError(
+                f"[STCOcc OpenOcc] Ground truth file not found: {occ_gt_label}\n"
+                f"Please check if the OpenOcc GT data exists.\n"
+                f"Expected path: {occ_gt_path}/labels.npz"
+            )
+        
+        occ_labels = np.load(occ_gt_label)
+        semantics = occ_labels['semantics']
+        flow = occ_labels['flow']
 
         if self.scale_1_2:
-            if os.path.exists(occ_gt_label_1_2):
-                occ_labels_1_2 = np.load(occ_gt_label_1_2)
-                semantics_1_2 = occ_labels_1_2['semantics']
-                flow_1_2 = occ_labels_1_2['flow']
-            else:
-                print(f"Warning: Ground truth file not found: {occ_gt_label_1_2}, using dummy data")
-                semantics_1_2 = np.zeros((100, 100, 8), dtype=np.uint8)
-                flow_1_2 = np.zeros((100, 100, 8, 2), dtype=np.float32)
+            if not os.path.exists(occ_gt_label_1_2):
+                raise FileNotFoundError(
+                    f"[STCOcc OpenOcc] Multi-scale GT (1/2) not found: {occ_gt_label_1_2}\n"
+                    f"This file is required for multi-scale supervision.\n"
+                    f"Expected path: {occ_gt_path}/labels_1_2.npz"
+                )
+            
+            occ_labels_1_2 = np.load(occ_gt_label_1_2)
+            semantics_1_2 = occ_labels_1_2['semantics']
+            flow_1_2 = occ_labels_1_2['flow']
             results['voxel_semantics_1_2'] = semantics_1_2
             results['voxel_flow_1_2'] = flow_1_2
+            
             if self.load_ray_mask:
-                if os.path.exists(occ_ray_mask_1_2):
-                    ray_mask_1_2 = np.load(occ_ray_mask_1_2)
-                    ray_mask_1_2 = ray_mask_1_2['ray_mask2']
-                else:
-                    print(f"Warning: Ray mask file not found: {occ_ray_mask_1_2}, using dummy data")
-                    ray_mask_1_2 = np.ones((100, 100, 8), dtype=bool)
+                if not os.path.exists(occ_ray_mask_1_2):
+                    raise FileNotFoundError(
+                        f"[STCOcc OpenOcc] Ray mask (1/2) not found: {occ_ray_mask_1_2}\n"
+                        f"This file is required when load_ray_mask=True.\n"
+                        f"Expected path: {occ_ray_mask_path}/labels_1_2.npz"
+                    )
+                
+                ray_mask_1_2 = np.load(occ_ray_mask_1_2)
+                ray_mask_1_2 = ray_mask_1_2['ray_mask2']
                 results['ray_mask_1_2'] = ray_mask_1_2
         if self.scale_1_4:
-            if os.path.exists(occ_gt_label_1_4):
-                occ_labels_1_4 = np.load(occ_gt_label_1_4)
-                semantics_1_4 = occ_labels_1_4['semantics']
-                flow_1_4 = occ_labels_1_4['flow']
-            else:
-                print(f"Warning: Ground truth file not found: {occ_gt_label_1_4}, using dummy data")
-                semantics_1_4 = np.zeros((50, 50, 4), dtype=np.uint8)
-                flow_1_4 = np.zeros((50, 50, 4, 2), dtype=np.float32)
+            if not os.path.exists(occ_gt_label_1_4):
+                raise FileNotFoundError(
+                    f"[STCOcc OpenOcc] Multi-scale GT (1/4) not found: {occ_gt_label_1_4}\n"
+                    f"This file is required for multi-scale supervision.\n"
+                    f"Expected path: {occ_gt_path}/labels_1_4.npz"
+                )
+            
+            occ_labels_1_4 = np.load(occ_gt_label_1_4)
+            semantics_1_4 = occ_labels_1_4['semantics']
+            flow_1_4 = occ_labels_1_4['flow']
             results['voxel_semantics_1_4'] = semantics_1_4
             results['voxel_flow_1_4'] = flow_1_4
+            
             if self.load_ray_mask:
-                if os.path.exists(occ_ray_mask_1_4):
-                    ray_mask_1_4 = np.load(occ_ray_mask_1_4)
-                    ray_mask_1_4 = ray_mask_1_4['ray_mask2']
-                else:
-                    print(f"Warning: Ray mask file not found: {occ_ray_mask_1_4}, using dummy data")
-                    ray_mask_1_4 = np.ones((50, 50, 4), dtype=bool)
+                if not os.path.exists(occ_ray_mask_1_4):
+                    raise FileNotFoundError(
+                        f"[STCOcc OpenOcc] Ray mask (1/4) not found: {occ_ray_mask_1_4}\n"
+                        f"This file is required when load_ray_mask=True.\n"
+                        f"Expected path: {occ_ray_mask_path}/labels_1_4.npz"
+                    )
+                
+                ray_mask_1_4 = np.load(occ_ray_mask_1_4)
+                ray_mask_1_4 = ray_mask_1_4['ray_mask2']
                 results['ray_mask_1_4'] = ray_mask_1_4
         if self.scale_1_8:
-            if os.path.exists(occ_gt_label_1_8):
-                occ_labels_1_8 = np.load(occ_gt_label_1_8)
-                semantics_1_8 = occ_labels_1_8['semantics']
-                flow_1_8 = occ_labels_1_8['flow']
-            else:
-                print(f"Warning: Ground truth file not found: {occ_gt_label_1_8}, using dummy data")
-                semantics_1_8 = np.zeros((25, 25, 2), dtype=np.uint8)
-                flow_1_8 = np.zeros((25, 25, 2, 2), dtype=np.float32)
+            if not os.path.exists(occ_gt_label_1_8):
+                raise FileNotFoundError(
+                    f"[STCOcc OpenOcc] Multi-scale GT (1/8) not found: {occ_gt_label_1_8}\n"
+                    f"This file is required for multi-scale supervision.\n"
+                    f"Expected path: {occ_gt_path}/labels_1_8.npz"
+                )
+            
+            occ_labels_1_8 = np.load(occ_gt_label_1_8)
+            semantics_1_8 = occ_labels_1_8['semantics']
+            flow_1_8 = occ_labels_1_8['flow']
             results['voxel_semantics_1_8'] = semantics_1_8
             results['voxel_flow_1_8'] = flow_1_8
+            
             if self.load_ray_mask:
-                if os.path.exists(occ_ray_mask_1_8):
-                    ray_mask_1_8 = np.load(occ_ray_mask_1_8)
-                    ray_mask_1_8 = ray_mask_1_8['ray_mask2']
-                else:
-                    print(f"Warning: Ray mask file not found: {occ_ray_mask_1_8}, using dummy data")
-                    ray_mask_1_8 = np.ones((25, 25, 2), dtype=bool)
+                if not os.path.exists(occ_ray_mask_1_8):
+                    raise FileNotFoundError(
+                        f"[STCOcc OpenOcc] Ray mask (1/8) not found: {occ_ray_mask_1_8}\n"
+                        f"This file is required when load_ray_mask=True.\n"
+                        f"Expected path: {occ_ray_mask_path}/labels_1_8.npz"
+                    )
+                
+                ray_mask_1_8 = np.load(occ_ray_mask_1_8)
+                ray_mask_1_8 = ray_mask_1_8['ray_mask2']
                 results['ray_mask_1_8'] = ray_mask_1_8
 
         if self.load_ray_mask:
-            if os.path.exists(occ_ray_mask):
-                ray_mask = np.load(occ_ray_mask)
-                ray_mask = ray_mask['ray_mask2']
-            else:
-                print(f"Warning: Ray mask file not found: {occ_ray_mask}, using dummy data")
-                ray_mask = np.ones((200, 200, 16), dtype=bool)
+            if not os.path.exists(occ_ray_mask):
+                raise FileNotFoundError(
+                    f"[STCOcc OpenOcc] Ray mask not found: {occ_ray_mask}\n"
+                    f"This file is required when load_ray_mask=True.\n"
+                    f"Expected path: {occ_ray_mask_path}/labels.npz"
+                )
+            
+            ray_mask = np.load(occ_ray_mask)
+            ray_mask = ray_mask['ray_mask2']
             results['ray_mask'] = ray_mask
 
         results['voxel_semantics'] = semantics
@@ -311,9 +338,11 @@ class LoadPointsFromFile(object):
             else:
                 points = np.fromfile(pts_filename, dtype=np.float32)
         except Exception as e:
-            print(f"Warning: Failed to load point cloud from {pts_filename}: {e}")
-            # Create dummy point cloud data as fallback
-            points = np.zeros((1000, self.load_dim), dtype=np.float32)
+            raise FileNotFoundError(
+                f"[STCOcc LoadPointsFromFile] Failed to load point cloud: {pts_filename}\n"
+                f"Error: {e}\n"
+                f"Please check if the LiDAR data file exists and is not corrupted."
+            ) from e
 
         return points
 
@@ -336,23 +365,21 @@ class LoadPointsFromFile(object):
         elif 'lidar_path' in results:
             pts_filename = results['lidar_path']
         else:
-            # Only print this warning once per session with more details
-            if not hasattr(self, '_pts_warned'):
-                available_keys = [k for k in results.keys() if 'pts' in k.lower() or 'lidar' in k.lower() or 'point' in k.lower()]
-                print(f"Warning: pts_filename not found in results. Available lidar-related keys: {available_keys}")
-                print("Using dummy point cloud data")
-                self._pts_warned = True
+            available_keys = [k for k in results.keys() if 'pts' in k.lower() or 'lidar' in k.lower() or 'point' in k.lower()]
+            raise ValueError(
+                f"[STCOcc LoadPointsFromFile] pts_filename not found in results!\n"
+                f"Expected keys: 'pts_filename' or 'lidar_path'\n"
+                f"Available lidar-related keys: {available_keys}\n"
+                f"Please check if the data_infos contains point cloud file paths."
+            )
         
-        if pts_filename is not None and os.path.exists(pts_filename):
-            points = self._load_points(pts_filename)
-        else:
-            if pts_filename is not None:
-                # Only print this warning once per session
-                if not hasattr(self, '_pts_file_warned'):
-                    print(f"Warning: Point cloud file not found, using dummy data")
-                    self._pts_file_warned = True
-            # Create dummy point cloud data (N, load_dim)
-            points = np.zeros((1000, self.load_dim), dtype=np.float32)
+        if not os.path.exists(pts_filename):
+            raise FileNotFoundError(
+                f"[STCOcc LoadPointsFromFile] Point cloud file not found: {pts_filename}\n"
+                f"Please check if the LiDAR data exists at the specified path."
+            )
+        
+        points = self._load_points(pts_filename)
         points = points.reshape(-1, self.load_dim)
         points = points[:, self.use_dim]
         attribute_dims = None
@@ -749,17 +776,19 @@ class PrepareImageInputs(object):
                         'ego2global_rotation': results.get('ego2global_rotation', [1.0, 0.0, 0.0, 0.0])
                     }
                 else:
-                    # Only print camera warnings once per session
-                    if not hasattr(self, '_camera_warned'):
-                        print(f"Warning: Camera data not available, using dummy images")
-                        self._camera_warned = True
-                    continue
+                    raise FileNotFoundError(
+                        f"[STCOcc PrepareImageInputs] Camera data not available for {cam_name}!\n"
+                        f"Camera index {cam_idx} is out of range.\n"
+                        f"Available img_filename count: {len(results.get('img_filename', []))}\n"
+                        f"Please check if all camera images exist."
+                    )
             else:
-                # Only print camera warnings once per session
-                if not hasattr(self, '_camera_warned'):
-                    print(f"Warning: Camera data not available, using dummy images")
-                    self._camera_warned = True
-                continue
+                raise ValueError(
+                    f"[STCOcc PrepareImageInputs] No camera data keys found in results!\n"
+                    f"Expected keys: 'cams' or 'img_filename'\n"
+                    f"Available keys: {list(results.keys())}\n"
+                    f"Please check if the dataset configuration is correct."
+                )
                 
             img = Image.open(filename)
             
@@ -853,35 +882,12 @@ class PrepareImageInputs(object):
             
         # Safety check: ensure we have at least some images
         if len(imgs) == 0:
-            # Only print this warning once per session
-            if not hasattr(self, '_no_images_warned'):
-                print("Warning: No images were loaded successfully. This might be due to missing data files.")
-                self._no_images_warned = True
-            # Create dummy data as fallback to prevent crash
-            dummy_img = torch.zeros((3, self.data_config['input_size'][0], self.data_config['input_size'][1]), dtype=torch.float32)
-            dummy_sensor2ego = torch.eye(4, dtype=torch.float32)
-            dummy_ego2global = torch.eye(4, dtype=torch.float32)
-            dummy_ego2sensor = torch.eye(4, dtype=torch.float32)
-            dummy_global2ego = torch.eye(4, dtype=torch.float32)
-            dummy_cam2img = torch.eye(3, dtype=torch.float32)
-            dummy_post_aug = torch.eye(3, dtype=torch.float32)
-            dummy_lidar2img = torch.eye(4, dtype=torch.float32)
-            dummy_ego2lidar = torch.eye(4, dtype=torch.float32)
-            
-            for _ in range(len(cam_names)):
-                imgs.append(dummy_img)
-                sensor2egos.append(dummy_sensor2ego)
-                ego2globals.append(dummy_ego2global)
-                ego2sensors.append(dummy_ego2sensor)
-                global2egos.append(dummy_global2ego)
-                cam2imgs.append(dummy_cam2img)
-                post_augs.append(dummy_post_aug)
-                lidar2imgs.append(dummy_lidar2img)
-                ego2lidars.append(dummy_ego2lidar)
-            # Only print dummy data warning once per session
-            if not hasattr(self, '_dummy_data_warned'):
-                print(f"Warning: Created {len(imgs)} dummy data entries as fallback.")
-                self._dummy_data_warned = True
+            raise FileNotFoundError(
+                f"[STCOcc PrepareImageInputs] No camera images loaded!\n"
+                f"All image files are missing or failed to load.\n"
+                f"Expected camera names: {cam_names}\n"
+                f"Please check your dataset path and verify that image files exist."
+            )
         
         imgs = torch.stack(imgs)
         # sensor2egos and ego2globals contains current and adjacent frame information
