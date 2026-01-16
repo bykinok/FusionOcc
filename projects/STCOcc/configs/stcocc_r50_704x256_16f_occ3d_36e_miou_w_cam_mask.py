@@ -74,7 +74,7 @@ test_sequences_split_num = 1
 
 # Running Config
 num_gpus = 2
-samples_per_gpu = 2
+samples_per_gpu = 8
 workers_per_gpu = 4  # Reduce workers to save memory
 total_epoch = 36
 num_iters_per_epoch = int(28130 // (num_gpus * samples_per_gpu))      # total samples: 28130
