@@ -38,6 +38,9 @@ class OccupancyMetric(BaseMetric):
         num_classes (int): Number of occupancy classes. Default: 17.
         use_lidar_mask (bool): Whether to use LiDAR mask. Default: False.
         use_image_mask (bool): Whether to use image mask. Default: False.
+        sort_by_timestamp (bool): Whether to sort data_infos by timestamp.
+            Set to True if model sorts dataset by timestamp during inference.
+            Set to False if model uses original dataset order. Default: True.
         **kwargs: Additional arguments for BaseMetric.
     """
     
@@ -49,6 +52,7 @@ class OccupancyMetric(BaseMetric):
                  data_root: Optional[str] = None,
                  dataset_name: str = 'occ3d',
                  eval_metric: str = 'miou',
+                 sort_by_timestamp: bool = True,
                  collect_device: str = 'cpu',
                  prefix: Optional[str] = None,
                  **kwargs):
@@ -61,6 +65,7 @@ class OccupancyMetric(BaseMetric):
         self.data_root = data_root
         self.dataset_name = dataset_name
         self.eval_metric = eval_metric
+        self.sort_by_timestamp = sort_by_timestamp
         
         # Load data_infos if ann_file is provided
         self.data_infos = None
@@ -74,14 +79,16 @@ class OccupancyMetric(BaseMetric):
                     self.data_infos = data['infos']
                 elif isinstance(data, list):
                     self.data_infos = data
-                # CRITICAL: Sort by timestamp to match dataset's data_infos order
-                # Dataset sorts data_infos in load_data_list(), so metric must use same order
+                
+                # Sort by timestamp if requested (depends on model's dataset ordering)
                 if self.data_infos and len(self.data_infos) > 0:
-                    if 'timestamp' in self.data_infos[0]:
+                    if self.sort_by_timestamp and 'timestamp' in self.data_infos[0]:
                         self.data_infos = list(sorted(self.data_infos, key=lambda e: e['timestamp']))
-                        print(f"Loaded and sorted {len(self.data_infos)} data_infos from {ann_file}")
+                        print(f"Loaded and sorted {len(self.data_infos)} data_infos by timestamp from {ann_file}")
+                    elif 'timestamp' in self.data_infos[0]:
+                        print(f"Loaded {len(self.data_infos)} data_infos (not sorted, original order) from {ann_file}")
                     else:
-                        print(f"Loaded {len(self.data_infos)} data_infos from {ann_file} (no timestamp, not sorted)")
+                        print(f"Loaded {len(self.data_infos)} data_infos (no timestamp available) from {ann_file}")
                 else:
                     print(f"Loaded {len(self.data_infos)} data_infos from {ann_file}")
             except Exception as e:

@@ -29,6 +29,7 @@ class OccupancyMetricHybrid(BaseMetric):
                  ann_file: Optional[str] = None,
                  data_root: Optional[str] = None,
                  eval_metric: str = 'miou',
+                 sort_by_timestamp: bool = False,
                  collect_device='cpu', 
                  prefix=None):
         super().__init__(collect_device=collect_device, prefix=prefix)
@@ -49,6 +50,7 @@ class OccupancyMetricHybrid(BaseMetric):
                     ann_file=ann_file,
                     data_root=data_root,
                     eval_metric=eval_metric,
+                    sort_by_timestamp=sort_by_timestamp,
                     collect_device=collect_device,
                     prefix=prefix
                 )

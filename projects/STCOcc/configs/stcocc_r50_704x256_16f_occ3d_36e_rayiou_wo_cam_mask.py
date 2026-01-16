@@ -397,7 +397,8 @@ val_evaluator = dict(
     dataset_name=dataset_name,
     eval_metric=eval_metric,
     num_classes=18,
-    use_image_mask=True)
+    use_image_mask=False,  # rayiou without camera mask
+    sort_by_timestamp=True)  # STCOcc sorts dataset by timestamp
 
 test_evaluator = val_evaluator
 

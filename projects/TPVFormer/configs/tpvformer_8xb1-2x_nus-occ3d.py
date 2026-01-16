@@ -158,7 +158,8 @@ val_evaluator = dict(
     use_image_mask=True if dataset_name == 'occ3d' else False,
     ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_val.pkl',
     data_root='data/nuscenes/',
-    eval_metric='miou')
+    eval_metric='miou',
+    sort_by_timestamp=False)  # TPVFormer does NOT sort dataset by timestamp
 
 test_evaluator = val_evaluator
 
