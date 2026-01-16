@@ -207,8 +207,9 @@ class OccupancyMetric(BaseMetric):
         # Compute final metrics
         class_names, miou_array, cnt = self.miou_metric.count_miou()
         
-        # Calculate mean IoU
-        mean_iou = np.nanmean(miou_array[:self.num_classes]) * 100
+        # Calculate mean IoU (exclude free class for final metric)
+        # miou_array has shape (num_classes,), with free at index -1
+        mean_iou = np.nanmean(miou_array[:self.num_classes - 1]) * 100
         
         metrics = {
             'mIoU': mean_iou,
