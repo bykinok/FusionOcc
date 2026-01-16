@@ -174,7 +174,9 @@ optim_wrapper = dict(
 )
 
 param_scheduler = [
-    dict(type='LinearLR', start_factor=1e-5, by_epoch=False, begin=0, end=500),
+    # Warmup: 500 iterations, 1e-5 → 2e-4 (원본과 동일)
+    # start_factor = warmup_lr_init / base_lr = 1e-5 / 2e-4 = 0.05
+    dict(type='LinearLR', start_factor=0.05, by_epoch=False, begin=0, end=500),
     dict(
         type='CosineAnnealingLR',
         begin=0,
