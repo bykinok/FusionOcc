@@ -286,19 +286,29 @@ class LoadOccupancyAnnotations(BaseTransform):
                                     pts_semantic_mask = np.fromfile(full_path, dtype=np.uint8)
                                     # print(f"[DEBUG LoadOccupancy] Successfully loaded {len(pts_semantic_mask)} labels")
                                 else:
-                                    # print(f"[DEBUG LoadOccupancy] Full path does not exist, using dummy labels")
-                                    pts_semantic_mask = np.ones(len(points), dtype=np.uint8)
+                                    raise FileNotFoundError(
+                                        f"[TPVFormer LoadOccupancyAnnotations] Semantic mask file not found: {full_path}\n"
+                                        f"Original path: {mask_path}\n"
+                                        f"Please check if the lidarseg data exists."
+                                    )
                             else:
                                 pts_semantic_mask = np.fromfile(mask_path, dtype=np.uint8)
                         else:
-                            # Handle list of paths or other formats
-                            # print(f"[DEBUG LoadOccupancy] mask_path type: {type(mask_path)}, content: {mask_path}")
-                            # Create realistic dummy labels for testing (valid class range 0-17)
-                            pts_semantic_mask = np.random.randint(0, 18, size=len(points), dtype=np.uint8)
+                            raise ValueError(
+                                f"[TPVFormer LoadOccupancyAnnotations] Invalid mask_path type: {type(mask_path)}\n"
+                                f"Expected str, got: {mask_path}\n"
+                                f"Please check the dataset configuration."
+                            )
+                    except FileNotFoundError:
+                        raise
+                    except ValueError:
+                        raise
                     except Exception as e:
-                        # print(f"[DEBUG LoadOccupancy] Error loading semantic mask: {e}")
-                        # Create realistic dummy labels for testing (valid class range 0-17)
-                        pts_semantic_mask = np.random.randint(0, 18, size=len(points), dtype=np.uint8)
+                        raise FileNotFoundError(
+                            f"[TPVFormer LoadOccupancyAnnotations] Failed to load semantic mask from {mask_path}\n"
+                            f"Error: {e}\n"
+                            f"Please check if the lidarseg data file exists and is not corrupted."
+                        ) from e
                 
                 if pts_semantic_mask is not None:
                     # print(f"[DEBUG LoadOccupancy] Points shape: {points.shape}, Labels shape: {pts_semantic_mask.shape}")
@@ -629,11 +639,12 @@ class LoadOccupancy(BaseTransform):
             
             # Load occ3d data
             if not os.path.exists(occ_3d_path):
-                print(f"Warning: occ3d file not found: {occ_3d_path}")
-                # Create dummy data
-                results['occ_3d'] = torch.zeros((0, 4), dtype=torch.long)
-                results['occ_3d_masked'] = torch.zeros((0, 4), dtype=torch.long)
-                return results
+                raise FileNotFoundError(
+                    f"[TPVFormer LoadOccupancy] Occ3D file not found: {occ_3d_path}\n"
+                    f"Expected occ_path: {results.get('occ_path', 'N/A')}\n"
+                    f"Token: {results.get('token', 'N/A')}\n"
+                    f"Please check if the Occ3D ground truth data exists."
+                )
             
             occ_3d = np.load(occ_3d_path)
             occ_3d_semantic = occ_3d['semantics']  # Keep original labels (0-17)
@@ -712,14 +723,17 @@ class LoadOccupancy(BaseTransform):
             occ_200_folder = results['lidar_points']['lidar_path'].split('samples')[0] + 'occ_samples'
             occ_200_path = os.path.join(occ_200_folder, occ_file_name)
             
-            if os.path.exists(occ_200_path):
-                occ_200 = np.load(occ_200_path)
-                occ_200[:, 3][occ_200[:, 3] == 0] = 255
-                occ_200 = torch.from_numpy(occ_200)
-                results['occ_200'] = occ_200
-            else:
-                print(f"Warning: occ_200 file not found: {occ_200_path}")
-                results['occ_200'] = torch.zeros((0, 4), dtype=torch.long)
+            if not os.path.exists(occ_200_path):
+                raise FileNotFoundError(
+                    f"[TPVFormer LoadOccupancy] Occ_200 file not found: {occ_200_path}\n"
+                    f"LiDAR path: {results['lidar_points']['lidar_path']}\n"
+                    f"Please check if the occ_200 ground truth data exists."
+                )
+            
+            occ_200 = np.load(occ_200_path)
+            occ_200[:, 3][occ_200[:, 3] == 0] = 255
+            occ_200 = torch.from_numpy(occ_200)
+            results['occ_200'] = occ_200
         
         return results
     
