@@ -11,10 +11,14 @@ ce_input = 'voxel'
 # Dataset format 설정: 'occ3d' 또는 None (기존 GT)
 dataset_name = 'occ3d'  # occ3d 형식 사용
 
+# Camera mask 설정: invisible voxels를 ignore (255)로 처리할지 여부
+use_camera_mask = True  # True: camera mask 적용 (invisible voxels → 255)
+                        # False: 모든 voxels 사용 (원본 labels 유지)
+
 dataset_params = dict(
     version = "v1.0-trainval",
-    ignore_label = 0,  # ✅ Class 0 (noise/background) ignore (원본과 동일)
-    fill_label = 17,   # ✅ Class 17 (empty)로 빈 voxel 채우기 (원본과 동일)
+    ignore_label = 255,  # ✅ Invisible voxels (mask_camera=0) ignore
+    fill_label = 17,     # ✅ Class 17 (free) - Occ3D standard format
     fixed_volume_space = True,
     label_mapping = "./config/label_mapping/nuscenes-noIgnore.yaml",
     max_volume_space = [40, 40, 5.4],  # occ3d 형식에 맞춤
@@ -51,7 +55,8 @@ train_pipeline = [
     dict(
         type='LoadOccupancy',  # occ3d 데이터 로딩 (voxel_semantic_mask도 생성)
         use_occ3d=True,
-        pc_range=[-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]),
+        pc_range=[-40.0, -40.0, -1.0, 40.0, 40.0, 5.4],
+        use_camera_mask=use_camera_mask),  # Camera mask 적용 여부
     # ✅ 원본과 동일한 PhotoMetric Augmentation 추가 (train only)
     dict(
         type='PhotoMetricDistortionMultiViewImage',
@@ -90,7 +95,8 @@ val_pipeline = [
     dict(
         type='LoadOccupancy',  # occ3d 데이터 로딩 (voxel_semantic_mask도 생성)
         use_occ3d=True,
-        pc_range=[-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]),
+        pc_range=[-40.0, -40.0, -1.0, 40.0, 40.0, 5.4],
+        use_camera_mask=use_camera_mask),  # Camera mask 적용 여부
     # 원본과 동일한 정규화 값 적용
     dict(
         type='MultiViewImageNormalize',
@@ -155,7 +161,7 @@ val_evaluator = dict(
     dataset_name=dataset_name,  # Config에서 전달
     num_classes=18,
     use_lidar_mask=False,
-    use_image_mask=True if dataset_name == 'occ3d' else False,
+    use_image_mask=use_camera_mask if dataset_name == 'occ3d' else False,  # Training과 동일한 mask 설정
     ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_val.pkl',
     data_root='data/nuscenes/',
     eval_metric='miou',
@@ -246,8 +252,8 @@ model = dict(
             max_voxels=-1,
         )),
     use_grid_mask=True,
-    # Loss configuration (following original TPVFormer)
-    ignore_label=0,  # ✅ Class 0 (noise/background) ignore (원본과 동일)
+    # Loss configuration (Occ3D standard format)
+    ignore_label=255,  # ✅ Class 255 (invisible voxels) ignore - Occ3D standard
     lovasz_input=lovasz_input,  # 'voxel' or 'points'
     ce_input=ce_input,  # 'voxel' or 'points'
     tpv_aggregator = dict(

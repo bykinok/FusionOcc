@@ -575,14 +575,19 @@ class LoadOccupancy(BaseTransform):
     Args:
         use_occ3d (bool): Whether to use occ3d format. Defaults to False.
         pc_range (list): Point cloud range [x_min, y_min, z_min, x_max, y_max, z_max].
+        use_camera_mask (bool): Whether to apply camera mask (set invisible voxels to 255).
+            If True, voxels not visible from camera are marked as ignore (255).
+            If False, all voxels keep their original labels. Defaults to True.
     """
     
     def __init__(self,
                  use_occ3d: bool = False,
-                 pc_range: Optional[list] = None):
+                 pc_range: Optional[list] = None,
+                 use_camera_mask: bool = True):
         super().__init__()
         self.use_occ3d = use_occ3d
         self.pc_range = pc_range
+        self.use_camera_mask = use_camera_mask
     
     def transform(self, results: dict) -> dict:
         """Transform function to load occupancy data.
@@ -647,25 +652,34 @@ class LoadOccupancy(BaseTransform):
                 )
             
             occ_3d = np.load(occ_3d_path)
-            occ_3d_semantic = occ_3d['semantics']  # Keep original labels (0-17)
+            occ_3d_semantic = occ_3d['semantics']  # (200, 200, 16)
             occ_3d_cam_mask = occ_3d['mask_camera']
             
-            # ✅ FIX: Use semantics as-is, following BEVFormer approach
-            # Original format:
-            # - Class 0: noise/others (ignore in training)
-            # - Class 1-16: actual semantic classes
-            # - Class 17: free space (empty)
-            # This format is correct and should NOT be modified!
+            # ✅ Use Occ3D standard format (same as STCOcc/FusionOcc)
+            # Occ3D standard format:
+            # - Class 0: others (occupied but not classified)
+            # - Class 1-16: semantic classes (barrier, bicycle, bus, ...)
+            # - Class 17: free (empty space)
+            # 
+            # NO label mapping - use original format for consistency
+            gt_occ = occ_3d_semantic.astype(np.int32)
             
             # Create voxel_semantic_mask for TPVFormer loss calculation
-            # Use original semantics without any transformation
-            voxel_semantic_mask = occ_3d_semantic  # (200, 200, 16)
-            results['voxel_semantic_mask'] = voxel_semantic_mask
+            # Optionally apply camera mask based on config
+            if self.use_camera_mask:
+                # Apply camera mask: invisible voxels → 255 (ignore label)
+                voxel_semantic_mask = np.where(occ_3d_cam_mask, gt_occ, 255).astype(np.uint8)
+                occ_3d_gt_masked = np.where(occ_3d_cam_mask, gt_occ, 255).astype(np.uint8)
+            else:
+                # No camera mask: use all voxels
+                voxel_semantic_mask = gt_occ.astype(np.uint8)
+                occ_3d_gt_masked = gt_occ.astype(np.uint8)
             
-            # Create masked version (for visualization/debug if needed)
-            occ_3d_gt_masked = occ_3d_semantic * occ_3d_cam_mask
+            results['voxel_semantic_mask'] = voxel_semantic_mask
             occ_3d_gt_masked = torch.from_numpy(occ_3d_gt_masked)
-            idx_masked = torch.where(occ_3d_gt_masked > 0)
+            # ✅ Exclude only 255 (ignore), include all valid classes (0-17)
+            # Class 0 (others) is a valid class in Occ3D standard
+            idx_masked = torch.where(occ_3d_gt_masked != 255)
             if len(idx_masked[0]) > 0:
                 label_masked = occ_3d_gt_masked[idx_masked[0], idx_masked[1], idx_masked[2]]
                 occ_3d_masked = torch.stack([
@@ -675,8 +689,10 @@ class LoadOccupancy(BaseTransform):
                 occ_3d_masked = torch.zeros((0, 4), dtype=torch.long)
             
             # Create unmasked version
-            occ_3d_gt = torch.from_numpy(occ_3d_semantic)
-            idx = torch.where(occ_3d_gt > 0)
+            occ_3d_gt = torch.from_numpy(gt_occ)
+            # ✅ Include all valid classes (0-17)
+            # In Occ3D standard: 0=others, 1-16=semantic classes, 17=free
+            idx = torch.where(occ_3d_gt >= 0)
             if len(idx[0]) > 0:
                 label = occ_3d_gt[idx[0], idx[1], idx[2]]
                 occ3d = torch.stack([idx[0], idx[1], idx[2], label], dim=1).long()
@@ -741,5 +757,6 @@ class LoadOccupancy(BaseTransform):
         """str: Return a string that describes the module."""
         repr_str = self.__class__.__name__
         repr_str += f'(use_occ3d={self.use_occ3d}, '
-        repr_str += f'pc_range={self.pc_range})'
+        repr_str += f'pc_range={self.pc_range}, '
+        repr_str += f'use_camera_mask={self.use_camera_mask})'
         return repr_str

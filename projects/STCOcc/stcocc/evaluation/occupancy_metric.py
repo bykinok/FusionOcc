@@ -107,6 +107,13 @@ class OccupancyMetric(BaseMetric):
         # Optional F-Score metric (commented out for now to reduce complexity)
         # self.fscore_metric = Metric_FScore()
     
+    def reset(self):
+        """Reset metric state for new epoch."""
+        # Reset miou_metric
+        self.miou_metric.reset()
+        # Clear predictions
+        self.predictions = []
+    
     def process(self, data_batch: dict, data_samples: Sequence[dict]) -> None:
         """Process one batch of data samples and predictions.
         
@@ -153,9 +160,10 @@ class OccupancyMetric(BaseMetric):
         
         try:
             if self.eval_metric == 'rayiou':
-                return self._compute_rayiou()
+                result = self._compute_rayiou()
             else:
-                return self._compute_miou()
+                result = self._compute_miou()
+            return result
                 
         except Exception as e:
             # Return default metrics if computation fails
@@ -166,6 +174,10 @@ class OccupancyMetric(BaseMetric):
                 'mIoU': 0.0,
                 'count': 0
             }
+        finally:
+            # Reset metric state for next epoch
+            self.miou_metric.reset()
+            self.predictions = []
     
     def _compute_miou(self) -> Dict[str, float]:
         """Compute standard mIoU metric."""

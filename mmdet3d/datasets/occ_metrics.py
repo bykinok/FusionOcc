@@ -66,6 +66,11 @@ class Metric_mIoU():
         self.voxel_num = self.occ_xdim * self.occ_ydim * self.occ_zdim
         self.hist = np.zeros((self.num_classes, self.num_classes))
         self.cnt = 0
+    
+    def reset(self):
+        """Reset confusion matrix and count for new epoch."""
+        self.hist = np.zeros((self.num_classes, self.num_classes))
+        self.cnt = 0
 
     def hist_info(self, n_cl, pred, gt):
         """
@@ -168,6 +173,13 @@ class Metric_FScore():
         self.tot_cmpl = 0.
         self.tot_f1_mean = 0.
         self.eps = 1e-8
+    
+    def reset(self):
+        """Reset F-Score metrics for new epoch."""
+        self.cnt = 0
+        self.tot_acc = 0.
+        self.tot_cmpl = 0.
+        self.tot_f1_mean = 0.
 
     def voxel2points(self, voxel):
         # occIdx = torch.where(torch.logical_and(voxel != FREE, voxel != NOT_OBSERVED))
