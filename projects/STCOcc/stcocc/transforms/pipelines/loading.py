@@ -84,7 +84,7 @@ class LoadOccGTFromFileCVPR2023(object):
             
             occ_labels_1_2 = np.load(occ_gt_label_1_2)
             semantics_1_2 = occ_labels_1_2['semantics']
-            if self.load_mask:
+            if self.load_mask and 'mask_camera' in occ_labels_1_2.files:
                 voxel_mask = occ_labels_1_2['mask_camera']
                 if self.ignore_invisible:
                     semantics_1_2[voxel_mask==0] = 255
@@ -101,7 +101,7 @@ class LoadOccGTFromFileCVPR2023(object):
             
             occ_labels_1_4 = np.load(occ_gt_label_1_4)
             semantics_1_4 = occ_labels_1_4['semantics']
-            if self.load_mask:
+            if self.load_mask and 'mask_camera' in occ_labels_1_4.files:
                 voxel_mask = occ_labels_1_4['mask_camera']
                 if self.ignore_invisible:
                     semantics_1_4[voxel_mask==0] = 255
@@ -118,7 +118,7 @@ class LoadOccGTFromFileCVPR2023(object):
             
             occ_labels_1_8 = np.load(occ_gt_label_1_8)
             semantics_1_8 = occ_labels_1_8['semantics']
-            if self.load_mask:
+            if self.load_mask and 'mask_camera' in occ_labels_1_8.files:
                 voxel_mask = occ_labels_1_8['mask_camera']
                 if self.ignore_invisible:
                     semantics_1_8[voxel_mask==0] = 255

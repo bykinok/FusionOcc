@@ -259,7 +259,7 @@ backend_args = None
 train_pipeline = [
     dict(type='STCOccPrepareImageInputs', is_train=True, data_config=data_config, sequential=True),
     dict(type='STCOccLoadAnnotations'),
-    dict(type='STCOccLoadOccGTFromFileCVPR2023', scale_1_2=True, scale_1_4=True, scale_1_8=True, ignore_invisible=True),
+    dict(type='STCOccLoadOccGTFromFileCVPR2023', scale_1_2=True, scale_1_4=True, scale_1_8=True, load_mask=True, ignore_invisible=True),
     dict(type='STCOccBEVAug', bda_aug_conf=bda_aug_conf, classes=occ_class_names),
     dict(type='STCOccLoadPointsFromFile', coord_type='LIDAR', load_dim=5, use_dim=3, backend_args=backend_args),
     dict(type='STCOccPointToMultiViewDepth', downsample=1, grid_config=grid_config),
@@ -382,7 +382,7 @@ param_scheduler = [
 train_cfg = dict(
     type='IterBasedTrainLoop',
     max_iters=total_epoch * num_iters_per_epoch,
-    val_interval=num_iters_per_epoch)
+    val_interval=99999)#num_iters_per_epoch)
 
 # log_processor도 iteration 기반으로 명시
 log_processor = dict(type='LogProcessor', window_size=50, by_epoch=False)
@@ -407,7 +407,7 @@ default_hooks = dict(
     timer=dict(type='IterTimerHook'),
     logger=dict(type='LoggerHook', interval=50),
     param_scheduler=dict(type='ParamSchedulerHook'),
-    checkpoint=dict(type='CheckpointHook', interval=num_iters_per_epoch),
+    checkpoint=dict(type='CheckpointHook', by_epoch=False, interval=num_iters_per_epoch),
     sampler_seed=dict(type='DistSamplerSeedHook'))
 
 # Custom hooks
