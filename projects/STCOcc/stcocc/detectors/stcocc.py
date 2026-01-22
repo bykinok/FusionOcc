@@ -652,10 +652,10 @@ class STCOcc(CenterPoint):
             scene_name = [img_meta['scene_name'] for img_meta in img_metas]
             # check save_dir
             for name in scene_name:
-                if not os.path.exists('results/{}'.format(name)):
-                    os.makedirs('results/{}'.format(name))
+                if not os.path.exists('results/STCOcc/{}'.format(name)):
+                    os.makedirs('results/STCOcc/{}'.format(name))
             for i, idx in enumerate(sample_idx):
-                np.savez('results/{}/{}.npz'.format(scene_name[i], idx),semantics=return_dict['occ_results'][i], flow=return_dict['flow_results'][i])
+                np.savez('results/STCOcc/{}/{}.npz'.format(scene_name[i], idx),semantics=return_dict['occ_results'][i], flow=return_dict['flow_results'][i])
         return [return_dict]
 
     def forward_train(self,
