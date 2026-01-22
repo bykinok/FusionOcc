@@ -66,11 +66,40 @@ class Metric_mIoU():
         self.voxel_num = self.occ_xdim * self.occ_ydim * self.occ_zdim
         self.hist = np.zeros((self.num_classes, self.num_classes))
         self.cnt = 0
+        
+        # Radius-based statistics
+        self.radius_bins = [0, 20, 25, 30, 35, 40, 45, 50]
+        # Calculate actual max radius from point cloud range
+        self.max_radius = np.sqrt((self.point_cloud_range[3] - self.point_cloud_range[0])**2 / 4 + 
+                                   (self.point_cloud_range[4] - self.point_cloud_range[1])**2 / 4)
+        self.hist_by_radius = {f'{self.radius_bins[i]}-{self.radius_bins[i+1]}m': 
+                               np.zeros((self.num_classes, self.num_classes)) 
+                               for i in range(len(self.radius_bins) - 1)}
+        
+        # Height-based statistics
+        # Use relative height bins based on actual z range
+        # z_min = -1.0m, so we need to account for negative heights
+        self.height_bins_relative = [0, 2, 4, 6]  # Relative height from ground (0m)
+        # Adjust bins to actual z coordinates
+        z_min = self.point_cloud_range[2]  # -1.0m
+        self.height_bins = [z_min + h for h in self.height_bins_relative]  # [-1, 1, 3, 5]
+        
+        # Create labels for display (using relative heights)
+        self.hist_by_height = {}
+        for i in range(len(self.height_bins_relative) - 1):
+            h_low = self.height_bins_relative[i]
+            h_high = self.height_bins_relative[i + 1]
+            label = f'{h_low}-{h_high}m'
+            self.hist_by_height[label] = np.zeros((self.num_classes, self.num_classes))
     
     def reset(self):
         """Reset confusion matrix and count for new epoch."""
         self.hist = np.zeros((self.num_classes, self.num_classes))
         self.cnt = 0
+        for key in self.hist_by_radius:
+            self.hist_by_radius[key] = np.zeros((self.num_classes, self.num_classes))
+        for key in self.hist_by_height:
+            self.hist_by_height[key] = np.zeros((self.num_classes, self.num_classes))
 
     def hist_info(self, n_cl, pred, gt):
         """
@@ -119,32 +148,259 @@ class Metric_mIoU():
         if self.use_image_mask:
             masked_semantics_gt = semantics_gt[mask_camera]
             masked_semantics_pred = semantics_pred[mask_camera]
+            mask_used = mask_camera
         elif self.use_lidar_mask:
             masked_semantics_gt = semantics_gt[mask_lidar]
             masked_semantics_pred = semantics_pred[mask_lidar]
+            mask_used = mask_lidar
         else:
             masked_semantics_gt = semantics_gt
             masked_semantics_pred = semantics_pred
+            mask_used = None
 
-            # # pred = np.random.randint(low=0, high=17, size=masked_semantics.shape)
+        # # pred = np.random.randint(low=0, high=17, size=masked_semantics.shape)
         _, _hist = self.compute_mIoU(masked_semantics_pred, masked_semantics_gt, self.num_classes)
         self.hist += _hist
+        
+        # Calculate radius-based histograms
+        # Create coordinate grids for voxels
+        x_coords = np.arange(self.occ_xdim) * self.occupancy_size[0] + self.point_cloud_range[0] + self.occupancy_size[0] / 2
+        y_coords = np.arange(self.occ_ydim) * self.occupancy_size[1] + self.point_cloud_range[1] + self.occupancy_size[1] / 2
+        
+        # Create meshgrid for x, y coordinates
+        x_grid = np.repeat(x_coords[:, np.newaxis, np.newaxis], self.occ_ydim, axis=1)
+        x_grid = np.repeat(x_grid, self.occ_zdim, axis=2)
+        y_grid = np.repeat(y_coords[np.newaxis, :, np.newaxis], self.occ_xdim, axis=0)
+        y_grid = np.repeat(y_grid, self.occ_zdim, axis=2)
+        
+        # Calculate radius for each voxel
+        radius = np.sqrt(x_grid**2 + y_grid**2)
+        
+        # Apply mask if used
+        if mask_used is not None:
+            radius_masked = radius[mask_used]
+            gt_masked = semantics_gt[mask_used]
+            pred_masked = semantics_pred[mask_used]
+        else:
+            radius_masked = radius.flatten()
+            gt_masked = semantics_gt.flatten()
+            pred_masked = semantics_pred.flatten()
+        
+        # Accumulate histogram for each radius bin
+        for i in range(len(self.radius_bins) - 1):
+            r_min = self.radius_bins[i]
+            r_max = self.radius_bins[i + 1]
+            radius_key = f'{r_min}-{r_max}m'
+            
+            # Find voxels in this radius range
+            # For the last bin, include all voxels >= r_min to avoid missing any
+            if i == len(self.radius_bins) - 2:  # Last bin
+                in_range = (radius_masked >= r_min)
+            else:
+                in_range = (radius_masked >= r_min) & (radius_masked < r_max)
+            
+            if np.sum(in_range) > 0:
+                gt_in_range = gt_masked[in_range]
+                pred_in_range = pred_masked[in_range]
+                
+                # Compute histogram for this radius range
+                _, hist_radius = self.compute_mIoU(pred_in_range, gt_in_range, self.num_classes)
+                self.hist_by_radius[radius_key] += hist_radius
+        
+        # Calculate height-based histograms
+        # Create z coordinate grid for voxels
+        z_coords = np.arange(self.occ_zdim) * self.occupancy_size[2] + self.point_cloud_range[2] + self.occupancy_size[2] / 2
+        
+        # Create meshgrid for z coordinates
+        z_grid = np.repeat(z_coords[np.newaxis, np.newaxis, :], self.occ_xdim, axis=0)
+        z_grid = np.repeat(z_grid, self.occ_ydim, axis=1)
+        
+        # Apply mask if used
+        if mask_used is not None:
+            height_masked = z_grid[mask_used]
+            gt_masked_h = semantics_gt[mask_used]
+            pred_masked_h = semantics_pred[mask_used]
+        else:
+            height_masked = z_grid.flatten()
+            gt_masked_h = semantics_gt.flatten()
+            pred_masked_h = semantics_pred.flatten()
+        
+        # Accumulate histogram for each height bin
+        for i in range(len(self.height_bins) - 1):
+            h_min = self.height_bins[i]  # Actual z coordinate
+            h_max = self.height_bins[i + 1]  # Actual z coordinate
+            
+            # Use relative height labels for display
+            h_min_rel = self.height_bins_relative[i]
+            h_max_rel = self.height_bins_relative[i + 1]
+            height_key = f'{h_min_rel}-{h_max_rel}m'
+            
+            # Find voxels in this height range (using actual z coordinates)
+            # For the last bin, include all voxels >= h_min to avoid missing any
+            if i == len(self.height_bins) - 2:  # Last bin
+                in_range = (height_masked >= h_min)
+            else:
+                in_range = (height_masked >= h_min) & (height_masked < h_max)
+            
+            if np.sum(in_range) > 0:
+                gt_in_range = gt_masked_h[in_range]
+                pred_in_range = pred_masked_h[in_range]
+                
+                # Compute histogram for this height range
+                _, hist_height = self.compute_mIoU(pred_in_range, gt_in_range, self.num_classes)
+                self.hist_by_height[height_key] += hist_height
 
     def count_miou(self):
         # print("hist: ", self.hist)
         mIoU = self.per_class_iu(self.hist)
+        
+        # Calculate TP, FP, FN for each class
+        TP = np.diag(self.hist)  # True Positives
+        FP = self.hist.sum(0) - TP  # False Positives (column sum - TP)
+        FN = self.hist.sum(1) - TP  # False Negatives (row sum - TP)
+        
         # print(f'===> per class IoU of {self.cnt} samples:')
         # for ind_class in range(self.num_classes):
         #     print(f'===> {self.class_names[ind_class]} - IoU = ' + str(round(mIoU[ind_class] * 100, 2)))
         # assert cnt == num_samples, 'some samples are not included in the miou calculation'
         print(f'===> per class IoU of {self.cnt} samples:')
         for ind_class in range(self.num_classes - 1):
-            print(f'===> {self.class_names[ind_class]} - IoU = ' + str(round(mIoU[ind_class] * 100, 2)))
+            print(f'===> {self.class_names[ind_class]} - IoU = {round(mIoU[ind_class] * 100, 2)}, '
+                  f'TP = {int(TP[ind_class])}, FP = {int(FP[ind_class])}, FN = {int(FN[ind_class])}')
 
         print(f'===> mIoU of {self.cnt} samples: ' + str(round(np.nanmean(mIoU[:self.num_classes - 1]) * 100, 2)))
+        
+        # Verify that radius-based sums match total
+        print('\n===> Verification: Radius-based sum vs Total')
+        TP_radius_sum = np.zeros(self.num_classes)
+        FP_radius_sum = np.zeros(self.num_classes)
+        FN_radius_sum = np.zeros(self.num_classes)
+        
+        for radius_key in self.hist_by_radius.keys():
+            hist_r = self.hist_by_radius[radius_key]
+            TP_radius_sum += np.diag(hist_r)
+            FP_radius_sum += hist_r.sum(0) - np.diag(hist_r)
+            FN_radius_sum += hist_r.sum(1) - np.diag(hist_r)
+        
+        all_match = True
+        for ind_class in range(self.num_classes - 1):
+            if TP[ind_class] != TP_radius_sum[ind_class] or \
+               FP[ind_class] != FP_radius_sum[ind_class] or \
+               FN[ind_class] != FN_radius_sum[ind_class]:
+                print(f'Class {self.class_names[ind_class]}: TP_diff={int(TP[ind_class]-TP_radius_sum[ind_class])}, '
+                      f'FP_diff={int(FP[ind_class]-FP_radius_sum[ind_class])}, '
+                      f'FN_diff={int(FN[ind_class]-FN_radius_sum[ind_class])}')
+                all_match = False
+        
+        if all_match:
+            print('✓ All radius-based sums match total (verification passed)')
+        
+        # Print radius-based statistics summary
+        print('\n===> Radius-based mIoU Summary:')
+        print(f'{"Radius Range":>15s} | {"mIoU":>8s}')
+        print('-' * 27)
+        for radius_key in sorted(self.hist_by_radius.keys(), key=lambda x: float(x.split('-')[0])):
+            hist_r = self.hist_by_radius[radius_key]
+            mIoU_r = self.per_class_iu(hist_r)
+            miou_value = np.nanmean(mIoU_r[:self.num_classes - 1]) * 100
+            print(f'{radius_key:>15s} | {miou_value:>7.2f}%')
+        
+        # Print detailed radius-based statistics
+        print('\n===> Radius-based TP/FP/FN statistics:')
+        for radius_key in sorted(self.hist_by_radius.keys(), key=lambda x: float(x.split('-')[0])):
+            hist_r = self.hist_by_radius[radius_key]
+            TP_r = np.diag(hist_r)
+            FP_r = hist_r.sum(0) - TP_r
+            FN_r = hist_r.sum(1) - TP_r
+            
+            # Calculate mIoU for this radius range
+            mIoU_r = self.per_class_iu(hist_r)
+            miou_value = np.nanmean(mIoU_r[:self.num_classes - 1]) * 100
+            
+            print(f'\n===> Radius range: {radius_key} - mIoU: {miou_value:.2f}%')
+            for ind_class in range(self.num_classes - 1):
+                if TP_r[ind_class] > 0 or FP_r[ind_class] > 0 or FN_r[ind_class] > 0:
+                    iou_r = TP_r[ind_class] / (TP_r[ind_class] + FP_r[ind_class] + FN_r[ind_class]) if (TP_r[ind_class] + FP_r[ind_class] + FN_r[ind_class]) > 0 else 0
+                    print(f'     {self.class_names[ind_class]:20s} - IoU = {round(iou_r * 100, 2):6.2f}, '
+                          f'TP = {int(TP_r[ind_class]):6d}, FP = {int(FP_r[ind_class]):6d}, FN = {int(FN_r[ind_class]):6d}')
+        
         # print(f'===> sample-wise averaged mIoU of {cnt} samples: ' + str(round(np.nanmean(mIoU_avg), 2)))
+        
+        # Verify height-based statistics
+        print('\n===> Verification: Height-based sum vs Total')
+        print(f'Height bins (actual z coords): {self.height_bins}')
+        print(f'Height bins (relative to ground): {self.height_bins_relative}')
+        
+        TP_height_sum = np.zeros(self.num_classes)
+        FP_height_sum = np.zeros(self.num_classes)
+        FN_height_sum = np.zeros(self.num_classes)
+        
+        for height_key in self.hist_by_height.keys():
+            hist_h = self.hist_by_height[height_key]
+            TP_height_sum += np.diag(hist_h)
+            FP_height_sum += hist_h.sum(0) - np.diag(hist_h)
+            FN_height_sum += hist_h.sum(1) - np.diag(hist_h)
+        
+        all_match_h = True
+        for ind_class in range(self.num_classes - 1):
+            if TP[ind_class] != TP_height_sum[ind_class] or \
+               FP[ind_class] != FP_height_sum[ind_class] or \
+               FN[ind_class] != FN_height_sum[ind_class]:
+                print(f'Class {self.class_names[ind_class]}: TP_diff={int(TP[ind_class]-TP_height_sum[ind_class])}, '
+                      f'FP_diff={int(FP[ind_class]-FP_height_sum[ind_class])}, '
+                      f'FN_diff={int(FN[ind_class]-FN_height_sum[ind_class])}')
+                all_match_h = False
+        
+        if all_match_h:
+            print('✓ All height-based sums match total (verification passed)')
+        
+        # Print height-based statistics summary
+        print('\n===> Height-based mIoU Summary:')
+        print(f'{"Height Range":>20s} | {"Actual Z":>15s} | {"mIoU":>8s}')
+        print('-' * 48)
+        for i, height_key in enumerate(sorted(self.hist_by_height.keys(), key=lambda x: float(x.split('-')[0]))):
+            hist_h = self.hist_by_height[height_key]
+            mIoU_h = self.per_class_iu(hist_h)
+            miou_value = np.nanmean(mIoU_h[:self.num_classes - 1]) * 100
+            
+            # Get actual z range for this bin
+            z_min = self.height_bins[i]
+            if i == len(self.height_bins) - 2:  # Last bin
+                z_max_str = f'{z_min:.1f}m+'
+            else:
+                z_max = self.height_bins[i + 1]
+                z_max_str = f'{z_min:.1f}-{z_max:.1f}m'
+            
+            print(f'{height_key:>20s} | {z_max_str:>15s} | {miou_value:>7.2f}%')
+        
+        # Print detailed height-based statistics
+        print('\n===> Height-based TP/FP/FN statistics:')
+        for i, height_key in enumerate(sorted(self.hist_by_height.keys(), key=lambda x: float(x.split('-')[0]))):
+            hist_h = self.hist_by_height[height_key]
+            TP_h = np.diag(hist_h)
+            FP_h = hist_h.sum(0) - TP_h
+            FN_h = hist_h.sum(1) - TP_h
+            
+            # Calculate mIoU for this height range
+            mIoU_h = self.per_class_iu(hist_h)
+            miou_value = np.nanmean(mIoU_h[:self.num_classes - 1]) * 100
+            
+            # Get actual z range for this bin
+            z_min = self.height_bins[i]
+            if i == len(self.height_bins) - 2:  # Last bin
+                z_range_str = f'{z_min:.1f}m+'
+            else:
+                z_max = self.height_bins[i + 1]
+                z_range_str = f'{z_min:.1f}-{z_max:.1f}m'
+            
+            print(f'\n===> Height range: {height_key} (z: {z_range_str}) - mIoU: {miou_value:.2f}%')
+            for ind_class in range(self.num_classes - 1):
+                if TP_h[ind_class] > 0 or FP_h[ind_class] > 0 or FN_h[ind_class] > 0:
+                    iou_h = TP_h[ind_class] / (TP_h[ind_class] + FP_h[ind_class] + FN_h[ind_class]) if (TP_h[ind_class] + FP_h[ind_class] + FN_h[ind_class]) > 0 else 0
+                    print(f'     {self.class_names[ind_class]:20s} - IoU = {round(iou_h * 100, 2):6.2f}, '
+                          f'TP = {int(TP_h[ind_class]):6d}, FP = {int(FP_h[ind_class]):6d}, FN = {int(FN_h[ind_class]):6d}')
 
-        print("use mask: ", self.use_image_mask)
+        print("\nuse mask: ", self.use_image_mask)
         return self.class_names, np.around(mIoU, decimals=4), self.cnt
 
 
