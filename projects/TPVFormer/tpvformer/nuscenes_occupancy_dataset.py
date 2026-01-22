@@ -90,6 +90,24 @@ class NuScenesOccupancyDataset(BaseDataset):
         """
         data_list = []
         
+        # Add scene_name and scene_token (following STCOcc implementation)
+        # Extract scene_name from occ_path if available
+        if 'occ_path' in info and info['occ_path']:
+            # occ_path format: './data/nuscenes/gts/scene-xxxx/token.npz'
+            # Extract 'scene-xxxx' from path
+            path_parts = info['occ_path'].split('/')
+            for part in path_parts:
+                if part.startswith('scene-'):
+                    info['scene_name'] = part
+                    break
+            
+            # Fallback if scene name not found in path
+            if 'scene_name' not in info:
+                info['scene_name'] = 'unknown'
+        elif 'scene_name' not in info:
+            # Use 'unknown' as fallback
+            info['scene_name'] = 'unknown'
+        
         # Process lidar points
         if 'lidar_points' in info:
             info['lidar_points']['lidar_path'] = \

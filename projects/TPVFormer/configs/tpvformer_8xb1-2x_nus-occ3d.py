@@ -76,7 +76,7 @@ train_pipeline = [
     dict(
         type='TPVPack3DDetInputs',  # Custom pack for occ3d support
         keys=['img', 'points', 'pts_semantic_mask', 'voxel_semantic_mask', 'occ_3d', 'occ_3d_masked'],  # occ3d 데이터 포함
-        meta_keys=['lidar2img', 'lidar_path', 'sample_idx', 'pts_filename', 'img_shape'])
+        meta_keys=['lidar2img', 'lidar_path', 'sample_idx', 'pts_filename', 'img_shape', 'token', 'scene_name', 'scene_token'])
 ]
 
 val_pipeline = [
@@ -109,7 +109,7 @@ val_pipeline = [
     dict(
         type='TPVPack3DDetInputs',  # Custom pack for occ3d support
         keys=['img', 'points', 'pts_semantic_mask', 'voxel_semantic_mask', 'occ_3d', 'occ_3d_masked'],  # occ3d 데이터 포함
-        meta_keys=['lidar2img', 'lidar_path', 'sample_idx', 'pts_filename', 'img_shape'])
+        meta_keys=['lidar2img', 'lidar_path', 'sample_idx', 'pts_filename', 'img_shape', 'token', 'scene_name', 'scene_token'])
 ]
 
 test_pipeline = val_pipeline
@@ -235,6 +235,7 @@ num_points = [8, 64, 64]
 model = dict(
     type='TPVFormer',
     dataset_name=dataset_name,  # occ3d 형식 사용 시 predict에서 STCOcc 형식으로 출력
+    save_results=False,  # Save prediction results to disk
     # 원본과 동일한 전처리: data pipeline에서 정규화 수행, preprocessor에서는 수행하지 않음
     data_preprocessor=dict(
         type='TPVFormerDataPreprocessor',

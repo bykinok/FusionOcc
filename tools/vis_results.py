@@ -65,11 +65,13 @@ def parse_args():
     parse.add_argument('--data-path', type=str, default='data/nuscenes', help='path of the nuScenes dataset')
     parse.add_argument('--data-version', type=str, default='v1.0-trainval', help='version of the nuScenes dataset')
     parse.add_argument('--dataset-type', type=str, default='occ3d', help='dataset type, occ3d or openocc')
-    parse.add_argument('--pred-path', type=str, default='results/scene-0274', help='path of the prediction data, dir')
-    parse.add_argument('--vis-scene', type=list, default=['scene-0274'], help='visualize scene list')
+    parse.add_argument('--pred-path', type=str, default='results/scene-0003', help='path of the prediction data, dir')
+    parse.add_argument('--vis-scene', type=list, default=['scene-0003'], help='visualize scene list')
     parse.add_argument('--vis-path', type=str, default='demo_out', help='path of saving the visualization images')
     parse.add_argument('--car-model', type=str, default='visualizer/3d_model.obj', help='car_model path')
     parse.add_argument('--vis-single-data', type=str, default='results/scene-0107/84c24cd1d7914f72bb2fa17a6c5c41e5.npz',help='single path of the visualization data')
+    parse.add_argument('--gt-path', type=str, default=None, help='path to GT data for loading camera_mask (e.g., data/nuscenes/gts/scene-0003/token/labels.npz)')
+    parse.add_argument('--use-camera-mask', action='store_true', help='only visualize voxels visible from camera (camera_mask=True)')
     args = parse.parse_args()
     return args
 
@@ -142,6 +144,7 @@ def vis_occ_scene_on_3d(vis_scenes_infos,
                 if dataset_type == 'openocc':
                     occ_path = occ_path.replace('gts', 'openocc_v2')
                 occ_label_path = os.path.join(occ_path, 'labels.npz')
+                print(occ_label_path)
                 occ_label = np.load(occ_label_path)
                 occ_semantics = occ_label['semantics']
 
@@ -159,6 +162,37 @@ def vis_occ_scene_on_3d(vis_scenes_infos,
                 occ_label_path = os.path.join(pred_path, token + '.npz')
                 occ_label = np.load(occ_label_path)
                 occ_semantics = occ_label['semantics']
+                
+                # Apply camera mask from GT if requested
+                if load_camera_mask:
+                    # Try to load mask_camera from prediction file first
+                    if 'mask_camera' in occ_label.keys():
+                        mask_camera = occ_label['mask_camera']
+                        occ_semantics[mask_camera == 0] = 255
+                        print(f"Applied camera mask from prediction: {occ_label_path}")
+                    # If not found, load from GT
+                    elif 'occ_path' in info:
+                        occ_path = info['occ_path']
+                        if dataset_type == 'openocc':
+                            occ_path = occ_path.replace('gts', 'openocc_v2')
+                        gt_label_path = os.path.join(occ_path, 'labels.npz')
+                        
+                        if os.path.exists(gt_label_path):
+                            try:
+                                gt_label = np.load(gt_label_path)
+                                if 'mask_camera' in gt_label.keys():
+                                    mask_camera = gt_label['mask_camera']
+                                    occ_semantics[mask_camera == 0] = 255
+                                    print(f"Applied camera mask from GT: {gt_label_path}")
+                                else:
+                                    print(f"Warning: 'mask_camera' not found in GT: {gt_label_path}")
+                            except Exception as e:
+                                print(f"Error loading GT for camera mask: {e}")
+                        else:
+                            print(f"Warning: GT file not found: {gt_label_path}")
+                    else:
+                        print(f"Warning: load_camera_mask=True but 'occ_path' not found in info for token {token}")
+                
                 if vis_flow:
                     # check if flow exists
                     if 'flow' in occ_label.keys():
@@ -225,6 +259,8 @@ def vis_occ_single_on_3d(data_path,
                         voxel_size=(0.4, 0.4, 0.4),
                         car_model=None,
                         vis_flow=False,
+                        use_camera_mask=False,
+                        gt_path=None,
                         background_color=(255, 255, 255),
                         ):
     # define free_cls
@@ -249,6 +285,39 @@ def vis_occ_single_on_3d(data_path,
     occ_label = np.load(data_path)
     # occ_semantics = occ_label['semantics']
     occ_semantics = occ_label['semantics']
+    
+    # Apply camera mask if requested
+    if use_camera_mask:
+        mask_camera = None
+        
+        # Try to load mask_camera from the data file first
+        if 'mask_camera' in occ_label.keys():
+            mask_camera = occ_label['mask_camera']
+            print(f"Loaded camera mask from data file: {data_path}")
+        # If not found and gt_path is provided, load from GT
+        elif gt_path is not None and os.path.exists(gt_path):
+            try:
+                gt_label = np.load(gt_path)
+                if 'mask_camera' in gt_label.keys():
+                    mask_camera = gt_label['mask_camera']
+                    print(f"Loaded camera mask from GT file: {gt_path}")
+                else:
+                    print(f"Warning: 'mask_camera' not found in GT file: {gt_path}")
+            except Exception as e:
+                print(f"Error loading GT file {gt_path}: {e}")
+        else:
+            print(f"Warning: use_camera_mask=True but 'mask_camera' not found in {data_path}")
+            if gt_path is None:
+                print("Hint: Use --gt-path to specify GT file for loading camera_mask")
+            elif not os.path.exists(gt_path):
+                print(f"Hint: GT path does not exist: {gt_path}")
+        
+        # Apply mask if loaded successfully
+        if mask_camera is not None:
+            print(f"Applying camera mask: {mask_camera.sum()} / {mask_camera.size} voxels visible ({mask_camera.sum()/mask_camera.size*100:.2f}%)")
+            # Set invisible voxels to 255 (will be filtered by ignore_labels)
+            occ_semantics = np.where(mask_camera, occ_semantics, 255)
+    
     if vis_flow:
         # check if flow exists
         if 'flow' in occ_label.keys():
@@ -332,14 +401,20 @@ if __name__ == '__main__':
     vis_scenes_infos = arange_according_to_scene(pkl_data['infos'], nusc, args.vis_scene)
     # GT visualization
     # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, dataset_type=args.dataset_type, vis_gt=True, car_model=args.car_model)
-    # Pred visualization
-    # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, dataset_type=args.dataset_type, vis_gt=False, car_model=args.car_model)
+    # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, load_camera_mask=False, dataset_type=args.dataset_type, vis_gt=True, car_model=args.car_model)
+    # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, load_camera_mask=True, dataset_type=args.dataset_type, vis_gt=True, car_model=args.car_model)
+    # Pred visualization (without camera mask)
+    # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, load_camera_mask=False, dataset_type=args.dataset_type, vis_gt=False, car_model=args.car_model)
+    # Pred visualization (with camera mask from GT)
+    # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, load_camera_mask=True, dataset_type=args.dataset_type, vis_gt=False, car_model=args.car_model)
     # # Single data visualization
-    vis_occ_single_on_3d(args.vis_single_data, dataset_type=args.dataset_type, car_model=args.car_model, vis_flow=False)
+    vis_occ_single_on_3d(args.vis_single_data, dataset_type=args.dataset_type, car_model=args.car_model, vis_flow=False, use_camera_mask=args.use_camera_mask, gt_path=args.gt_path)
     # # GT Flow visualization
     # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, dataset_type=args.dataset_type, vis_gt=True, vis_flow=True, car_model=args.car_model)
-    # # Pred Flow visualization
-    # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, dataset_type=args.dataset_type, vis_gt=False, vis_flow=True, car_model=args.car_model)
+    # # Pred Flow visualization (without camera mask)
+    # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, load_camera_mask=False, dataset_type=args.dataset_type, vis_gt=False, vis_flow=True, car_model=args.car_model)
+    # # Pred Flow visualization (with camera mask from GT)
+    # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, load_camera_mask=True, dataset_type=args.dataset_type, vis_gt=False, vis_flow=True, car_model=args.car_model)
     # # Single Flow data visualization
-    # vis_occ_single_on_3d(args.vis_single_data, dataset_type=args.dataset_type, car_model=args.car_model, vis_flow=True)
+    # vis_occ_single_on_3d(args.vis_single_data, dataset_type=args.dataset_type, car_model=args.car_model, vis_flow=True, use_camera_mask=args.use_camera_mask, gt_path=args.gt_path)
 

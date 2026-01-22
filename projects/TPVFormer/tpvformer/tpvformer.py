@@ -24,6 +24,7 @@ class TPVFormer(Base3DSegmentor):
                  lovasz_input='voxel',
                  ce_input='voxel',
                  dataset_name=None,  # 'occ3d' or None for traditional GT
+                 save_results=False,  # Save prediction results to disk
                  init_cfg=None):
 
         super().__init__(data_preprocessor=data_preprocessor, init_cfg=init_cfg)
@@ -43,6 +44,7 @@ class TPVFormer(Base3DSegmentor):
         self.ce_input = ce_input  # 'voxel' or 'points'
         self.ce_loss_func = nn.CrossEntropyLoss(ignore_index=ignore_label)
         self.dataset_name = dataset_name  # Store dataset_name for predict method
+        self.save_results = save_results  # Save prediction results to disk
 
         self.grid_mask = GridMask(
             True, True, rotate=1, offset=False, ratio=0.5, mode=1, prob=0.7)
@@ -344,6 +346,7 @@ class TPVFormer(Base3DSegmentor):
             if use_occ3d_format:
                 # STCOcc 형식으로 반환 (occ3d용)
                 import numpy as np
+                import os
                 
                 if isinstance(outputs, tuple):
                     logits_vox, logits_pts = outputs
@@ -372,6 +375,29 @@ class TPVFormer(Base3DSegmentor):
                     img_meta.get('index', i) if isinstance(img_meta, dict) else i
                     for i, img_meta in enumerate(img_metas)
                 ]
+                
+                # Save results to disk (following STCOcc implementation)
+                if self.save_results:
+                    # Use token (sample token) as filename, not sample_idx
+                    sample_token = [
+                        img_meta.get('token', img_meta.get('sample_idx', i)) if isinstance(img_meta, dict) else i
+                        for i, img_meta in enumerate(img_metas)
+                    ]
+                    scene_name = [
+                        img_meta.get('scene_name', 'unknown') if isinstance(img_meta, dict) else 'unknown'
+                        for img_meta in img_metas
+                    ]
+                    
+                    # Create save directories
+                    for name in scene_name:
+                        save_dir = f'results/TPVFormer/{name}'
+                        if not os.path.exists(save_dir):
+                            os.makedirs(save_dir)
+                    
+                    # Save predictions as npz files (use token as filename)
+                    for i, token in enumerate(sample_token):
+                        save_path = f'results/TPVFormer/{scene_name[i]}/{token}.npz'
+                        np.savez(save_path, semantics=return_dict['occ_results'][i])
                 
                 # Also store in data_samples for backward compatibility
                 for i, data_sample in enumerate(batch_data_samples):
