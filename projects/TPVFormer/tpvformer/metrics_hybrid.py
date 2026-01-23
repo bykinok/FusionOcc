@@ -184,6 +184,57 @@ class OccupancyMetricHybrid(BaseMetric):
             if gt[i] < self.num_classes and pred[i] < self.num_classes:
                 confusion_matrix[gt[i], pred[i]] += 1
     
+    def evaluate(self, size: int):
+        """Override evaluate to handle both traditional and stcocc modes.
+        
+        For traditional mode:
+        1. process() directly accumulates confusion matrices on each rank
+        2. We need to aggregate confusion matrices from all ranks before computing metrics
+        3. all_reduce must be called on ALL ranks (not just rank 0)
+        
+        For stcocc mode:
+        1. process() delegates to self.stcocc_metric.process()
+        2. But mmengine only collects OccupancyMetricHybrid's self.results, not self.stcocc_metric.results
+        3. So we need to manually call stcocc_metric.evaluate() which handles its own collection
+        
+        Args:
+            size (int): Length of the dataset.
+            
+        Returns:
+            dict: Computed metrics.
+        """
+        import torch.distributed as dist
+        
+        if self.mode == 'stcocc':
+            # For STCOcc mode, directly call the internal metric's evaluate()
+            # This allows it to handle its own result collection and computation
+            return self.stcocc_metric.evaluate(size)
+        else:
+            # Traditional mode: aggregate confusion matrices
+            if dist.is_available() and dist.is_initialized():
+                backend = dist.get_backend()
+                device = torch.device('cuda' if backend == 'nccl' else 'cpu')
+                
+                # Convert to tensor for all_reduce
+                cm_pts_tensor = torch.from_numpy(self.confusion_matrix_pts.astype(np.int64)).to(device)
+                cm_vox_tensor = torch.from_numpy(self.confusion_matrix_vox.astype(np.int64)).to(device)
+                
+                # All-reduce: sum confusion matrices from all processes
+                dist.all_reduce(cm_pts_tensor, op=dist.ReduceOp.SUM)
+                dist.all_reduce(cm_vox_tensor, op=dist.ReduceOp.SUM)
+                
+                # Convert back to numpy
+                self.confusion_matrix_pts = cm_pts_tensor.cpu().numpy()
+                self.confusion_matrix_vox = cm_vox_tensor.cpu().numpy()
+                
+                # Clear tensors
+                del cm_pts_tensor, cm_vox_tensor
+                if backend == 'nccl':
+                    torch.cuda.empty_cache()
+            
+            # Call parent's evaluate() which will call compute_metrics() on rank 0
+            return super().evaluate(size)
+    
     def compute_metrics(self, results):
         """Compute metrics from processed results."""
         if self.mode == 'stcocc':

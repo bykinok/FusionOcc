@@ -137,16 +137,15 @@ class OccupancyMetric(BaseMetric):
             if 'flow_results' in data_sample:
                 pred_dict['flow_results'] = data_sample['flow_results']
             
-            self.predictions.append(pred_dict)
-        
-        # Store processed results (will be computed in compute_metrics)
-        self.results.append({})
+            # CRITICAL: Store in self.results (not self.predictions) so mmengine collects it
+            # mmengine automatically gathers self.results from all ranks to rank 0
+            self.results.append(pred_dict)
     
     def compute_metrics(self, results: list) -> Dict[str, float]:
         """Compute the metrics from processed results.
         
         Args:
-            results (list): The processed results of each batch.
+            results (list): The processed results of each batch (gathered from all ranks).
             
         Returns:
             Dict[str, float]: The computed metrics.
@@ -157,6 +156,11 @@ class OccupancyMetric(BaseMetric):
                 'mIoU': 0.0,
                 'count': 0
             }
+        
+        # Use gathered results instead of self.predictions
+        # In DDP, mmengine automatically collects self.results from all ranks to rank 0
+        # and passes it as the 'results' parameter
+        self.predictions = results
         
         try:
             if self.eval_metric == 'rayiou':

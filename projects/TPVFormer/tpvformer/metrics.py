@@ -157,6 +157,48 @@ class OccupancyMetric(BaseMetric):
             if gt[i] < self.num_classes and pred[i] < self.num_classes:
                 confusion_matrix[gt[i], pred[i]] += 1
     
+    def evaluate(self, size: int):
+        """Override evaluate to perform all_reduce before compute_metrics.
+        
+        This is necessary because:
+        1. process() directly accumulates confusion matrices on each rank
+        2. compute_metrics() is only called on rank 0
+        3. We need to aggregate confusion matrices from all ranks before computing metrics
+        4. all_reduce must be called on ALL ranks (not just rank 0)
+        
+        Args:
+            size (int): Length of the dataset.
+            
+        Returns:
+            dict: Computed metrics.
+        """
+        import torch.distributed as dist
+        
+        # Aggregate confusion matrices from all ranks (if DDP)
+        if dist.is_available() and dist.is_initialized():
+            backend = dist.get_backend()
+            device = torch.device('cuda' if backend == 'nccl' else 'cpu')
+            
+            # Convert to tensor for all_reduce
+            cm_pts_tensor = torch.from_numpy(self.confusion_matrix_pts.astype(np.int64)).to(device)
+            cm_vox_tensor = torch.from_numpy(self.confusion_matrix_vox.astype(np.int64)).to(device)
+            
+            # All-reduce: sum confusion matrices from all processes
+            dist.all_reduce(cm_pts_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(cm_vox_tensor, op=dist.ReduceOp.SUM)
+            
+            # Convert back to numpy
+            self.confusion_matrix_pts = cm_pts_tensor.cpu().numpy()
+            self.confusion_matrix_vox = cm_vox_tensor.cpu().numpy()
+            
+            # Clear tensors
+            del cm_pts_tensor, cm_vox_tensor
+            if backend == 'nccl':
+                torch.cuda.empty_cache()
+        
+        # Call parent's evaluate() which will call compute_metrics() on rank 0
+        return super().evaluate(size)
+    
     def compute_metrics(self, results):
         """Compute metrics compatible with original eval.py style.
         
