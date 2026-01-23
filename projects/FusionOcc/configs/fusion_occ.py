@@ -387,17 +387,21 @@ test_dataloader = dict(
     )
 )
 
-# custom_hooks = [
-#     dict(
-#         type='MEGVIIEMAHook',
-#         init_updates=10560,
-#         priority='NORMAL',
-#     ),
-#     dict(
-#         type='SyncbnControlHook',
-#         syncbn_start_epoch=0,
-#     ),
-# ]
+custom_hooks = [
+    dict(
+        type='EMAHook',
+        ema_type='ExponentialMovingAverage',
+        momentum=0.001,  # Equivalent to decay=0.999 in MEGVII
+        interval=1,  # Update EMA every iteration
+        begin_iter=0,  # Start EMA from the beginning
+        strict_load=False,
+        priority='NORMAL',
+    ),
+    dict(
+        type='SyncBNHook',  # Custom hook in fusionocc/hooks/syncbn_hook.py
+        syncbn_start_epoch=0,  # Convert to SyncBN from epoch 0
+    ),
+]
 
 # Override default_hooks to enable checkpoint saving
 default_hooks = dict(
