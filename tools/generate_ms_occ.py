@@ -1,6 +1,8 @@
 import numpy as np
 import torch
 import mmcv
+from mmengine import fileio
+from mmengine.utils import track_iter_progress
 import os
 import argparse
 
@@ -115,9 +117,9 @@ def downsample_mask(mask, voxel_size=(200, 200, 16), downscale=2):
 def main(args):
     test_dataset = args.dataset
     train_pkl_path = args.pkl_path
-    train_pkl = mmcv.load(train_pkl_path)
+    train_pkl = fileio.load(train_pkl_path)
 
-    for info in mmcv.track_iter_progress(train_pkl['infos']):
+    for info in track_iter_progress(train_pkl['infos']):
         occ_path = info['occ_path']
         if test_dataset == 'openocc':
             occ_path = info['occ_path'].replace('gts', 'openocc_v2')
@@ -135,38 +137,38 @@ def main(args):
         labels = torch.from_numpy(labels)
         
         # load masks if they exist
-        camera_mask = label_data['camera_mask'] if 'camera_mask' in label_data else None
-        lidar_mask = label_data['lidar_mask'] if 'lidar_mask' in label_data else None
+        camera_mask = label_data['mask_camera'] if 'mask_camera' in label_data else None
+        lidar_mask = label_data['mask_lidar'] if 'mask_lidar' in label_data else None
 
         # process downsample 1/2, 1/4, 1/8
         labels_1_2 = downsample_label(labels, downscale=2, empty_cls_idx=empty_cls_idx)
         save_data_1_2 = {'semantics': labels_1_2, 'flow': labels_1_2}
         if camera_mask is not None:
             camera_mask_1_2 = downsample_mask(camera_mask, downscale=2)
-            save_data_1_2['camera_mask'] = camera_mask_1_2
+            save_data_1_2['mask_camera'] = camera_mask_1_2
         if lidar_mask is not None:
             lidar_mask_1_2 = downsample_mask(lidar_mask, downscale=2)
-            save_data_1_2['lidar_mask'] = lidar_mask_1_2
+            save_data_1_2['mask_lidar'] = lidar_mask_1_2
         np.savez_compressed(save_path_1_2, **save_data_1_2)
 
         labels_1_4 = downsample_label(labels, downscale=4, empty_cls_idx=empty_cls_idx)
         save_data_1_4 = {'semantics': labels_1_4, 'flow': labels_1_4}
         if camera_mask is not None:
             camera_mask_1_4 = downsample_mask(camera_mask, downscale=4)
-            save_data_1_4['camera_mask'] = camera_mask_1_4
+            save_data_1_4['mask_camera'] = camera_mask_1_4
         if lidar_mask is not None:
             lidar_mask_1_4 = downsample_mask(lidar_mask, downscale=4)
-            save_data_1_4['lidar_mask'] = lidar_mask_1_4
+            save_data_1_4['mask_lidar'] = lidar_mask_1_4
         np.savez_compressed(save_path_1_4, **save_data_1_4)
 
         labels_1_8 = downsample_label(labels, downscale=8, empty_cls_idx=empty_cls_idx)
         save_data_1_8 = {'semantics': labels_1_8, 'flow': labels_1_8}
         if camera_mask is not None:
             camera_mask_1_8 = downsample_mask(camera_mask, downscale=8)
-            save_data_1_8['camera_mask'] = camera_mask_1_8
+            save_data_1_8['mask_camera'] = camera_mask_1_8
         if lidar_mask is not None:
             lidar_mask_1_8 = downsample_mask(lidar_mask, downscale=8)
-            save_data_1_8['lidar_mask'] = lidar_mask_1_8
+            save_data_1_8['mask_lidar'] = lidar_mask_1_8
         np.savez_compressed(save_path_1_8, **save_data_1_8)
 
 
