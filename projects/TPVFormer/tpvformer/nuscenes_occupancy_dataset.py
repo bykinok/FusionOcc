@@ -150,11 +150,16 @@ class NuScenesOccupancyDataset(BaseDataset):
                 preprocessing pipelines. It includes the following keys:
 
                 - sample_idx (str): Sample index.
+                - index (int): Dataset index (for STCOcc metric compatibility).
                 - pts_filename (str): Filename of point clouds.
                 - img_filename (str): Filename of images.
                 - ann_info (dict): Annotation info.
         """
         data_info = super().get_data_info(index)
+        
+        # CRITICAL: Add 'index' for STCOcc metric compatibility
+        # STCOcc detector expects img_meta['index'] to match predictions with GT
+        data_info['index'] = index
         
         # Add occupancy-specific information
         if 'instances_3d' in data_info:

@@ -371,8 +371,9 @@ class TPVFormer(Base3DSegmentor):
                 # Create STCOcc-compatible return format
                 return_dict = dict()
                 return_dict['occ_results'] = pred_occ_np  # (B, W, H, Z) numpy array
+                # CRITICAL: Use sample_idx if index is not available
                 return_dict['index'] = [
-                    img_meta.get('index', i) if isinstance(img_meta, dict) else i
+                    img_meta.get('index', img_meta.get('sample_idx', i)) if isinstance(img_meta, dict) else i
                     for i, img_meta in enumerate(img_metas)
                 ]
                 

@@ -184,27 +184,67 @@ class OccupancyMetric(BaseMetric):
             self.predictions = []
     
     def _compute_miou(self) -> Dict[str, float]:
-        """Compute standard mIoU metric."""
-        pred_sems, gt_sems = [], []
-        data_index = []
+        """Compute standard mIoU metric.
         
-        print(f'\nStarting Evaluation...')
+        CRITICAL: Match original STCOcc evaluation logic exactly:
+        1. Use actual indices from result['index'] (not sequential)
+        2. Remove duplicates with processed_set
+        3. Match predictions with GT using actual indices
+        """
         from tqdm import tqdm
         
-        # Collect predictions in order (ignore reported indices as they may be incorrect)
-        sample_idx = 0
+        print(f'\nStarting Evaluation...')
+        
+        # CRITICAL: Match original STCOcc logic exactly
+        # Original code from STCOcc_ori/mmdet3d/datasets/nuscenes_dataset_occ.py:
+        # processed_set = set()
+        # for result in results:
+        #     data_id = result['index']
+        #     for i, id in enumerate(data_id):
+        #         if id in processed_set: continue
+        #         processed_set.add(id)
+        #         data_index.append(id)
+        #         pred_sems.append(result['occ_results'][i])
+        
+        pred_sems = []
+        data_index = []
+        processed_set = set()
+        
         for pred_dict in self.predictions:
             occ_results = pred_dict['occ_results']
-            for i in range(len(occ_results)):
-                pred_sem = occ_results[i]
-                data_index.append(sample_idx)
-                pred_sems.append(pred_sem)
-                sample_idx += 1
+            
+            # Get actual indices from pred_dict (matching original: result['index'])
+            if 'index' in pred_dict and pred_dict['index'] is not None:
+                data_id = pred_dict['index']  # Match original variable name
+                
+                # Handle different formats
+                if not isinstance(data_id, (list, tuple, np.ndarray)):
+                    # Single value - convert to list
+                    data_id = [data_id]
+                
+                # Match original logic: iterate through indices
+                for i, id in enumerate(data_id):
+                    if id in processed_set:
+                        continue  # Skip duplicates (same as original)
+                    processed_set.add(id)
+                    
+                    if i < len(occ_results):
+                        pred_sem = occ_results[i]
+                        data_index.append(id)
+                        pred_sems.append(pred_sem)
+                    else:
+                        print(f"Warning: Index {i} out of range for occ_results (len={len(occ_results)})")
+            else:
+                # FALLBACK: No index - this should not happen in STCOcc
+                print(f"ERROR: No 'index' in pred_dict! Cannot match with GT.")
+                continue
         
-        # Load ground truth and evaluate
+        # Load ground truth and evaluate (matching original STCOcc logic)
         for index in tqdm(data_index):
             if index >= len(self.data_infos):
+                print(f"Warning: Index {index} >= dataset size {len(self.data_infos)}. Skipping.")
                 break
+            
             info = self.data_infos[index]
             
             occ_path = info['occ_path']
@@ -215,6 +255,8 @@ class OccupancyMetric(BaseMetric):
             try:
                 occ_gt = np.load(occ_path, allow_pickle=True)
                 gt_semantics = occ_gt['semantics']
+                
+                # Match prediction with GT using the same index
                 pr_semantics = pred_sems[data_index.index(index)]
                 
                 if self.dataset_name == 'occ3d' or self.use_image_mask:
