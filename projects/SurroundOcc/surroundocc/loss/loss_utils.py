@@ -13,13 +13,14 @@ def multiscale_supervision(gt_occ, ratio, gt_shape):
     
     return gt
 
-def geo_scal_loss(pred, ssc_target, semantic=True):
+def geo_scal_loss(pred, ssc_target, semantic=True, empty_idx=0):
     """Geometric scale loss for occupancy prediction.
     
     Args:
         pred: Predicted occupancy logits
         ssc_target: Ground truth semantic labels
         semantic: Whether to use semantic mode (softmax) or binary mode (sigmoid)
+        empty_idx: Index of the empty/free class (0 for original, 17 for occ3d)
         
     Returns:
         Loss value combining precision, recall, and specificity
@@ -28,14 +29,19 @@ def geo_scal_loss(pred, ssc_target, semantic=True):
     if semantic:
         pred = F.softmax(pred, dim=1)
         # Compute empty and nonempty probabilities
-        empty_probs = pred[:, 0, :, :, :]
+        # For original SurroundOcc: empty_idx=0 (class 0 is empty)
+        # For Occ3D: empty_idx=17 (class 17 is free)
+        empty_probs = pred[:, empty_idx, :, :, :]
     else:
         empty_probs = 1 - torch.sigmoid(pred)
     nonempty_probs = 1 - empty_probs
 
     # Remove unknown voxels
     mask = ssc_target != 255
-    nonempty_target = ssc_target != 0
+    # nonempty = not empty_idx
+    # For original: nonempty = (target != 0)
+    # For occ3d: nonempty = (target != 17)
+    nonempty_target = ssc_target != empty_idx
     nonempty_target = nonempty_target[mask].float()
     nonempty_probs = nonempty_probs[mask]
     empty_probs = empty_probs[mask]
@@ -51,12 +57,13 @@ def geo_scal_loss(pred, ssc_target, semantic=True):
     )
 
 
-def sem_scal_loss(pred, ssc_target):
+def sem_scal_loss(pred, ssc_target, empty_idx=0):
     """Semantic scale loss for class-wise precision/recall/specificity.
     
     Args:
         pred: Predicted occupancy logits
         ssc_target: Ground truth semantic labels
+        empty_idx: Index of the empty/free class (0 for original, 17 for occ3d)
         
     Returns:
         Average loss across all classes

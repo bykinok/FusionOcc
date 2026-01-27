@@ -93,29 +93,45 @@ class OccupancyMetricHybrid(BaseMetric):
             data_batch (dict): A batch of data from the dataloader.
             data_samples (Sequence[dict]): A batch of outputs from the model.
         """
-        # STCOcc expects predictions in occ_results format
-        # Model's predict method already sets occ_results with 18 classes (occ3d format)
-        # Just ensure index is set for each sample
+        # STCOcc expects predictions in dict format
+        # Convert Det3DDataSample objects to dicts for STCOcc compatibility
+        converted_samples = []
+        
         for data_sample in data_samples:
             # Handle both dict and object types
             is_dict = isinstance(data_sample, dict)
             
-            # Ensure index is set
-            has_index = 'index' in data_sample if is_dict else hasattr(data_sample, 'index')
-            
-            if not has_index:
-                # Try to get sample_idx from metainfo
-                if is_dict:
+            if is_dict:
+                # Already dict, just ensure index is set
+                if 'index' not in data_sample:
                     metainfo = data_sample.get('metainfo', {})
                     sample_idx = metainfo.get('sample_idx', 0) if isinstance(metainfo, dict) else 0
                     data_sample['index'] = sample_idx
+                converted_samples.append(data_sample)
+            else:
+                # Convert Det3DDataSample to dict for STCOcc compatibility
+                sample_dict = {}
+                
+                # Extract occ_results
+                if hasattr(data_sample, 'occ_results'):
+                    sample_dict['occ_results'] = data_sample.occ_results
+                
+                # Extract index
+                if hasattr(data_sample, 'index'):
+                    sample_dict['index'] = data_sample.index
+                elif hasattr(data_sample, 'metainfo') and 'sample_idx' in data_sample.metainfo:
+                    sample_dict['index'] = data_sample.metainfo['sample_idx']
                 else:
-                    if hasattr(data_sample, 'metainfo') and 'sample_idx' in data_sample.metainfo:
-                        data_sample.index = data_sample.metainfo['sample_idx']
-                    else:
-                        data_sample.index = 0
+                    sample_dict['index'] = 0
+                
+                # Extract flow_results if available (for rayiou)
+                if hasattr(data_sample, 'flow_results'):
+                    sample_dict['flow_results'] = data_sample.flow_results
+                
+                converted_samples.append(sample_dict)
         
-        self.stcocc_metric.process(data_batch, data_samples)
+        # Pass converted dict samples to STCOcc metric
+        self.stcocc_metric.process(data_batch, converted_samples)
     
     def compute_metrics(self, results: list) -> Dict[str, float]:
         """Compute the metrics from processed results.

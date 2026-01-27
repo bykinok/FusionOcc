@@ -56,6 +56,7 @@ class OccHead(BaseModule):
                  embed_dims: Optional[List[int]] = None,
                  img_channels: Optional[List[int]] = None,
                  use_semantic: bool = True,
+                 dataset_name: Optional[str] = None,
                  init_cfg: Optional[dict] = None,
                  **kwargs):
         super(OccHead, self).__init__(init_cfg=init_cfg)
@@ -63,6 +64,15 @@ class OccHead(BaseModule):
         self.conv_input = conv_input or [512, 256, 128, 64, 64]
         self.conv_output = conv_output or [256, 128, 64, 64, 32]
         self.num_classes = num_classes
+        self.dataset_name = dataset_name
+        
+        # Determine empty class index based on dataset
+        # Original SurroundOcc (17 classes): class 0 = empty
+        # Occ3D format (18 classes): class 0 = others, class 17 = free/empty
+        if dataset_name == 'occ3d' and num_classes == 18:
+            self.empty_class_idx = 17  # Occ3D: class 17 is free space
+        else:
+            self.empty_class_idx = 0   # Original: class 0 is empty
         self.volume_h = volume_h if isinstance(volume_h, list) else [volume_h]
         self.volume_w = volume_w if isinstance(volume_w, list) else [volume_w]
         self.volume_z = volume_z if isinstance(volume_z, list) else [volume_z]
@@ -337,7 +347,7 @@ class OccHead(BaseModule):
                 
                 # Add geo_scal_loss to binary loss (following original implementation)
                 loss_occ_i = (F.binary_cross_entropy_with_logits(pred, gt) + 
-                             geo_scal_loss(pred, gt.long(), semantic=False))
+                             geo_scal_loss(pred, gt.long(), semantic=False, empty_idx=self.empty_class_idx))
                 loss_weight = (0.5) ** (len(preds_dicts['occ_preds']) - 1 - i)
                 loss_dict[f'loss_occ_{i}'] = loss_occ_i * loss_weight
         else:
@@ -354,8 +364,8 @@ class OccHead(BaseModule):
                 # CRITICAL FIX: Add sem_scal_loss and geo_scal_loss (matching original line 292)
                 # This is the main difference between original and reimplementation
                 loss_occ_i = (criterion(pred, gt.long()) + 
-                             sem_scal_loss(pred, gt.long()) + 
-                             geo_scal_loss(pred, gt.long()))
+                             sem_scal_loss(pred, gt.long(), empty_idx=self.empty_class_idx) + 
+                             geo_scal_loss(pred, gt.long(), semantic=True, empty_idx=self.empty_class_idx))
                 
                 loss_weight = (0.5) ** (len(preds_dicts['occ_preds']) - 1 - i)
                 loss_dict[f'loss_occ_{i}'] = loss_occ_i * loss_weight

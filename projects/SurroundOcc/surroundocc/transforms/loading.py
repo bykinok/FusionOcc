@@ -15,17 +15,23 @@ class LoadOccupancy(BaseTransform):
         use_semantic (bool): Whether to use semantic occupancy. Default: True.
         occ_size (list): Size of the occupancy grid [H, W, D]. Default: [200, 200, 16].
         pc_range (list): Point cloud range [x_min, y_min, z_min, x_max, y_max, z_max].
+        use_occ3d (bool): Whether to use occ3d format. Default: False.
+        use_mask_camera (bool): Whether to use camera mask for loss calculation. Default: False.
+            If True, voxels not visible from camera are marked as ignore (255) for loss.
+            If False, all voxels keep their original labels.
     """
     
     def __init__(self, 
                  use_semantic=True, 
                  occ_size=[200, 200, 16],
                  pc_range=[-50, -50, -5.0, 50, 50, 3.0],
-                 use_occ3d=False):
+                 use_occ3d=False,
+                 use_mask_camera=False):
         self.use_semantic = use_semantic
         self.occ_size = occ_size
         self.pc_range = pc_range
         self.use_occ3d = use_occ3d
+        self.use_mask_camera = use_mask_camera
     
     def transform(self, results):
         """Transform function to load occupancy data.
@@ -56,35 +62,27 @@ class LoadOccupancy(BaseTransform):
                 occ_3d = np.load(occ_3d_path)
                 occ_3d_semantic = occ_3d['semantics']  # (200, 200, 16), occ3d format: 0=others, 1-16=semantic, 17=free
                 occ_3d_cam_mask = occ_3d['mask_camera']  # (200, 200, 16) boolean mask
+
+                gt_occ = occ_3d_semantic.astype(np.int32)               
                 
-                # Process semantic labels for occ3d format: 0 -> 18 (others), then 18 -> 17 (empty)
-                occ_3d_semantic_processed = occ_3d_semantic.copy()
-                occ_3d_semantic_processed[occ_3d_semantic_processed == 0] = 18
-                occ_3d_semantic_processed[occ_3d_semantic_processed == 17] = 0
-                occ_3d_semantic_processed[occ_3d_semantic_processed == 18] = 17
-                
+                if self.use_mask_camera:
+                    occ_3d_gt_masked = np.where(occ_3d_cam_mask, gt_occ, 255).astype(np.uint8)
+                else:
+                    occ_3d_gt_masked = gt_occ.astype(np.uint8)
+
                 # Convert to torch tensor for processing
-                occ_3d_gt = torch.from_numpy(occ_3d_semantic_processed).long()  # (200, 200, 16)
-                occ_3d_cam_mask = torch.from_numpy(occ_3d_cam_mask).bool()  # (200, 200, 16) - must be bool for indexing
+                gt_occ_tensor = torch.from_numpy(occ_3d_gt_masked).long()
                 
-                # ===== occ3d format (18 classes: 0=noise, 1-16=semantic, 17=free) =====
-                # Create masked version (visible by camera) - DENSE format (200, 200, 16)
-                # Apply camera mask: invisible voxels -> 255 (ignore)
-                occ_3d_gt_masked = occ_3d_gt.clone()  # (200, 200, 16)
-                occ_3d_gt_masked[~occ_3d_cam_mask] = 255  # Set invisible voxels to 255 (ignore)
-                
-                # Store dense GT for evaluation (compatible with STCOcc metric)
-                results['occ_3d_masked'] = occ_3d_gt_masked.numpy().astype(np.uint8)  # (200, 200, 16)
-                results['occ_3d'] = occ_3d_gt.numpy().astype(np.uint8)  # (200, 200, 16)
-                
-                # For training, create sparse format from full GT
-                # STCOcc uses full GT for training, camera mask only for evaluation
-                all_coords = torch.nonzero(occ_3d_gt < 17, as_tuple=False)  # All non-empty voxels (0-16), shape: (N, 3)
+                # For training, create sparse format including ALL classes (0-17) and ignore label (255)
+                # When use_mask_camera=True, invisible voxels are marked as 255
+                # This allows the model to distinguish between others(0) and free(17)
+                # and properly ignore masked voxels in loss calculation
+                all_coords = torch.nonzero(gt_occ_tensor >= 0, as_tuple=False)  # All voxels including 255, shape: (N, 3)
                 
                 if len(all_coords) > 0:
                     # Vectorized sparse conversion (100-200x faster than Python loop)
-                    # Extract labels for all coordinates at once
-                    labels = occ_3d_gt[all_coords[:, 0], all_coords[:, 1], all_coords[:, 2]]  # (N,)
+                    # Extract labels for all coordinates (0-17 for valid, 255 for masked)
+                    labels = gt_occ_tensor[all_coords[:, 0], all_coords[:, 1], all_coords[:, 2]]  # (N,)
                     # Stack coordinates [x, y, z] and labels [class] -> [N, 4]
                     occ3d_sparse = torch.cat([all_coords.float(), labels.unsqueeze(1).float()], dim=1)
                     results['gt_occ'] = occ3d_sparse.cpu().numpy().astype(np.float32)

@@ -74,6 +74,7 @@ model = dict(
         embed_dims=_dim_,
         img_channels=[512, 512, 512],
         use_semantic=use_semantic,
+        dataset_name=None,  # Original format (17 classes, class 0 = empty)
         transformer_template=dict(
             type='PerceptionTransformer',
             embed_dims=_dim_,
