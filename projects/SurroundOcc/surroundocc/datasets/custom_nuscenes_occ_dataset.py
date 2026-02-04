@@ -94,7 +94,7 @@ class CustomNuScenesOccDataset(NuScenesDataset):
         # Load data directly without parent class filtering
         self._load_data_list_direct()
         
-        self.data_list = list(sorted(self.data_list, key=lambda e: e.get('timestamp', 0)))
+        # self.data_list = list(sorted(self.data_list, key=lambda e: e.get('timestamp', 0)))
         # Use load_interval if available, otherwise default to 1
         load_interval = getattr(self, 'load_interval', 1)
         self.data_list = self.data_list[::load_interval]
@@ -159,70 +159,70 @@ class CustomNuScenesOccDataset(NuScenesDataset):
         # Data loaded successfully
     
     
-    def get_data_info(self, index: int) -> dict:
-        """Get data info according to the given index.
+    # def get_data_info(self, index: int) -> dict:
+    #     """Get data info according to the given index.
         
-        Args:
-            index (int): Index of the sample data
+    #     Args:
+    #         index (int): Index of the sample data
             
-        Returns:
-            dict: Data information of the specified index
-        """
-        if index >= len(self.data_list):
-            raise IndexError(f"Index {index} out of range, dataset has {len(self.data_list)} samples")
+    #     Returns:
+    #         dict: Data information of the specified index
+    #     """
+    #     if index >= len(self.data_list):
+    #         raise IndexError(f"Index {index} out of range, dataset has {len(self.data_list)} samples")
         
-        data_info = self.data_list[index].copy()
+    #     data_info = self.data_list[index].copy()
         
-        # Convert data format for LoadMultiViewImageFromFiles
-        if 'images' not in data_info:
-            # Handle case where data is in individual keys format
-            if 'img_filename' in data_info and isinstance(data_info['img_filename'], list):
-                data_info['images'] = {}
-                cam_names = ['CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_FRONT_LEFT', 'CAM_BACK', 'CAM_BACK_LEFT', 'CAM_BACK_RIGHT']
+    #     # Convert data format for LoadMultiViewImageFromFiles
+    #     if 'images' not in data_info:
+    #         # Handle case where data is in individual keys format
+    #         if 'img_filename' in data_info and isinstance(data_info['img_filename'], list):
+    #             data_info['images'] = {}
+    #             cam_names = ['CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_FRONT_LEFT', 'CAM_BACK', 'CAM_BACK_LEFT', 'CAM_BACK_RIGHT']
                 
-                for i, cam_key in enumerate(cam_names):
-                    if i < len(data_info['img_filename']):
-                        data_info['images'][cam_key] = {
-                            'img_path': data_info['img_filename'][i],
-                            'filename': data_info['img_filename'][i],
-                            'cam2img': data_info['cam_intrinsic'][i] if 'cam_intrinsic' in data_info and i < len(data_info['cam_intrinsic']) else None,
-                            'lidar2cam': data_info['lidar2cam'][i] if 'lidar2cam' in data_info and i < len(data_info['lidar2cam']) else None,
-                            'lidar2img': data_info['lidar2img'][i] if 'lidar2img' in data_info and i < len(data_info['lidar2img']) else None
-                        }
-            elif 'cams' in data_info:
-                data_info['images'] = {}
-                for cam_key, cam_info in data_info['cams'].items():
-                    data_info['images'][cam_key] = {
-                        'img_path': cam_info['data_path'],
-                        'filename': cam_info['data_path'],
-                        'cam2img': cam_info['cam_intrinsic'],
-                        'lidar2cam': cam_info.get('sensor2lidar_rotation', None),
-                        'lidar2img': cam_info.get('lidar2img', None)
-                    }
+    #             for i, cam_key in enumerate(cam_names):
+    #                 if i < len(data_info['img_filename']):
+    #                     data_info['images'][cam_key] = {
+    #                         'img_path': data_info['img_filename'][i],
+    #                         'filename': data_info['img_filename'][i],
+    #                         'cam2img': data_info['cam_intrinsic'][i] if 'cam_intrinsic' in data_info and i < len(data_info['cam_intrinsic']) else None,
+    #                         'lidar2cam': data_info['lidar2cam'][i] if 'lidar2cam' in data_info and i < len(data_info['lidar2cam']) else None,
+    #                         'lidar2img': data_info['lidar2img'][i] if 'lidar2img' in data_info and i < len(data_info['lidar2img']) else None
+    #                     }
+    #         elif 'cams' in data_info:
+    #             data_info['images'] = {}
+    #             for cam_key, cam_info in data_info['cams'].items():
+    #                 data_info['images'][cam_key] = {
+    #                     'img_path': cam_info['data_path'],
+    #                     'filename': cam_info['data_path'],
+    #                     'cam2img': cam_info['cam_intrinsic'],
+    #                     'lidar2cam': cam_info.get('sensor2lidar_rotation', None),
+    #                     'lidar2img': cam_info.get('lidar2img', None)
+    #                 }
         
-        # Add occ_path if missing - construct from sample information
-        if 'occ_path' not in data_info:
-            # Try to construct occ_path from available information
-            if 'sample_idx' in data_info:
-                sample_idx = data_info['sample_idx']
-                data_info['occ_path'] = f'./data/nuscenes_occ/samples/{sample_idx}.npy'
-            elif 'pts_filename' in data_info:
-                # Extract sample info from pts_filename if available
-                pts_file = data_info['pts_filename']
-                if isinstance(pts_file, str) and 'LIDAR_TOP' in pts_file:
-                    import os
-                    base_name = os.path.basename(pts_file).replace('.pcd.bin', '')
-                    data_info['occ_path'] = f'./data/nuscenes_occ/samples/{base_name}.pcd.bin.npy'
+    #     # Add occ_path if missing - construct from sample information
+    #     if 'occ_path' not in data_info:
+    #         # Try to construct occ_path from available information
+    #         if 'sample_idx' in data_info:
+    #             sample_idx = data_info['sample_idx']
+    #             data_info['occ_path'] = f'./data/nuscenes_occ/samples/{sample_idx}.npy'
+    #         elif 'pts_filename' in data_info:
+    #             # Extract sample info from pts_filename if available
+    #             pts_file = data_info['pts_filename']
+    #             if isinstance(pts_file, str) and 'LIDAR_TOP' in pts_file:
+    #                 import os
+    #                 base_name = os.path.basename(pts_file).replace('.pcd.bin', '')
+    #                 data_info['occ_path'] = f'./data/nuscenes_occ/samples/{base_name}.pcd.bin.npy'
         
-        # Add required fields for mmdet3d compatibility
-        if 'ann_info' not in data_info:
-            data_info['ann_info'] = {
-                'gt_bboxes_3d': [],
-                'gt_labels_3d': [],
-                'gt_names': []
-            }
+    #     # Add required fields for mmdet3d compatibility
+    #     if 'ann_info' not in data_info:
+    #         data_info['ann_info'] = {
+    #             'gt_bboxes_3d': [],
+    #             'gt_labels_3d': [],
+    #             'gt_names': []
+    #         }
         
-        return data_info
+    #     return data_info
     
     
     def full_init(self):
@@ -425,6 +425,9 @@ class CustomNuScenesOccDataset(NuScenesDataset):
             lidarseg=info.get('lidarseg', None),
             curr=info,
         )
+        
+        # CRITICAL: Add integer index for evaluation metric matching
+        input_dict['index'] = index
         
         # Add occ_path if available in original data
         if 'occ_path' in info:

@@ -26,12 +26,18 @@ class LoadOccupancy(BaseTransform):
                  occ_size=[200, 200, 16],
                  pc_range=[-50, -50, -5.0, 50, 50, 3.0],
                  use_occ3d=False,
-                 use_mask_camera=False):
+                 use_mask_camera=False,
+                 use_mask_camera_1_2=False,
+                 use_mask_camera_1_4=False,
+                 use_mask_camera_1_8=False):
         self.use_semantic = use_semantic
         self.occ_size = occ_size
         self.pc_range = pc_range
         self.use_occ3d = use_occ3d
         self.use_mask_camera = use_mask_camera
+        self.use_mask_camera_1_2 = use_mask_camera_1_2
+        self.use_mask_camera_1_4 = use_mask_camera_1_4
+        self.use_mask_camera_1_8 = use_mask_camera_1_8
     
     def transform(self, results):
         """Transform function to load occupancy data.
@@ -47,28 +53,29 @@ class LoadOccupancy(BaseTransform):
         # Try to load real occupancy data first
         gt_occ = None
         
-        # breakpoint()
         # Load occ3d format if specified
         if self.use_occ3d and 'occ3d_gt_path' in results:
-            occ_3d_path = os.path.join(results['occ3d_gt_path'], 'labels.npz')
-            workspace_root = os.getcwd()
-            if occ_3d_path.startswith('./data/'):
-                occ_3d_path = occ_3d_path.replace('./data/', os.path.join(workspace_root, 'data') + '/')
-            elif not occ_3d_path.startswith('/'):
-                occ_3d_path = os.path.join(workspace_root, occ_3d_path)
+                        
+            occ3d_gt_label = os.path.join(results['occ3d_gt_path'], 'labels.npz')
+            occ3d_gt_label_1_2 = os.path.join(results['occ3d_gt_path'], 'labels_1_2.npz')
+            occ3d_gt_label_1_4 = os.path.join(results['occ3d_gt_path'], 'labels_1_4.npz')
+            occ3d_gt_label_1_8 = os.path.join(results['occ3d_gt_path'], 'labels_1_8.npz')
+
+            # Save GT path to results for debugging (will be passed to img_metas)
+            results['occ3d_gt_path'] = occ3d_gt_label
             
-            if os.path.exists(occ_3d_path):
+            if os.path.exists(occ3d_gt_label):
                 import torch
-                occ_3d = np.load(occ_3d_path)
+                occ_3d = np.load(occ3d_gt_label)
                 occ_3d_semantic = occ_3d['semantics']  # (200, 200, 16), occ3d format: 0=others, 1-16=semantic, 17=free
                 occ_3d_cam_mask = occ_3d['mask_camera']  # (200, 200, 16) boolean mask
 
-                gt_occ = occ_3d_semantic.astype(np.int32)               
+                # gt_occ = occ_3d_semantic.astype(np.int32)               
                 
                 if self.use_mask_camera:
-                    occ_3d_gt_masked = np.where(occ_3d_cam_mask, gt_occ, 255).astype(np.uint8)
+                    occ_3d_gt_masked = np.where(occ_3d_cam_mask, occ_3d_semantic, 255).astype(np.uint8)
                 else:
-                    occ_3d_gt_masked = gt_occ.astype(np.uint8)
+                    occ_3d_gt_masked = occ_3d_semantic.astype(np.uint8)
 
                 # Convert to torch tensor for processing
                 gt_occ_tensor = torch.from_numpy(occ_3d_gt_masked).long()
@@ -88,8 +95,52 @@ class LoadOccupancy(BaseTransform):
                     results['gt_occ'] = occ3d_sparse.cpu().numpy().astype(np.float32)
                 else:
                     results['gt_occ'] = np.zeros((0, 4), dtype=np.float32)
-                
-                return results
+            else:
+                raise FileNotFoundError(f"Occ3D ground truth file not found: {occ3d_gt_label}")
+
+            results['voxel_semantics'] = occ_3d_gt_masked
+            
+            # Load multiscale GT based on individual flags
+            if self.use_mask_camera_1_2:
+                if os.path.exists(occ3d_gt_label_1_2):
+                    occ_3d_1_2 = np.load(occ3d_gt_label_1_2)
+                    occ_3d_1_2_semantic = occ_3d_1_2['semantics']
+                    occ_3d_1_2_cam_mask = occ_3d_1_2['mask_camera']
+                    if self.use_mask_camera:
+                        occ_3d_1_2_gt_masked = np.where(occ_3d_1_2_cam_mask, occ_3d_1_2_semantic, 255).astype(np.uint8)
+                    else:
+                        occ_3d_1_2_gt_masked = occ_3d_1_2_semantic.astype(np.uint8)
+                    results['voxel_semantics_1_2'] = occ_3d_1_2_gt_masked
+                else:
+                    raise FileNotFoundError(f"Occ3D ground truth file not found: {occ3d_gt_label_1_2}")
+
+            if self.use_mask_camera_1_4:
+                if os.path.exists(occ3d_gt_label_1_4):
+                    occ_3d_1_4 = np.load(occ3d_gt_label_1_4)
+                    occ_3d_1_4_semantic = occ_3d_1_4['semantics']
+                    occ_3d_1_4_cam_mask = occ_3d_1_4['mask_camera']
+                    if self.use_mask_camera:
+                        occ_3d_1_4_gt_masked = np.where(occ_3d_1_4_cam_mask, occ_3d_1_4_semantic, 255).astype(np.uint8)
+                    else:
+                        occ_3d_1_4_gt_masked = occ_3d_1_4_semantic.astype(np.uint8)
+                    results['voxel_semantics_1_4'] = occ_3d_1_4_gt_masked
+                else:
+                    raise FileNotFoundError(f"Occ3D ground truth file not found: {occ3d_gt_label_1_4}")
+
+            if self.use_mask_camera_1_8:
+                if os.path.exists(occ3d_gt_label_1_8):
+                    occ_3d_1_8 = np.load(occ3d_gt_label_1_8)
+                    occ_3d_1_8_semantic = occ_3d_1_8['semantics']
+                    occ_3d_1_8_cam_mask = occ_3d_1_8['mask_camera']
+                    if self.use_mask_camera:
+                        occ_3d_1_8_gt_masked = np.where(occ_3d_1_8_cam_mask, occ_3d_1_8_semantic, 255).astype(np.uint8)
+                    else:
+                        occ_3d_1_8_gt_masked = occ_3d_1_8_semantic.astype(np.uint8)
+                    results['voxel_semantics_1_8'] = occ_3d_1_8_gt_masked
+                else:
+                    raise FileNotFoundError(f"Occ3D ground truth file not found: {occ3d_gt_label_1_8}")
+
+            return results
         
         if 'occ_path' in results:
             occ_path = results['occ_path']

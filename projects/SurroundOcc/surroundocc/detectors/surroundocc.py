@@ -322,6 +322,35 @@ class SurroundOcc(Base3DDetector):
         output = self.simple_test(img_metas, img)
         
         # Handle different output formats from simple_test
+        # NEW: Check for STCOcc format first: [{'occ_results': ..., 'index': ...}]
+        if isinstance(output, list) and len(output) > 0 and isinstance(output[0], dict) and 'occ_results' in output[0]:
+            # STCOcc format detected - directly store in batch_data_samples
+            return_dict = output[0]
+            occ_results = return_dict['occ_results']  # numpy array (B, H, W, Z)
+            indices = return_dict.get('index', list(range(len(batch_data_samples))))
+            
+            # Store results in batch_data_samples
+            for i, data_sample in enumerate(batch_data_samples):
+                if i < len(occ_results):
+                    if isinstance(data_sample, dict):
+                        # Keep batch dimension: add axis to make it (1, H, W, Z)
+                        data_sample['occ_results'] = np.expand_dims(occ_results[i], axis=0)
+                        # Store index from simple_test
+                        if i < len(indices):
+                            data_sample['index'] = indices[i]
+                    else:
+                        # Keep batch dimension for object type too
+                        data_sample.occ_results = np.expand_dims(occ_results[i], axis=0)
+                        # For object type, set index in metainfo (not as direct field)
+                        if i < len(indices):
+                            if hasattr(data_sample, 'metainfo'):
+                                data_sample.metainfo['index'] = indices[i]
+                            else:
+                                data_sample.set_metainfo({'index': indices[i]})
+            
+            return batch_data_samples
+        
+        # OLD format handling
         if isinstance(output, list) and len(output) > 0:
             # Check if first element is dict and has occupancy data
             if isinstance(output[0], dict) and 'occupancy' in output[0]:
@@ -461,6 +490,38 @@ class SurroundOcc(Base3DDetector):
             return [dict(occupancy=None)]
 
         output = self.simple_test_pts(img_feats, img_metas, rescale=rescale)
+        
+        # Convert output to STCOcc-compatible format
+        # Output from pts_bbox_head is: {'volume_embed': ..., 'occ_preds': [...]}
+        if isinstance(output, dict) and 'occ_preds' in output:
+            occ_preds = output['occ_preds']
+            
+            # Take the last (finest) prediction
+            if isinstance(occ_preds, list):
+                pred_occ = occ_preds[-1]
+            else:
+                pred_occ = occ_preds
+            
+            # Get argmax prediction for semantic occupancy
+            if self.use_semantic:
+                pred_softmax = torch.softmax(pred_occ, dim=1)
+                _, pred_occ_class = torch.max(pred_softmax, dim=1)
+            else:
+                pred_occ_class = torch.sigmoid(pred_occ[:, 0]) > 0.5
+            
+            # Convert to numpy
+            pred_occ_np = pred_occ_class.cpu().numpy().astype(np.uint8)
+            
+            # Create return dict in STCOcc format
+            return_dict = dict()
+            return_dict['occ_results'] = pred_occ_np
+            
+            # Return index list for metric matching
+            return_dict['index'] = [img_meta.get('index', i) 
+                                    for i, img_meta in enumerate(img_metas)]
+            
+            return [return_dict]  # Return as list of dict (STCOcc format)
+        
         return output
 
     def generate_output(self, pred_occ, img_metas):

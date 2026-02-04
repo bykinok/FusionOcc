@@ -17,8 +17,10 @@ occ_size = [200, 200, 16]
 use_semantic = True
 
 # Mask camera option
-use_mask_camera = True  # Use camera mask: only compute loss on voxels visible from camera
-
+use_mask_camera = True
+use_mask_camera_1_2 = False
+use_mask_camera_1_4 = False
+use_mask_camera_1_8 = False
 
 img_norm_cfg = dict(
     mean=[103.530, 116.280, 123.675], std=[1.0, 1.0, 1.0], to_rgb=False)
@@ -127,7 +129,10 @@ train_pipeline = [
          use_semantic=use_semantic,
          use_occ3d=True if dataset_name == 'occ3d' else False,
          pc_range=point_cloud_range if dataset_name == 'occ3d' else None,
-         use_mask_camera=use_mask_camera),
+         use_mask_camera=use_mask_camera,
+         use_mask_camera_1_2=use_mask_camera_1_2,
+         use_mask_camera_1_4=use_mask_camera_1_4,
+         use_mask_camera_1_8=use_mask_camera_1_8),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='PadMultiViewImage', size_divisor=32),
     dict(type='OccDefaultFormatBundle3D')
@@ -139,7 +144,10 @@ test_pipeline = [
          use_semantic=use_semantic,
          use_occ3d=True if dataset_name == 'occ3d' else False,
          pc_range=point_cloud_range if dataset_name == 'occ3d' else None,
-         use_mask_camera=use_mask_camera),
+         use_mask_camera=use_mask_camera,
+         use_mask_camera_1_2=use_mask_camera_1_2,
+         use_mask_camera_1_4=use_mask_camera_1_4,
+         use_mask_camera_1_8=use_mask_camera_1_8),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='PadMultiViewImage', size_divisor=32),
     dict(type='OccDefaultFormatBundle3D')
@@ -226,7 +234,7 @@ param_scheduler = [
 train_cfg = dict(
     type='EpochBasedTrainLoop',
     max_epochs=24,
-    val_interval=1)
+    val_interval=9999)
 
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
@@ -239,7 +247,9 @@ val_evaluator = dict(
     use_image_mask=True if dataset_name == 'occ3d' else False,
     ann_file='data/nuscenes/surroundocc-nuscenes_infos_val.pkl',
     data_root='data/nuscenes',
-    class_names=class_names)
+    class_names=class_names,
+    eval_metric='miou',
+    sort_by_timestamp=False)  # Dataset does NOT sort by timestamp (matching original SurroundOcc)
 
 test_evaluator = val_evaluator
 load_from = 'projects/SurroundOcc/pretrain/r101_dcn_fcos3d_pretrain.pth'

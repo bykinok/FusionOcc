@@ -24,6 +24,8 @@ class OccupancyMetricHybrid(BaseMetric):
                  ann_file: Optional[str] = None,
                  data_root: Optional[str] = None,
                  class_names: Optional[List[str]] = None,
+                 eval_metric: str = 'miou',
+                 sort_by_timestamp: bool = False,
                  collect_device='cpu', 
                  prefix=None):
         super().__init__(collect_device=collect_device, prefix=prefix)
@@ -31,6 +33,8 @@ class OccupancyMetricHybrid(BaseMetric):
         self.dataset_name = dataset_name
         self.num_classes = num_classes
         self.class_names = class_names or []
+        self.eval_metric = eval_metric
+        self.sort_by_timestamp = sort_by_timestamp
         
         # Import STCOcc metric directly without triggering registry conflicts
         import importlib.util
@@ -77,7 +81,8 @@ class OccupancyMetricHybrid(BaseMetric):
             dataset_name=dataset_name,
             ann_file=ann_file,
             data_root=data_root,
-            eval_metric='miou',
+            eval_metric=eval_metric,
+            sort_by_timestamp=sort_by_timestamp,
             collect_device=collect_device,
             prefix=prefix
         )
@@ -100,6 +105,8 @@ class OccupancyMetricHybrid(BaseMetric):
         for data_sample in data_samples:
             # Handle both dict and object types
             is_dict = isinstance(data_sample, dict)
+
+            # breakpoint()
             
             if is_dict:
                 # Already dict, just ensure index is set
@@ -132,6 +139,24 @@ class OccupancyMetricHybrid(BaseMetric):
         
         # Pass converted dict samples to STCOcc metric
         self.stcocc_metric.process(data_batch, converted_samples)
+    
+    def evaluate(self, size: int):
+        """Override evaluate to properly delegate to STCOcc metric.
+        
+        For STCOcc mode:
+        1. process() delegates to self.stcocc_metric.process()
+        2. But mmengine only collects OccupancyMetricHybrid's self.results, not self.stcocc_metric.results
+        3. So we need to manually call stcocc_metric.evaluate() which handles its own collection
+        
+        Args:
+            size (int): Length of the dataset.
+            
+        Returns:
+            dict: Computed metrics.
+        """
+        # Directly call the internal metric's evaluate()
+        # This allows it to handle its own result collection and computation
+        return self.stcocc_metric.evaluate(size)
     
     def compute_metrics(self, results: list) -> Dict[str, float]:
         """Compute the metrics from processed results.

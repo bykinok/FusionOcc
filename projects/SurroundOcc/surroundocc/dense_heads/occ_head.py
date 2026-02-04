@@ -343,8 +343,26 @@ class OccHead(BaseModule):
                 
                 # Multi-scale supervision using original implementation
                 ratio = 2 ** (len(preds_dicts['occ_preds']) - 1 - i)
-                gt = multiscale_supervision(gt_occ.clone(), ratio, preds_dicts['occ_preds'][i].shape)
+                if 'voxel_semantics' in img_metas[0]:
+                    if ratio == 1:
+                        gt = img_metas[0]['voxel_semantics']
+                    elif ratio == 2:
+                        gt = img_metas[0]['voxel_semantics_1_2']
+                    elif ratio == 4:
+                        gt = img_metas[0]['voxel_semantics_1_4']
+                    elif ratio == 8:
+                        gt = img_metas[0]['voxel_semantics_1_8']
+                else:
+                    gt = multiscale_supervision(gt_occ.clone(), ratio, preds_dicts['occ_preds'][i].shape)
                 
+                # Convert numpy array to tensor if needed
+                if isinstance(gt, np.ndarray):
+                    gt = torch.from_numpy(gt).to(pred.device)
+                
+                # Add batch dimension if needed (for voxel_semantics from img_metas)
+                if gt.dim() == 3:  # [H, W, D]
+                    gt = gt.unsqueeze(0)  # [1, H, W, D]
+                    
                 # Add geo_scal_loss to binary loss (following original implementation)
                 loss_occ_i = (F.binary_cross_entropy_with_logits(pred, gt) + 
                              geo_scal_loss(pred, gt.long(), semantic=False, empty_idx=self.empty_class_idx))
@@ -359,7 +377,25 @@ class OccHead(BaseModule):
                 ratio = 2 ** (len(preds_dicts['occ_preds']) - 1 - i)
                 
                 # Use original multiscale_supervision implementation
-                gt = multiscale_supervision(gt_occ.clone(), ratio, preds_dicts['occ_preds'][i].shape)
+                if 'voxel_semantics' in img_metas[0]:
+                    if ratio == 1:
+                        gt = img_metas[0]['voxel_semantics']
+                    elif ratio == 2:
+                        gt = img_metas[0]['voxel_semantics_1_2']
+                    elif ratio == 4:
+                        gt = img_metas[0]['voxel_semantics_1_4']
+                    elif ratio == 8:
+                        gt = img_metas[0]['voxel_semantics_1_8']
+                else:
+                    gt = multiscale_supervision(gt_occ.clone(), ratio, preds_dicts['occ_preds'][i].shape)
+                
+                # Convert numpy array to tensor if needed
+                if isinstance(gt, np.ndarray):
+                    gt = torch.from_numpy(gt).to(pred.device)
+                
+                # Add batch dimension if needed (for voxel_semantics from img_metas)
+                if gt.dim() == 3:  # [H, W, D]
+                    gt = gt.unsqueeze(0)  # [1, H, W, D]
                 
                 # CRITICAL FIX: Add sem_scal_loss and geo_scal_loss (matching original line 292)
                 # This is the main difference between original and reimplementation
