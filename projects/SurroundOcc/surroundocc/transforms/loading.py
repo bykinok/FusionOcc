@@ -100,45 +100,43 @@ class LoadOccupancy(BaseTransform):
 
             results['voxel_semantics'] = occ_3d_gt_masked
             
+            # breakpoint()
             # Load multiscale GT based on individual flags
-            if self.use_mask_camera_1_2:
-                if os.path.exists(occ3d_gt_label_1_2):
-                    occ_3d_1_2 = np.load(occ3d_gt_label_1_2)
-                    occ_3d_1_2_semantic = occ_3d_1_2['semantics']
-                    occ_3d_1_2_cam_mask = occ_3d_1_2['mask_camera']
-                    if self.use_mask_camera:
-                        occ_3d_1_2_gt_masked = np.where(occ_3d_1_2_cam_mask, occ_3d_1_2_semantic, 255).astype(np.uint8)
-                    else:
-                        occ_3d_1_2_gt_masked = occ_3d_1_2_semantic.astype(np.uint8)
-                    results['voxel_semantics_1_2'] = occ_3d_1_2_gt_masked
+            if os.path.exists(occ3d_gt_label_1_2):
+                occ_3d_1_2 = np.load(occ3d_gt_label_1_2)
+                occ_3d_1_2_semantic = occ_3d_1_2['semantics']
+                occ_3d_1_2_cam_mask = occ_3d_1_2['mask_camera']
+                if self.use_mask_camera_1_2:
+                    occ_3d_1_2_gt_masked = np.where(occ_3d_1_2_cam_mask, occ_3d_1_2_semantic, 255).astype(np.uint8)
                 else:
-                    raise FileNotFoundError(f"Occ3D ground truth file not found: {occ3d_gt_label_1_2}")
+                    occ_3d_1_2_gt_masked = occ_3d_1_2_semantic.astype(np.uint8)
+                results['voxel_semantics_1_2'] = occ_3d_1_2_gt_masked
+            else:
+                raise FileNotFoundError(f"Occ3D ground truth file not found: {occ3d_gt_label_1_2}")
 
-            if self.use_mask_camera_1_4:
-                if os.path.exists(occ3d_gt_label_1_4):
-                    occ_3d_1_4 = np.load(occ3d_gt_label_1_4)
-                    occ_3d_1_4_semantic = occ_3d_1_4['semantics']
-                    occ_3d_1_4_cam_mask = occ_3d_1_4['mask_camera']
-                    if self.use_mask_camera:
-                        occ_3d_1_4_gt_masked = np.where(occ_3d_1_4_cam_mask, occ_3d_1_4_semantic, 255).astype(np.uint8)
-                    else:
-                        occ_3d_1_4_gt_masked = occ_3d_1_4_semantic.astype(np.uint8)
-                    results['voxel_semantics_1_4'] = occ_3d_1_4_gt_masked
+            if os.path.exists(occ3d_gt_label_1_4):
+                occ_3d_1_4 = np.load(occ3d_gt_label_1_4)
+                occ_3d_1_4_semantic = occ_3d_1_4['semantics']
+                occ_3d_1_4_cam_mask = occ_3d_1_4['mask_camera']
+                if self.use_mask_camera_1_4:
+                    occ_3d_1_4_gt_masked = np.where(occ_3d_1_4_cam_mask, occ_3d_1_4_semantic, 255).astype(np.uint8)
                 else:
-                    raise FileNotFoundError(f"Occ3D ground truth file not found: {occ3d_gt_label_1_4}")
+                    occ_3d_1_4_gt_masked = occ_3d_1_4_semantic.astype(np.uint8)
+                results['voxel_semantics_1_4'] = occ_3d_1_4_gt_masked
+            else:
+                raise FileNotFoundError(f"Occ3D ground truth file not found: {occ3d_gt_label_1_4}")
 
-            if self.use_mask_camera_1_8:
-                if os.path.exists(occ3d_gt_label_1_8):
-                    occ_3d_1_8 = np.load(occ3d_gt_label_1_8)
-                    occ_3d_1_8_semantic = occ_3d_1_8['semantics']
-                    occ_3d_1_8_cam_mask = occ_3d_1_8['mask_camera']
-                    if self.use_mask_camera:
-                        occ_3d_1_8_gt_masked = np.where(occ_3d_1_8_cam_mask, occ_3d_1_8_semantic, 255).astype(np.uint8)
-                    else:
-                        occ_3d_1_8_gt_masked = occ_3d_1_8_semantic.astype(np.uint8)
-                    results['voxel_semantics_1_8'] = occ_3d_1_8_gt_masked
+            if os.path.exists(occ3d_gt_label_1_8):
+                occ_3d_1_8 = np.load(occ3d_gt_label_1_8)
+                occ_3d_1_8_semantic = occ_3d_1_8['semantics']
+                occ_3d_1_8_cam_mask = occ_3d_1_8['mask_camera']
+                if self.use_mask_camera_1_8:
+                    occ_3d_1_8_gt_masked = np.where(occ_3d_1_8_cam_mask, occ_3d_1_8_semantic, 255).astype(np.uint8)
                 else:
-                    raise FileNotFoundError(f"Occ3D ground truth file not found: {occ3d_gt_label_1_8}")
+                    occ_3d_1_8_gt_masked = occ_3d_1_8_semantic.astype(np.uint8)
+                results['voxel_semantics_1_8'] = occ_3d_1_8_gt_masked
+            else:
+                raise FileNotFoundError(f"Occ3D ground truth file not found: {occ3d_gt_label_1_8}")
 
             return results
         
