@@ -80,6 +80,7 @@ class OccupancyMetric(BaseMetric):
                 elif isinstance(data, list):
                     self.data_infos = data
                 
+                # breakpoint()
                 # Sort by timestamp if requested (depends on model's dataset ordering)
                 if self.data_infos and len(self.data_infos) > 0:
                     if self.sort_by_timestamp and 'timestamp' in self.data_infos[0]:
@@ -211,6 +212,7 @@ class OccupancyMetric(BaseMetric):
         processed_set = set()
         
         for pred_dict in self.predictions:
+            # breakpoint()
             occ_results = pred_dict['occ_results']
             
             # Get actual indices from pred_dict (matching original: result['index'])
@@ -246,10 +248,16 @@ class OccupancyMetric(BaseMetric):
                 break
             
             info = self.data_infos[index]
+
+            # breakpoint()
             
-            occ_path = info['occ_path']
-            if self.dataset_name == 'openocc':
-                occ_path = occ_path.replace('gts', 'openocc_v2')
+            # Priority: occ3d_gt_path (SurroundOcc format) > occ_path (STCOcc format)
+            if 'occ3d_gt_path' in info:
+                occ_path = info['occ3d_gt_path']
+            else:
+                occ_path = info['occ_path']
+                if self.dataset_name == 'openocc':
+                    occ_path = occ_path.replace('gts', 'openocc_v2')
             occ_path = os.path.join(occ_path, 'labels.npz')
             
             try:
