@@ -232,25 +232,10 @@ class OccHead(nn.Module):
                     if img_feats is not None and self.sample_from_img and transform is not None:
                         W_new, H_new, D_new = W * self.cascade_ratio, H * self.cascade_ratio, D * self.cascade_ratio
                         
-                        # Handle transform[6] being torch.Size, tensor, list, or tuple
+                        # Handle transform[6] being torch.Size, tensor, or tuple
                         # Extract H_img and W_img from various possible formats
                         img_shape = transform[6]
-                        if isinstance(img_shape, list):
-                            # img_shape is a list where each element is the size for that batch
-                            # e.g., [torch.Size([896, 1600]), torch.Size([896, 1600])]
-                            if len(img_shape) > b:
-                                batch_img_shape = img_shape[b]
-                                if isinstance(batch_img_shape, (torch.Size, tuple, list)):
-                                    H_img_val = batch_img_shape[0]
-                                    W_img_val = batch_img_shape[1]
-                                else:
-                                    # Fallback: assume it's a single value
-                                    H_img_val = batch_img_shape
-                                    W_img_val = batch_img_shape
-                            else:
-                                raise ValueError(f"img_shape list length {len(img_shape)} <= batch index {b}")
-                        elif isinstance(img_shape, (torch.Size, tuple)):
-                            # Single size for all batches
+                        if isinstance(img_shape, (torch.Size, tuple)):
                             H_img_val = img_shape[0]
                             W_img_val = img_shape[1]
                             # If H_img_val or W_img_val are still tuple/list, extract first element
@@ -259,7 +244,8 @@ class OccHead(nn.Module):
                             if isinstance(W_img_val, (tuple, list)):
                                 W_img_val = W_img_val[0]
                         else:
-                            raise ValueError(f"Unexpected img_shape format: {type(img_shape)}, content: {img_shape}")
+                            H_img_val = img_shape[0][b:b+1]
+                            W_img_val = img_shape[1][b:b+1]
                         
                         # Transform matrices don't have batch dimension, so unsqueeze them
                         # transform[i] has shape [n_cam, ...], need to make it [1, n_cam, ...]

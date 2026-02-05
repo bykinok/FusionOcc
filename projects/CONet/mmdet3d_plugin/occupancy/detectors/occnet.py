@@ -789,96 +789,53 @@ class OccNet(BaseModel):
         # Check if fine prediction exists (following original code)
         if output.get('output_voxels_fine') is not None and len(output.get('output_voxels_fine', [])) > 0:
             if output.get('output_coords_fine') is not None and len(output.get('output_coords_fine', [])) > 0:
-                # Handle batch processing for fine predictions
-                # output_voxels_fine and output_coords_fine are lists with one element per batch
-                batch_size = len(output['output_voxels_fine'])
+                fine_pred = output['output_voxels_fine'][0]  # [N, ncls]
+                fine_coord = output['output_coords_fine'][0]  # [3, N]
                 
-                # Get gt_occ shape - handle both batched and non-batched cases
-                if gt_occ.dim() == 4:  # [B, H, W, D]
-                    B, H, W, D = gt_occ.shape
-                    gt_single = gt_occ[0:1]  # Take first batch for template: [1, H, W, D]
-                else:  # [H, W, D]
-                    H, W, D = gt_occ.shape
-                    gt_single = gt_occ.unsqueeze(0)  # [1, H, W, D]
+                # Create pred_f with correct shape: [1, ncls, H, W, D]
+                pred_f = self.empty_idx * torch.ones_like(gt_occ).unsqueeze(0).unsqueeze(0).repeat(1, fine_pred.shape[1], 1, 1, 1).float()
                 
-                # Process each batch separately
-                pred_f_list = []
-                for b in range(batch_size):
-                    fine_pred = output['output_voxels_fine'][b]  # [N, ncls]
-                    fine_coord = output['output_coords_fine'][b]  # [3, N]
-                    ncls = fine_pred.shape[1]
-                    
-                    # Filter out coordinates that are out of bounds
-                    valid_mask = (
-                        (fine_coord[0] >= 0) & (fine_coord[0] < H) &
-                        (fine_coord[1] >= 0) & (fine_coord[1] < W) &
-                        (fine_coord[2] >= 0) & (fine_coord[2] < D)
-                    )
-                    
-                    fine_coord_valid = fine_coord[:, valid_mask]
-                    fine_pred_valid = fine_pred[valid_mask]
-                    
-                    # Create empty prediction grid for this batch: [1, ncls, H, W, D]
-                    # Use 0 for initialization (free space) for occ3d format
-                    pred_f_b = torch.zeros(1, ncls, H, W, D, device=fine_pred.device, dtype=torch.float32)
-                    
-                    # Fill in fine predictions at their valid coordinates
-                    if fine_coord_valid.shape[1] > 0:
-                        # fine_pred: [N, ncls] -> permute: [ncls, N] -> unsqueeze: [1, ncls, N]
-                        pred_f_b[0, :, fine_coord_valid[0], fine_coord_valid[1], fine_coord_valid[2]] = fine_pred_valid.permute(1, 0)
-                    
-                    pred_f_list.append(pred_f_b)
-                
-                # Concatenate all batches: [B, ncls, H, W, D]
-                pred_f = torch.cat(pred_f_list, dim=0)
+                # fine_pred: [N, ncls] -> permute: [ncls, N] -> unsqueeze: [1, ncls, N]
+                pred_f[:, :, fine_coord[0], fine_coord[1], fine_coord[2]] = fine_pred.permute(1, 0).unsqueeze(0)
             else:
-                # Fallback: if no coords, use the voxel predictions directly
                 pred_f = output['output_voxels_fine'][0]
-            
-            # Evaluate fine predictions
             SC_metric, _ = self.evaluation_semantic(pred_f, gt_occ, eval_type='SC', visible_mask=visible_mask)
             SSC_metric_fine, SSC_occ_metric_fine = self.evaluation_semantic(pred_f, gt_occ, eval_type='SSC', visible_mask=visible_mask)
 
         # Prepare pred_occ for evaluator (interpolate to gt size and take argmax)
         pred_for_eval = pred_f if pred_f is not None else pred_c
-        
         # Handle gt with or without batch dimension for shape extraction
         if gt_occ.dim() == 3:
             gt_shape = gt_occ.shape
-            batch_size = 1
-            gt_occ = gt_occ.unsqueeze(0)  # Add batch dim for consistent processing
         else:
-            batch_size, H, W, D = gt_occ.shape
+            _, H, W, D = gt_occ.shape
             gt_shape = (H, W, D)
         
         # Interpolate pred to gt size
         pred_interpolated = F.interpolate(pred_for_eval, size=list(gt_shape), mode='trilinear', align_corners=False).contiguous()
+        # Take argmax to get class indices
+        pred_occ_np = torch.argmax(pred_interpolated[0], dim=0).cpu().numpy()
         
-        # Process each batch and return results
-        test_outputs = []
-        for b in range(batch_size):
-            # Take argmax to get class indices for this batch
-            pred_occ_np = torch.argmax(pred_interpolated[b], dim=0).cpu().numpy()
-            
-            # Get gt as numpy for this batch
-            gt_occ_np = gt_occ[b].cpu().numpy()
+        # Get gt as numpy (remove batch dim if present)
+        if gt_occ.dim() == 4:
+            gt_occ_np = gt_occ[0].cpu().numpy()
+        else:
+            gt_occ_np = gt_occ.cpu().numpy()
 
-            test_output = {
-                'SC_metric': SC_metric,
-                'SSC_metric': SSC_metric,
-                'pred_c': pred_c,
-                'pred_f': pred_f,
-                'pred_occ': pred_occ_np,  # For compatibility with occ_metric (numpy array)
-                'gt_occ': gt_occ_np,  # For compatibility with occ_metric (numpy array)
-            }
+        test_output = {
+            'SC_metric': SC_metric,
+            'SSC_metric': SSC_metric,
+            'pred_c': pred_c,
+            'pred_f': pred_f,
+            'pred_occ': pred_occ_np,  # For compatibility with occ_metric (numpy array)
+            'gt_occ': gt_occ_np,  # For compatibility with occ_metric (numpy array)
+        }
 
-            if SSC_metric_fine is not None:
-                test_output['SSC_metric_fine'] = SSC_metric_fine
-            
-            test_outputs.append(test_output)
+        if SSC_metric_fine is not None:
+            test_output['SSC_metric_fine'] = SSC_metric_fine
 
-        # Return list of results (one per batch sample)
-        return test_outputs
+        # Return as list for compatibility with MMDetection3D evaluator
+        return [test_output]
 
 
     def evaluation_semantic(self, pred, gt, eval_type, visible_mask=None):
@@ -887,64 +844,31 @@ class OccNet(BaseModel):
             # No batch dimension, add it
             gt = gt.unsqueeze(0)
         
-        B, H, W, D = gt.shape
+        _, H, W, D = gt.shape
         pred = F.interpolate(pred, size=[H, W, D], mode='trilinear', align_corners=False).contiguous()
-        
-        # Handle class mismatch: if pred has fewer classes than expected, pad with zeros
-        # This happens when checkpoint has 17 classes but model expects 18 classes
-        if pred.shape[1] < self.num_cls:
-            # Add zero-filled channels for missing classes
-            padding = torch.zeros(
-                (pred.shape[0], self.num_cls - pred.shape[1], pred.shape[2], pred.shape[3], pred.shape[4]),
-                device=pred.device,
-                dtype=pred.dtype
-            )
-            pred = torch.cat([pred, padding], dim=1)
-        
-        # Process all batches together for comprehensive evaluation
-        hist_total = None
-        hist_occ_total = None
-        
-        for b in range(B):
-            pred_b = torch.argmax(pred[b], dim=0).cpu().numpy()
-            gt_b = gt[b].cpu().numpy().astype(np.int32)
+        pred = torch.argmax(pred[0], dim=0).cpu().numpy()
+        gt = gt[0].cpu().numpy()
+        gt = gt.astype(np.int32)
 
-            # ignore noise
-            noise_mask = gt_b != 255
+        # ignore noise
+        noise_mask = gt != 255
 
-            if eval_type == 'SC':
-                # 0 1 split
-                gt_b_sc = gt_b.copy()
-                pred_b_sc = pred_b.copy()
-                gt_b_sc[gt_b_sc != self.empty_idx] = 1
-                pred_b_sc[pred_b_sc != self.empty_idx] = 1
-                hist = fast_hist(pred_b_sc[noise_mask], gt_b_sc[noise_mask], max_label=2)
-                
-                if hist_total is None:
-                    hist_total = hist
-                else:
-                    hist_total += hist
+        if eval_type == 'SC':
+            # 0 1 split
+            gt[gt != self.empty_idx] = 1
+            pred[pred != self.empty_idx] = 1
+            return fast_hist(pred[noise_mask], gt[noise_mask], max_label=2), None
 
-            if eval_type == 'SSC':
-                hist_occ = None
-                if visible_mask is not None:
-                    visible_mask_b = visible_mask[b].cpu().numpy()
-                    mask = noise_mask & (visible_mask_b != 0)
-                    hist_occ = fast_hist(pred_b[mask], gt_b[mask], max_label=self.num_cls)
-                    
-                    if hist_occ_total is None:
-                        hist_occ_total = hist_occ
-                    elif hist_occ is not None:
-                        hist_occ_total += hist_occ
 
-                hist = fast_hist(pred_b[noise_mask], gt_b[noise_mask], max_label=self.num_cls)
-                
-                if hist_total is None:
-                    hist_total = hist
-                else:
-                    hist_total += hist
+        if eval_type == 'SSC':
+            hist_occ = None
+            if visible_mask is not None:
+                visible_mask = visible_mask[0].cpu().numpy()
+                mask = noise_mask & (visible_mask!=0)
+                hist_occ = fast_hist(pred[mask], gt[mask], max_label=17)
 
-        return hist_total, hist_occ_total
+            hist = fast_hist(pred[noise_mask], gt[noise_mask], max_label=17)
+            return hist, hist_occ
 
 
 def fast_hist(pred, label, max_label=18):
