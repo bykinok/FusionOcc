@@ -66,7 +66,7 @@ def sem_scal_loss(pred, ssc_target, empty_idx=0):
         empty_idx: Index of the empty/free class (0 for original, 17 for occ3d)
         
     Returns:
-        Average loss across all classes
+        Average loss across all classes (excluding empty/free class)
     """
     # Get softmax probabilities
     pred = F.softmax(pred, dim=1)
@@ -74,7 +74,14 @@ def sem_scal_loss(pred, ssc_target, empty_idx=0):
     count = 0
     mask = ssc_target != 255
     n_classes = pred.shape[1]
+    # CRITICAL FIX: Exclude empty/free class from loss calculation
+    # This aligns training objective with evaluation metric (which excludes free class)
+    # For original SurroundOcc: empty_idx=0, evaluate classes 1-16
+    # For Occ3D: empty_idx=17, evaluate classes 0-16
     for i in range(0, n_classes):
+        # Skip empty/free class to align with evaluation metric
+        if i == empty_idx:
+            continue
         # Get probability of class i
         p = pred[:, i, :, :, :]
 
