@@ -111,8 +111,6 @@ class LoadOccupancy(BaseTransform):
                 else:
                     occ_3d_1_2_gt_masked = occ_3d_1_2_semantic.astype(np.uint8)
                 results['voxel_semantics_1_2'] = occ_3d_1_2_gt_masked
-            else:
-                raise FileNotFoundError(f"Occ3D ground truth file not found: {occ3d_gt_label_1_2}")
 
             if os.path.exists(occ3d_gt_label_1_4):
                 occ_3d_1_4 = np.load(occ3d_gt_label_1_4)
@@ -123,8 +121,6 @@ class LoadOccupancy(BaseTransform):
                 else:
                     occ_3d_1_4_gt_masked = occ_3d_1_4_semantic.astype(np.uint8)
                 results['voxel_semantics_1_4'] = occ_3d_1_4_gt_masked
-            else:
-                raise FileNotFoundError(f"Occ3D ground truth file not found: {occ3d_gt_label_1_4}")
 
             if os.path.exists(occ3d_gt_label_1_8):
                 occ_3d_1_8 = np.load(occ3d_gt_label_1_8)
@@ -135,8 +131,6 @@ class LoadOccupancy(BaseTransform):
                 else:
                     occ_3d_1_8_gt_masked = occ_3d_1_8_semantic.astype(np.uint8)
                 results['voxel_semantics_1_8'] = occ_3d_1_8_gt_masked
-            else:
-                raise FileNotFoundError(f"Occ3D ground truth file not found: {occ3d_gt_label_1_8}")
 
             return results
         
