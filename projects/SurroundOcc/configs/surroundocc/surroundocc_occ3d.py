@@ -166,6 +166,7 @@ train_dataloader = dict(
         occ_size=occ_size,
         pc_range=point_cloud_range,
         use_semantic=use_semantic,
+        use_ego_frame=True,  # Ego-frame for Occ3D GT; encoder gets ego2img as lidar2img
         classes=class_names,
         box_type_3d='LiDAR'))
 
@@ -187,6 +188,7 @@ val_dataloader = dict(
         occ_size=occ_size,
         pc_range=point_cloud_range,
         use_semantic=use_semantic,
+        use_ego_frame=True,  # Ego-frame for Occ3D GT
         classes=class_names,
         modality=input_modality,
         test_mode=True))

@@ -14,10 +14,13 @@ class CustomNuScenesOccDataset(NuScenesDataset):
     supporting both semantic and geometric occupancy.
     """
     
-    def __init__(self, occ_size, pc_range, occ_root=None, **kwargs):
+    def __init__(self, occ_size, pc_range, occ_root=None, use_ego_frame=None, **kwargs):
         # Remove classes from kwargs if present to avoid mmengine compatibility issues
         classes = kwargs.pop('classes', None)
-        
+        # When True, pass ego2img as lidar2img so that model output is in Ego frame (for Occ3D GT)
+        self.use_ego_frame = (use_ego_frame if use_ego_frame is not None
+                              else kwargs.pop('use_ego_frame', False))
+
         # Store original data loading parameters
         self.ann_file = kwargs.get('ann_file')
         self.data_root = kwargs.get('data_root', '')
@@ -465,14 +468,37 @@ class CustomNuScenesOccDataset(NuScenesDataset):
                 
                 lidar2cam_dic[cam_type] = lidar2cam_rt.T
 
-            input_dict.update(
-                dict(
-                    img_filename=image_paths,
-                    lidar2img=lidar2img_rts,
-                    cam_intrinsic=cam_intrinsics,
-                    lidar2cam=lidar2cam_rts,
-                    lidar2cam_dic=lidar2cam_dic,
-                ))
+            # For Occ3D (Ego-frame GT): pass ego2img so encoder outputs in Ego frame
+            if self.use_ego_frame:
+                lidar2ego_rot = Quaternion(
+                    input_dict['lidar2ego_rotation']
+                ).rotation_matrix
+                lidar2ego_trans = np.array(input_dict['lidar2ego_translation'])
+                lidar2ego_4x4 = np.eye(4)
+                lidar2ego_4x4[:3, :3] = lidar2ego_rot
+                lidar2ego_4x4[:3, 3] = lidar2ego_trans
+                ego2lidar_4x4 = np.linalg.inv(lidar2ego_4x4)
+                ego2img_rts = [
+                    (lidar2img_rt.astype(np.float64) @ ego2lidar_4x4.astype(np.float64)).astype(np.float32)
+                    for lidar2img_rt in lidar2img_rts
+                ]
+                input_dict.update(
+                    dict(
+                        img_filename=image_paths,
+                        lidar2img=ego2img_rts,
+                        cam_intrinsic=cam_intrinsics,
+                        lidar2cam=lidar2cam_rts,
+                        lidar2cam_dic=lidar2cam_dic,
+                    ))
+            else:
+                input_dict.update(
+                    dict(
+                        img_filename=image_paths,
+                        lidar2img=lidar2img_rts,
+                        cam_intrinsic=cam_intrinsics,
+                        lidar2cam=lidar2cam_rts,
+                        lidar2cam_dic=lidar2cam_dic,
+                    ))
                 
         if self.modality.get('use_lidar', False):
             # FIXME alter lidar path
