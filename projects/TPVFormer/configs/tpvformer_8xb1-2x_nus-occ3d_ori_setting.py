@@ -45,7 +45,8 @@ train_pipeline = [
         to_float32=True,  # 원본과 동일하게 float32로 변환
         color_type='unchanged',
         num_views=6,
-        backend_args=backend_args),
+        backend_args=backend_args,
+        use_ego_frame=True),  # Occ3D GT는 Ego 기준 → lidar2img를 ego2img로 사용
     dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',
@@ -85,7 +86,8 @@ val_pipeline = [
         to_float32=True,  # 원본과 동일하게 float32로 변환
         color_type='unchanged',
         num_views=6,
-        backend_args=backend_args),
+        backend_args=backend_args,
+        use_ego_frame=True),  # Occ3D GT는 Ego 기준
     dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',

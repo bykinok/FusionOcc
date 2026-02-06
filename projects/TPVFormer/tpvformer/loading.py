@@ -99,6 +99,19 @@ class SegLabelMapping(BaseTransform):
         return results
 
 
+def _lidar2ego_to_ego2lidar(results: dict) -> Optional[np.ndarray]:
+    """Build ego2lidar 4x4 from results['lidar_points']['lidar2ego']."""
+    if 'lidar_points' not in results or not isinstance(results.get('lidar_points'), dict):
+        return None
+    lidar2ego = results['lidar_points'].get('lidar2ego')
+    if lidar2ego is None:
+        return None
+    lidar2ego = np.array(lidar2ego, dtype=np.float64)
+    if lidar2ego.shape != (4, 4):
+        return None
+    return np.linalg.inv(lidar2ego)
+
+
 @TRANSFORMS.register_module()
 class BEVLoadMultiViewImageFromFiles(LoadMultiViewImageFromFiles):
     """Load multi channel images from a list of separate channel files.
@@ -107,6 +120,9 @@ class BEVLoadMultiViewImageFromFiles(LoadMultiViewImageFromFiles):
     convenience of view transforms in the forward:
         - 'cam2lidar'
         - 'lidar2img'
+
+    When use_ego_frame=True (e.g. for Occ3D Ego-frame GT), stores ego2img
+    in 'lidar2img' so that the model output is in Ego frame (lidar2img @ ego2lidar).
 
     Args:
         to_float32 (bool): Whether to convert the img to float32.
@@ -119,7 +135,13 @@ class BEVLoadMultiViewImageFromFiles(LoadMultiViewImageFromFiles):
         test_mode (bool): Whether is test mode in loading. Defaults to False.
         set_default_scale (bool): Whether to set default scale.
             Defaults to True.
+        use_ego_frame (bool): If True, set lidar2img = lidar2img @ ego2lidar
+            so that 3D volume is Ego frame (for Occ3D). Defaults to False.
     """
+
+    def __init__(self, use_ego_frame: bool = False, **kwargs):
+        super().__init__(**kwargs)
+        self.use_ego_frame = use_ego_frame
 
     def transform(self, results: dict) -> Optional[dict]:
         """Call function to load multi-view image from files.
@@ -153,7 +175,15 @@ class BEVLoadMultiViewImageFromFiles(LoadMultiViewImageFromFiles):
         results['img_path'] = filename
         results['cam2img'] = np.stack(cam2img, axis=0)
         results['lidar2cam'] = np.stack(lidar2cam, axis=0)
-        results['lidar2img'] = np.stack(lidar2img, axis=0)
+        lidar2img_stack = np.stack(lidar2img, axis=0)
+        if self.use_ego_frame:
+            ego2lidar = _lidar2ego_to_ego2lidar(results)
+            if ego2lidar is not None:
+                # ego2img = lidar2img @ ego2lidar so that 3D in Ego projects to image
+                lidar2img_stack = (lidar2img_stack.astype(np.float64) @ ego2lidar).astype(np.float32)
+            else:
+                raise ValueError("Ego2lidar matrix not found in results['lidar_points']['lidar2ego']")
+        results['lidar2img'] = lidar2img_stack
 
         results['ori_cam2img'] = copy.deepcopy(results['cam2img'])
 
