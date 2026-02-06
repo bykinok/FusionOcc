@@ -64,7 +64,8 @@ occ_class_names = [
 # Occ3D 데이터셋 사양: 200x200x16 grid, 18 classes
 point_cloud_range = [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]  # Occ3D range
 occ_size = [200, 200, 16]  # Occ3D grid size [X, Y, Z]
-lss_downsample = [2, 2, 2]  # [100, 100, 8] for LSS feature volume
+# coarse 100x100x8 유지 (50x50x4보다 표현력 좋음). fine 400x400x32 → loss_point에서 GT 200x200x16로 스케일
+lss_downsample = [2, 2, 2]  # [100, 100, 8] for LSS → fine 400x400x32
 voxel_x = (point_cloud_range[3] - point_cloud_range[0]) / occ_size[0]  # 0.4
 voxel_y = (point_cloud_range[4] - point_cloud_range[1]) / occ_size[1]  # 0.4
 voxel_z = (point_cloud_range[5] - point_cloud_range[2]) / occ_size[2]  # 0.4
@@ -73,7 +74,8 @@ empty_idx = 17  # Occ3D: class 17 is free/empty
 num_cls = 18  # Occ3D: 0-17 (18 classes total)
 visible_mask = True  # Occ3D provides mask_camera
 
-cascade_ratio = 4
+# Occ3D: coarse 100x100x8 * 2 = fine 200x200x16 = GT (원본 nuScenes는 cascade_ratio=4)
+cascade_ratio = 2
 sample_from_voxel = True
 sample_from_img = True
 
@@ -109,7 +111,14 @@ voxel_out_indices = (0, 1, 2, 3)
 # Model configuration
 model = dict(
     type='OccNet',
-    data_preprocessor=None,  # Disable data_preprocessor to preserve img_inputs and gt_occ
+    data_preprocessor=dict(
+        type='Det3DDataPreprocessor',
+        voxel=True,
+        voxel_layer=dict(
+            max_num_points=10,
+            point_cloud_range=point_cloud_range,
+            voxel_size=[0.1, 0.1, 0.1],
+            max_voxels=(90000, 120000))),
     loss_norm=True,
     # Occ3D configuration
     num_cls=num_cls,  # Pass num_cls to model for correct class handling
@@ -151,7 +160,7 @@ model = dict(
         base_channel=16,
         out_channel=numC_Trans,
         norm_cfg=dict(type='SyncBN', requires_grad=True),
-        sparse_shape_xyz=[1024, 1024, 80],  # hardcode, xy size follow centerpoint
+        sparse_shape_xyz=[800, 800, 64],  # Occ3D: 8x downsample -> [100, 100, 8] to match LSS output
         ),
     occ_fuser=dict(
         type='VisFuser',
@@ -177,6 +186,7 @@ model = dict(
         type='OccHead',
         norm_cfg=dict(type='SyncBN', requires_grad=True),
         soft_weights=True,
+        # balance_cls_weight=True (default) - uses occ3d_class_frequencies for 18 classes
         cascade_ratio=cascade_ratio,
         sample_from_voxel=sample_from_voxel,
         sample_from_img=sample_from_img,
@@ -219,7 +229,8 @@ train_pipeline = [
          depth_gt_path=depth_gt_path,
          mmlabnorm=True, 
          load_depth=True, 
-         img_norm_cfg=None),
+         img_norm_cfg=None,
+         use_ego_frame=True),  # Occ3D GT is Ego → output Ego volume
     dict(
         type='LoadAnnotationsBEVDepth',
         bda_aug_conf=bda_aug_conf,
@@ -234,7 +245,8 @@ train_pipeline = [
          unoccupied=empty_idx, 
          pc_range=point_cloud_range, 
          cal_visible=visible_mask,
-         use_occ3d=use_occ3d),  # occ3d 형식 사용
+         use_occ3d=use_occ3d,
+         use_camera_mask=visible_mask),  # Occ3D: visible only → invisible=255 for loss
     dict(type='OccDefaultFormatBundle3D', class_names=class_names),
     dict(type='Collect3D', keys=['img_inputs', 'gt_occ', 'points']),
 ]
@@ -253,7 +265,8 @@ test_pipeline = [
          aligned=True, 
          trans_only=False, 
          mmlabnorm=True, 
-         img_norm_cfg=None),
+         img_norm_cfg=None,
+         use_ego_frame=True),  # Occ3D: Ego-frame output for eval
     dict(
         type='LoadAnnotationsBEVDepth',
         bda_aug_conf=bda_aug_conf,
@@ -269,7 +282,8 @@ test_pipeline = [
          unoccupied=empty_idx, 
          pc_range=point_cloud_range, 
          cal_visible=visible_mask,
-         use_occ3d=use_occ3d),  # occ3d 형식 사용
+         use_occ3d=use_occ3d,
+         use_camera_mask=visible_mask),  # Occ3D: visible only for eval
     dict(type='OccDefaultFormatBundle3D', class_names=class_names, with_label=False), 
     dict(type='Collect3D', 
          keys=['img_inputs', 'gt_occ', 'points'],
@@ -279,9 +293,8 @@ test_pipeline = [
 # Data loaders
 train_dataloader = dict(
     batch_size=1,
-    num_workers=4,
-    persistent_workers=True,
-    collate_fn=dict(type='conet_collate_fn'),  # Custom collate function registered in FUNCTIONS registry
+    num_workers=0,#4,
+    persistent_workers=False,#True,
     sampler=dict(type='DistributedGroupSampler', seed=0),
     dataset=dict(
         type=dataset_type,
@@ -303,7 +316,6 @@ val_dataloader = dict(
     num_workers=4,  # 0 → 4: Enable parallel data loading (4-8x speedup expected)
     persistent_workers=True,  # Keep workers alive to avoid restart overhead
     drop_last=False,
-    collate_fn=dict(type='conet_collate_fn'),  # Custom collate function registered in FUNCTIONS registry
     sampler=dict(type='DistributedSampler', shuffle=False, seed=0),
     dataset=dict(
         type=dataset_type,

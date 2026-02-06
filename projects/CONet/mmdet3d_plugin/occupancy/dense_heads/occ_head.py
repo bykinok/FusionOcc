@@ -9,7 +9,7 @@ from mmdet3d.registry import MODELS as HEADS
 from mmcv.cnn import build_conv_layer, build_norm_layer
 from .lovasz_softmax import lovasz_softmax
 from ...utils import coarse_to_fine_coordinates, project_points_on_img
-from ...utils.nusc_param import nusc_class_frequencies, nusc_class_names
+from ...utils.nusc_param import nusc_class_frequencies, occ3d_class_frequencies, nusc_class_names
 from ...utils.semkitti import geo_scal_loss, sem_scal_loss, CE_ssc_loss
 
 @HEADS.register_module(force=True)
@@ -129,9 +129,24 @@ class OccHead(nn.Module):
             
         # loss functions
         if balance_cls_weight:
-            self.class_weights = torch.from_numpy(1 / np.log(nusc_class_frequencies + 0.001))
+            # Select appropriate class frequencies based on number of classes
+            if out_channel == 17:
+                # nuScenes-Occupancy format (17 classes)
+                class_freqs = nusc_class_frequencies
+            elif out_channel == 18:
+                # Occ3D format (18 classes)
+                class_freqs = occ3d_class_frequencies
+            else:
+                # Unknown format, use uniform weights
+                print(f"Warning: out_channel ({out_channel}) is neither 17 nor 18. Using uniform weights.")
+                self.class_weights = torch.ones(out_channel) / out_channel
+                class_freqs = None
+            
+            if class_freqs is not None:
+                self.class_weights = torch.from_numpy(1 / np.log(class_freqs + 0.001))
         else:
-            self.class_weights = torch.ones(17)/17  # FIXME hardcode 17
+            # Use uniform weights for all classes
+            self.class_weights = torch.ones(out_channel) / out_channel
 
         self.class_names = nusc_class_names    
         self.empty_idx = empty_idx
@@ -303,18 +318,22 @@ class OccHead(nn.Module):
             target_voxels = target_voxels.unsqueeze(0)  # Add batch dimension
 
 
-        # resize gt
+        # resize gt (dense: OpenOccupancy or Occ3D; both end up as dense grid here)
         B, C, H, W, D = output_voxels.shape
         ratio = target_voxels.shape[2] // H  # 원본처럼 shape[2] 사용
         if ratio != 1:
             target_voxels = target_voxels.reshape(B, H, ratio, W, ratio, D, ratio).permute(0,1,3,5,2,4,6).reshape(B, H, W, D, ratio**3)
-            empty_mask = target_voxels.sum(-1) == self.empty_idx
+            # Empty cells: all ratio**3 sub-voxels are empty_idx (nuScenes: 0, Occ3D: 17)
+            empty_mask = (target_voxels == self.empty_idx).all(dim=-1)
             target_voxels = target_voxels.to(torch.int64)
             occ_space = target_voxels[~empty_mask]
-            occ_space[occ_space==0] = -torch.arange(len(occ_space[occ_space==0])).to(occ_space.device) - 1
+            # Original config (nuScenes, empty_idx=0): 0 = noise → exclude from mode → 255 (ignore). Keep as-is.
+            # Occ3D (empty_idx=17): 0 = others (valid class) → do not replace; 0 may win mode.
+            if self.empty_idx == 0:
+                occ_space[occ_space == 0] = -torch.arange(len(occ_space[occ_space == 0])).to(occ_space.device) - 1
             target_voxels[~empty_mask] = occ_space
             target_voxels = torch.mode(target_voxels, dim=-1)[0]
-            target_voxels[target_voxels<0] = 255
+            target_voxels[target_voxels < 0] = 255
             target_voxels = target_voxels.long()
 
         assert torch.isnan(output_voxels).sum().item() == 0
@@ -343,9 +362,9 @@ class OccHead(nn.Module):
         
         # Check if target_voxels has the expected 4D shape [batch, x, y, z]
         if target_voxels.dim() == 3:
-            # Add batch dimension if missing
             target_voxels = target_voxels.unsqueeze(0)
-        
+
+        # Occ3D config는 cascade_ratio=2로 fine=GT=200x200x16이라 fine_coord 그대로 사용
         selected_gt = target_voxels[:, fine_coord[0,:], fine_coord[1,:], fine_coord[2,:]].long()[0]
         assert torch.isnan(selected_gt).sum().item() == 0, torch.isnan(selected_gt).sum().item()
         assert torch.isnan(fine_output).sum().item() == 0, torch.isnan(fine_output).sum().item()

@@ -89,12 +89,14 @@ class LoadMultiViewImageFromFiles_BEVDet(object):
 
     def __init__(self, data_config, is_train=False, using_ego=True, colorjitter=False,
                  sequential=False, aligned=False, trans_only=True, img_norm_cfg=None,
-                 mmlabnorm=False, load_depth=False, depth_gt_path=None):
+                 mmlabnorm=False, load_depth=False, depth_gt_path=None, use_ego_frame=False):
         self.is_train = is_train
         self.data_config = data_config
         
         # using mean camera ego frame, rather than the lidar coordinates
         self.using_ego = using_ego
+        # When True (e.g. Occ3D), pass sensor2ego so view transformer outputs Ego-frame volume
+        self.use_ego_frame = use_ego_frame
         self.normalize_img = mmlabNormalize
         self.img_norm_cfg = img_norm_cfg
         
@@ -306,11 +308,31 @@ class LoadMultiViewImageFromFiles_BEVDet(object):
             post_tran = torch.zeros(2)
 
             intrin = torch.Tensor(cam_data['cam_intrinsic'])
+
+            # breakpoint()
             
-            # from camera to lidar 
+            # from camera to lidar (or to ego when use_ego_frame for Occ3D)
             sensor2lidar = torch.tensor(results['lidar2cam_dic'][cam_name]).inverse().float()
-            rot = sensor2lidar[:3, :3]
-            tran = sensor2lidar[:3, 3]
+            if self.use_ego_frame and 'curr' in results:
+                curr = results['curr']
+                if 'lidar2ego_rotation' in curr and 'lidar2ego_translation' in curr:
+                    w, x, y, z = curr['lidar2ego_rotation']
+                    lidar2ego_rot = torch.Tensor(
+                        Quaternion(w, x, y, z).rotation_matrix).float()
+                    lidar2ego_tran = torch.Tensor(curr['lidar2ego_translation']).float()
+                    lidar2ego = lidar2ego_rot.new_zeros((4, 4))
+                    lidar2ego[3, 3] = 1
+                    lidar2ego[:3, :3] = lidar2ego_rot
+                    lidar2ego[:3, 3] = lidar2ego_tran
+                    sensor2ego = (lidar2ego @ sensor2lidar)
+                    rot = sensor2ego[:3, :3]
+                    tran = sensor2ego[:3, 3]
+                else:
+                    rot = sensor2lidar[:3, :3]
+                    tran = sensor2lidar[:3, 3]
+            else:
+                rot = sensor2lidar[:3, :3]
+                tran = sensor2lidar[:3, 3]
             # image view augmentation (resize, crop, horizontal flip, rotate)
             img_augs = self.sample_augmentation(H=img.height,
                                                 W=img.width,

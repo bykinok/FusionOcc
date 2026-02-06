@@ -99,20 +99,11 @@ class OccNet(BaseModel):
     
     def image_encoder(self, img):
         """Image encoder (copied from original CONet_ori)."""
+        # breakpoint()
         imgs = img
-        # Handle different input shapes from new mmdet3d version
-        if imgs.dim() == 4:
-            # Shape: [B*N, C, H, W] - already flattened
-            BN, C, imH, imW = imgs.shape
-            # Assume 6 cameras
-            N = 6
-            B = BN // N
-            imgs_flat = imgs
-        else:
-            # Shape: [B, N, C, H, W] - original format
-            B, N, C, imH, imW = imgs.shape
-            imgs_flat = imgs.view(B * N, C, imH, imW)
-        
+        B, N, C, imH, imW = imgs.shape
+        imgs_flat = imgs.view(B * N, C, imH, imW)
+    
         # Ensure images are on the same device as the model
         if hasattr(self.img_backbone, 'parameters'):
             device = next(self.img_backbone.parameters()).device
@@ -791,11 +782,8 @@ class OccNet(BaseModel):
             if output.get('output_coords_fine') is not None and len(output.get('output_coords_fine', [])) > 0:
                 fine_pred = output['output_voxels_fine'][0]  # [N, ncls]
                 fine_coord = output['output_coords_fine'][0]  # [3, N]
-                
-                # Create pred_f with correct shape: [1, ncls, H, W, D]
+                # Occ3D config는 cascade_ratio=2로 fine=GT=200x200x16이라 fine_coord 그대로 사용
                 pred_f = self.empty_idx * torch.ones_like(gt_occ).unsqueeze(0).unsqueeze(0).repeat(1, fine_pred.shape[1], 1, 1, 1).float()
-                
-                # fine_pred: [N, ncls] -> permute: [ncls, N] -> unsqueeze: [1, ncls, N]
                 pred_f[:, :, fine_coord[0], fine_coord[1], fine_coord[2]] = fine_pred.permute(1, 0).unsqueeze(0)
             else:
                 pred_f = output['output_voxels_fine'][0]

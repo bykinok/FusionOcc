@@ -11,6 +11,14 @@ nusc_class_frequencies = np.array([2242961742295, 25985376, 1561108, 28862014, 1
                 2158753, 26539491, 4004729, 34838681, 75173306, 2255027978, 50959399, 646022466, 869055679,
                 1446141335, 1724391378])
 
+# Occ3D class frequencies (18 classes: 0-17)
+# Class 0: others, Classes 1-16: semantic classes, Class 17: free
+# Note: Class order matches Occ3D format
+occ3d_class_frequencies = np.array([2082349, 3012970, 234046, 5385402, 34146494, 
+                                    2044124, 325765, 3330253, 543815, 5785079, 13521112, 
+                                    198278651, 4895895, 56540471, 66504617, 227803562, 
+                                    252374615, 17126390780])
+
 # nusc_class_names = [
 #     "noise",
 #     "barrier",
