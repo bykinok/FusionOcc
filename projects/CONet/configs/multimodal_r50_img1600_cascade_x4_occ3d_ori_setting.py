@@ -248,7 +248,8 @@ train_pipeline = [
          use_occ3d=use_occ3d,
          use_camera_mask=visible_mask),  # Occ3D: visible only → invisible=255 for loss
     dict(type='OccDefaultFormatBundle3D', class_names=class_names),
-    dict(type='Collect3D', keys=['img_inputs', 'gt_occ', 'points']),
+    dict(type='Collect3D', keys=['img_inputs', 'gt_occ', 'points'],
+         meta_keys=['pc_range', 'occ_size', 'scene_token', 'lidar_token', 'sample_idx', 'index']),
 ]
 
 test_pipeline = [
@@ -287,7 +288,7 @@ test_pipeline = [
     dict(type='OccDefaultFormatBundle3D', class_names=class_names, with_label=False), 
     dict(type='Collect3D', 
          keys=['img_inputs', 'gt_occ', 'points'],
-         meta_keys=['pc_range', 'occ_size', 'scene_token', 'lidar_token']),
+         meta_keys=['pc_range', 'occ_size', 'scene_token', 'lidar_token', 'sample_idx', 'index']),
 ]
 
 # Data loaders

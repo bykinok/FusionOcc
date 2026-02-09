@@ -149,6 +149,7 @@ class NuscOCCDataset(NuScenesDataset):
         # standard protocal modified from SECOND.Pytorch
         input_dict = dict(
             sample_idx=info['token'],
+            index=index,  # 정수 인덱스 추가 (메트릭용)
             pts_filename=info['lidar_path'],
             lidar_points=dict(lidar_path=info['lidar_path']),
             sweeps=info['sweeps'],

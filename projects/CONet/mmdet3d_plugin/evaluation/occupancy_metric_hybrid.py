@@ -37,6 +37,7 @@ class OccupancyMetricHybrid(BaseMetric):
                  data_root: Optional[str] = None,
                  class_names: Optional[List[str]] = None,
                  eval_metric: str = 'miou',
+                 sort_by_timestamp: bool = True,  # CONet dataset sorts by timestamp; metric matches
                  collect_device='cpu', 
                  prefix=None):
         super().__init__(collect_device=collect_device, prefix=prefix)
@@ -45,6 +46,7 @@ class OccupancyMetricHybrid(BaseMetric):
         self.num_classes = num_classes
         self.class_names = class_names or []
         self.eval_metric = eval_metric
+        self.sort_by_timestamp = sort_by_timestamp
         
         # Import STCOcc metric directly without triggering registry conflicts
         import importlib.util
@@ -99,6 +101,7 @@ class OccupancyMetricHybrid(BaseMetric):
             ann_file=ann_file,
             data_root=data_root,
             eval_metric=eval_metric,
+            sort_by_timestamp=self.sort_by_timestamp,  # Use config value (default: True, match dataset)
             collect_device=collect_device,
             prefix=prefix
         )
@@ -137,8 +140,19 @@ class OccupancyMetricHybrid(BaseMetric):
                     else:
                         data_sample.index = 0
         
-        # Delegate to STCOcc metric
+        # Delegate to STCOcc metric (so it can use the same data internally if needed)
         self.stcocc_metric.process(data_batch, data_samples)
+        
+        # CRITICAL: MMEngine gathers this metric's self.results, not stcocc_metric.results.
+        # So we must append to self.results here; otherwise compute_metrics receives [].
+        for data_sample in data_samples:
+            occ = data_sample.get('occ_results') if isinstance(data_sample, dict) else getattr(data_sample, 'occ_results', None)
+            idx = data_sample.get('index') if isinstance(data_sample, dict) else getattr(data_sample, 'index', None)
+            if occ is not None and idx is not None:
+                pred_dict = {'occ_results': occ, 'index': idx}
+                if isinstance(data_sample, dict) and 'flow_results' in data_sample:
+                    pred_dict['flow_results'] = data_sample['flow_results']
+                self.results.append(pred_dict)
     
     def compute_metrics(self, results: list) -> Dict[str, float]:
         """Compute the metrics from processed results.

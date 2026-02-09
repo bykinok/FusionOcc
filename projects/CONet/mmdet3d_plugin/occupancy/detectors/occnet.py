@@ -810,13 +810,27 @@ class OccNet(BaseModel):
         else:
             gt_occ_np = gt_occ.cpu().numpy()
 
+        # breakpoint()
+
+        # Extract integer index from img_metas for tracking (OccupancyMetricHybrid requires 'index')
+        idx = 0
+        if img_metas is not None and len(img_metas) > 0:
+            if isinstance(img_metas, list):
+                idx = img_metas[0].get('index', 0) if isinstance(img_metas[0], dict) else 0
+            elif isinstance(img_metas, dict):
+                idx = img_metas.get('index', 0)
+
+        # occ_results must be a list of per-sample arrays (H, W, D) so that metric's occ_results[i] is (200,200,16)
+        # SurroundOcc passes (B,H,W,Z) and metric uses occ_results[i]; CONet batch=1 so pass [pred_occ_np]
         test_output = {
             'SC_metric': SC_metric,
             'SSC_metric': SSC_metric,
             'pred_c': pred_c,
             'pred_f': pred_f,
-            'pred_occ': pred_occ_np,  # For compatibility with occ_metric (numpy array)
-            'gt_occ': gt_occ_np,  # For compatibility with occ_metric (numpy array)
+            'pred_occ': pred_occ_np,  # For compatibility with generic occ_metric
+            'occ_results': [pred_occ_np],  # List of (H,W,D) per sample so pr_semantics stays (200,200,16)
+            'index': [idx],  # List for STCOcc: data_id[i] pairs with occ_results[i]
+            'gt_occ': gt_occ_np,
         }
 
         if SSC_metric_fine is not None:
