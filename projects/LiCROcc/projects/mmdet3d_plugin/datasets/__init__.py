@@ -1,6 +1,7 @@
 from .nuscenes_dataset import nuScenesDataset
 from .builder import collate
 from .ssc_evaluator import SSCEvaluator
+from .occupancy_metric_hybrid import OccupancyMetricHybrid
 
 # CRITICAL: Import samplers to register them with mmdet3d.registry.DATA_SAMPLERS
 # This MUST be done before config is loaded
@@ -12,5 +13,6 @@ __all__ = [
      'DistributedGroupSampler',
      'DistributedSampler',
      'collate',
-     'SSCEvaluator'
+     'SSCEvaluator',
+     'OccupancyMetricHybrid'
 ]

@@ -14,18 +14,27 @@ def KL_sep(p, target):
     return kl_term
 
 
-def geo_scal_loss(pred, ssc_target):
-
+def geo_scal_loss(pred, ssc_target, empty_idx=0):
+    """
+    Geometric scale loss for occupancy prediction.
+    
+    Args:
+        pred: Predicted logits (B, C, X, Y, Z)
+        ssc_target: Ground truth labels (B, X, Y, Z)
+        empty_idx: Index of the 'free' or 'empty' class.
+                   For occ3d: empty_idx=17 (class 17 is 'free')
+                   For original: empty_idx=0 (class 0 is 'empty'/'noise')
+    """
     # Get softmax probabilities
     pred = F.softmax(pred, dim=1)
 
     # Compute empty and nonempty probabilities
-    empty_probs = pred[:, 0, :, :, :]
+    empty_probs = pred[:, empty_idx, :, :, :]
     nonempty_probs = 1 - empty_probs
 
     # Remove unknown voxels
     mask = ssc_target != 255
-    nonempty_target = ssc_target != 0
+    nonempty_target = ssc_target != empty_idx
     nonempty_target = nonempty_target[mask].float()
     nonempty_probs = nonempty_probs[mask]
     empty_probs = empty_probs[mask]
@@ -62,7 +71,17 @@ def precision_loss(pred, ssc_target):
         F.binary_cross_entropy(precision, torch.ones_like(precision))
     )
 
-def sem_scal_loss(pred, ssc_target):
+def sem_scal_loss(pred, ssc_target, empty_idx=0):
+    """
+    Semantic scale loss for per-class occupancy prediction.
+    
+    Args:
+        pred: Predicted logits (B, C, X, Y, Z)
+        ssc_target: Ground truth labels (B, X, Y, Z)
+        empty_idx: Index of the 'free' or 'empty' class to skip.
+                   For occ3d: empty_idx=17 (class 17 is 'free')
+                   For original: empty_idx=0 (class 0 is 'empty'/'noise')
+    """
     with autocast(False):
 
         # Get softmax probabilities
@@ -72,6 +91,9 @@ def sem_scal_loss(pred, ssc_target):
         mask = ssc_target != 255
         n_classes = pred.shape[1]
         for i in range(0, n_classes):
+            # Skip the empty/free class for semantic evaluation
+            if i == empty_idx:
+                continue
 
             # Get probability of class i
             p = pred[:, i, :, :, :]
