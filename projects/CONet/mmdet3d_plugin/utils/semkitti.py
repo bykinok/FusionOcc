@@ -62,18 +62,30 @@ def KL_sep(p, target):
     return kl_term
 
 
-def geo_scal_loss(pred, ssc_target, ignore_index=255, non_empty_idx=0):
-
+def geo_scal_loss(pred, ssc_target, ignore_index=255, empty_idx=0):
+    """Geometric scale loss for occupancy prediction.
+    
+    Args:
+        pred: Predicted occupancy logits
+        ssc_target: Ground truth semantic labels
+        ignore_index: Index to ignore in loss calculation (default: 255)
+        empty_idx: Index of the empty/free class (default: 0)
+                   For Occ3D (18 classes): empty_idx=17 (free)
+                   For nuScenes-Occupancy (17 classes): empty_idx=0 (empty)
+    
+    Returns:
+        Loss value combining precision, recall, and specificity
+    """
     # Get softmax probabilities
     pred = F.softmax(pred, dim=1)
 
     # Compute empty and nonempty probabilities
-    empty_probs = pred[:, non_empty_idx]
+    empty_probs = pred[:, empty_idx]
     nonempty_probs = 1 - empty_probs
 
     # Remove unknown voxels
     mask = ssc_target != ignore_index
-    nonempty_target = ssc_target != non_empty_idx
+    nonempty_target = ssc_target != empty_idx
     nonempty_target = nonempty_target[mask].float()
     nonempty_probs = nonempty_probs[mask]
     empty_probs = empty_probs[mask]
@@ -90,7 +102,20 @@ def geo_scal_loss(pred, ssc_target, ignore_index=255, non_empty_idx=0):
     )
 
 
-def sem_scal_loss(pred, ssc_target, ignore_index=255):
+def sem_scal_loss(pred, ssc_target, ignore_index=255, empty_idx=None):
+    """Semantic scale loss for class-wise precision/recall/specificity.
+    
+    Args:
+        pred: Predicted occupancy logits
+        ssc_target: Ground truth semantic labels
+        ignore_index: Index to ignore in loss calculation (default: 255)
+        empty_idx: Index of the empty/free class to exclude from loss (default: None)
+                   For Occ3D (18 classes): empty_idx=17
+                   For nuScenes-Occupancy (17 classes): empty_idx=0
+    
+    Returns:
+        Average loss across all classes (excluding empty/free class if specified)
+    """
     # Get softmax probabilities
     pred = F.softmax(pred, dim=1)
     loss = 0
@@ -98,6 +123,9 @@ def sem_scal_loss(pred, ssc_target, ignore_index=255):
     mask = ssc_target != ignore_index
     n_classes = pred.shape[1]
     for i in range(0, n_classes):
+        # Skip empty/free class if specified (aligns with evaluation metric)
+        if empty_idx is not None and i == empty_idx:
+            continue
 
         # Get probability of class i
         p = pred[:, i]
