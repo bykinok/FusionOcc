@@ -467,7 +467,14 @@ class nuScenesDataset(Dataset):
         # Apply flip augmentation
         target = augmentation_random_flip(target, flip_type, is_scan=False)
         
-        # Multi-scale targets: load from pre-computed files (SurroundOcc: labels_1_2.npz, labels_1_4.npz, labels_1_8.npz)
+        # breakpoint()
+        # Multi-scale targets: load from pre-computed files only in training mode
+        # In test mode, multi-scale GT may not be available, so return None
+        if self.test_mode:
+            # Test mode: only return full-scale GT, no multi-scale GT
+            return target, None, None, None
+        
+        # Training mode: load multi-scale GT (SurroundOcc: labels_1_2.npz, labels_1_4.npz, labels_1_8.npz)
         occ3d_gt_path_1_2 = os.path.join(occ_path_dir, 'labels_1_2.npz')
         occ3d_gt_path_1_4 = os.path.join(occ_path_dir, 'labels_1_4.npz')
         occ3d_gt_path_1_8 = os.path.join(occ_path_dir, 'labels_1_8.npz')

@@ -242,7 +242,9 @@ class SSC_RS(MVXTwoStageDetector):
                             pred = torch.argmax(output_voxels[i:i+1], dim=1).squeeze(0).cpu().numpy()
                         else:
                             pred = output_voxels[i].cpu().numpy()
-                        sample_dict['occ_results'] = pred
+                        # CRITICAL: Wrap pred in a list so evaluator can index it correctly
+                        # evaluator expects: occ_results[i] where occ_results is a list
+                        sample_dict['occ_results'] = [pred]  # (200, 200, 16) -> list with 1 element
                         
                         # Extract sample index from img_metas
                         if img_metas is None or not isinstance(img_metas, list) or i >= len(img_metas):
