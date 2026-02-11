@@ -97,6 +97,9 @@ class SSC_RS(MVXTwoStageDetector):
                 img_bev_encoder_backbone_distill = None,
                 init_cfg=None,
                 data_preprocessor=None,
+                # occ3d parameters
+                dataset_name='nuscenes_occ',
+                use_semantic=True,
                 ):
 
         super(SSC_RS,
@@ -128,6 +131,27 @@ class SSC_RS(MVXTwoStageDetector):
         self.distill_len = 0#self.Distill_1 + self.Distill_2 + self.Distill_3
         if self.distill_len >=1:
             self.awl = AutomaticWeightedLoss(self.distill_len)
+        
+        # occ3d parameters
+        self.dataset_name = dataset_name
+        self.use_semantic = use_semantic
+        
+        # Validate dataset_name
+        valid_datasets = ['occ3d', 'nuscenes_occ']
+        if dataset_name not in valid_datasets:
+            raise ValueError(
+                f"Invalid dataset_name: '{dataset_name}'. "
+                f"Must be one of {valid_datasets}. "
+                f"Please check model config: model = dict(type='SSC_RS', dataset_name='...', ...)"
+            )
+        
+        # Determine empty class index based on dataset
+        # For occ3d: empty_idx=17 (class 17 is 'free')
+        # For original: empty_idx=0 (class 0 is 'empty'/'noise')
+        self.empty_idx = 17 if dataset_name == 'occ3d' else 0
+        
+        # Log configuration
+        print(f"[SSC_RS] Initialized with dataset_name='{dataset_name}', empty_idx={self.empty_idx}, use_semantic={use_semantic}")
        
         if self.Distill_3:
             pass
@@ -148,6 +172,9 @@ class SSC_RS(MVXTwoStageDetector):
             radar_bbox_head.update(train_cfg=radar_train_cfg)
             radar_test_cfg = test_cfg.pts if test_cfg else None
             radar_bbox_head.update(test_cfg=radar_test_cfg)
+            # Pass empty_idx to radar_bbox_head for occ3d support (if not already set)
+            if 'empty_idx' not in radar_bbox_head:
+                radar_bbox_head.update(empty_idx=self.empty_idx)
             self.radar_bbox_head = MODELS.build(radar_bbox_head)
         if occ_head:
             self.occ_head = MODELS.build(occ_head)
@@ -188,6 +215,9 @@ class SSC_RS(MVXTwoStageDetector):
                 output_voxels = result['output_voxels']
                 target_voxels = result.get('target_voxels', None)
                 
+                # Get img_metas for extracting sample indices
+                img_metas = kwargs.get('img_metas', None)
+                
                 # Split batch into individual samples for evaluator
                 batch_size = output_voxels.shape[0]
                 data_samples_list = []
@@ -197,6 +227,46 @@ class SSC_RS(MVXTwoStageDetector):
                     }
                     if target_voxels is not None:
                         sample_dict['target_voxels'] = target_voxels[i:i+1]  # Keep batch dimension
+                    
+                    # For occ3d evaluation with STCOcc metric, add occ_results and index
+                    if not hasattr(self, 'dataset_name'):
+                        raise AttributeError(
+                            "Model does not have 'dataset_name' attribute. "
+                            "Please add 'dataset_name' parameter to model config. "
+                            "Example: model = dict(type='SSC_RS', dataset_name='occ3d', ...)"
+                        )
+                    
+                    if self.dataset_name == 'occ3d':
+                        # Convert output_voxels to class predictions (occ_results)
+                        if output_voxels.dim() == 5:  # (B, C, X, Y, Z)
+                            pred = torch.argmax(output_voxels[i:i+1], dim=1).squeeze(0).cpu().numpy()
+                        else:
+                            pred = output_voxels[i].cpu().numpy()
+                        sample_dict['occ_results'] = pred
+                        
+                        # Extract sample index from img_metas
+                        if img_metas is None or not isinstance(img_metas, list) or i >= len(img_metas):
+                            raise ValueError(
+                                f"img_metas is invalid for sample {i}. "
+                                f"Expected list with at least {i+1} elements, got: {type(img_metas)}"
+                            )
+                        
+                        meta = img_metas[i]
+                        if not isinstance(meta, dict):
+                            raise TypeError(
+                                f"img_metas[{i}] should be dict, got {type(meta)}. "
+                                "Check dataset implementation."
+                            )
+                        
+                        if 'sample_idx' not in meta:
+                            raise KeyError(
+                                f"'sample_idx' not found in img_metas[{i}]. "
+                                "Dataset must provide 'sample_idx' in meta_dict for occ3d evaluation. "
+                                "Check dataset prepare_data() method."
+                            )
+                        
+                        sample_dict['index'] = meta['sample_idx']
+                    
                     data_samples_list.append(sample_dict)
                 return data_samples_list
             else:

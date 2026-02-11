@@ -25,6 +25,12 @@ class SSCEvaluator(BaseMetric):
             names to disambiguate homonymous metrics of different evaluators.
             If prefix is not provided in the argument, self.default_prefix
             will be used instead. Default: None.
+        dataset_name (str): Dataset name for determining class configuration.
+            'occ3d' for occ3d dataset (18 classes), otherwise 17 classes.
+        num_classes (int): Number of classes including empty/free class.
+        class_names (list): List of class names.
+        use_semantic (bool): Whether to use semantic labels.
+        use_image_mask (bool): Whether to use image mask for evaluation (occ3d).
     """
     
     default_prefix: Optional[str] = 'SSC'
@@ -32,11 +38,39 @@ class SSCEvaluator(BaseMetric):
     def __init__(self,
                  collect_device: str = 'cpu',
                  prefix: Optional[str] = None,
-                 save_results: bool = True,
-                 out_file_path: Optional[str] = None) -> None:
+                 save_results: bool = True,  # True for backward compatibility with original configs
+                 out_file_path: Optional[str] = None,
+                 dataset_name: str = 'nuscenes_occ',
+                 num_classes: int = 17,
+                 class_names: Optional[list] = None,
+                 use_semantic: bool = True,
+                 use_image_mask: bool = False) -> None:
         super().__init__(collect_device=collect_device, prefix=prefix)
         self.save_results = save_results
         self.out_file_path = out_file_path
+        self.dataset_name = dataset_name
+        self.num_classes = num_classes
+        self.use_semantic = use_semantic
+        self.use_image_mask = use_image_mask
+        
+        # Set class names based on dataset
+        if class_names is not None:
+            self.class_names = class_names
+        elif dataset_name == 'occ3d':
+            # occ3d uses 18 classes
+            self.class_names = ['others', 'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle', 
+                               'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck', 
+                               'driveable_surface', 'other_flat', 'sidewalk', 'terrain', 'manmade', 
+                               'vegetation', 'free']
+        else:
+            # Original 17 classes
+            self.class_names = ['empty', 'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle',
+                               'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck',
+                               'driveable_surface', 'other_flat', 'sidewalk', 'terrain', 'manmade',
+                               'vegetation']
+        
+        # Determine empty class index
+        self.empty_idx = 17 if dataset_name == 'occ3d' else 0
     
     def process(self, data_batch: dict, data_samples: Sequence[dict]) -> None:
         """Process one batch of data samples and predictions.
@@ -71,7 +105,7 @@ class SSCEvaluator(BaseMetric):
                     pred = output_voxels
                 
                 # Compute SSC metrics for this sample
-                ssc_metric = SSCMetrics(n_classes=17)
+                ssc_metric = SSCMetrics(n_classes=self.num_classes)
                 if pred.is_cuda:
                     ssc_metric = ssc_metric.cuda()
                 
@@ -118,15 +152,8 @@ class SSCEvaluator(BaseMetric):
                 "SSC_mIoU": ssc_scores['iou_ssc_mean'],
             }
             
-            # Add per-class IoU (use default class names)
-            class_names = [
-                'empty', 'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle',
-                'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck',
-                'driveable_surface', 'other_flat', 'sidewalk', 'terrain', 'manmade',
-                'vegetation'
-            ]
-            
-            for name, iou in zip(class_names, class_ssc_iou):
+            # Add per-class IoU
+            for name, iou in zip(self.class_names, class_ssc_iou):
                 res_dic[f"SSC_{name}_IoU"] = iou
                 
         elif results and 'ssc_results' in results[0]:
@@ -158,14 +185,7 @@ class SSCEvaluator(BaseMetric):
             }
             
             # Add per-class IoU
-            class_names = [
-                'empty', 'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle',
-                'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck',
-                'driveable_surface', 'other_flat', 'sidewalk', 'terrain', 'manmade',
-                'vegetation'
-            ]
-            
-            for name, iou_val in zip(class_names, class_ssc_iou):
+            for name, iou_val in zip(self.class_names, class_ssc_iou):
                 res_dic[f"SSC_{name}_IoU"] = float(iou_val)
         else:
             logger.warning('No SSC results or scores found in data samples!')

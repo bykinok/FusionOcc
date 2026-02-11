@@ -127,12 +127,28 @@ class nuScenesDataset(Dataset):
         downsample =1,
         grid_config=None,
         img_distill=False,
+        # occ3d specific parameters
+        dataset_name='nuscenes_occ',
+        use_semantic=True,
+        pc_range=None,
+        occ_size=None,
+        use_ego_frame=False,
+        classes=None,
+        use_mask_camera=False,
+        use_mask_camera_1_2=False,
+        use_mask_camera_1_4=False,
+        use_mask_camera_1_8=False,
     ):
         super().__init__()
         
         self.data_root = data_root
-        self.occ_root = occ_root
-        self.downsample_root = occ_root
+        # occ3d: GT and data live under the same root as data_root
+        if dataset_name == 'occ3d':
+            self.occ_root = data_root
+            self.downsample_root = data_root
+        else:
+            self.occ_root = occ_root
+            self.downsample_root = occ_root
         self.sweeps_num = sweeps_num
         self.color_jitter = color_jitter
         self.data_config = data_config
@@ -140,6 +156,45 @@ class nuScenesDataset(Dataset):
         self.grid_config = grid_config
         self.img_aug = img_aug
         self.img_distill = img_distill
+        
+        # occ3d parameters
+        self.dataset_name = dataset_name
+        self.use_semantic = use_semantic
+        self.use_ego_frame = use_ego_frame
+        self.use_occ3d = (dataset_name == 'occ3d')
+        
+        # Validate occ3d configuration
+        if self.use_occ3d:
+            if pc_range is None:
+                raise ValueError(
+                    "pc_range must be specified for occ3d dataset. "
+                    "Example: pc_range=[-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]"
+                )
+            if occ_size is None:
+                raise ValueError(
+                    "occ_size must be specified for occ3d dataset. "
+                    "Example: occ_size=[200, 200, 16]"
+                )
+            if classes is None:
+                raise ValueError(
+                    "classes (class_names) must be specified for occ3d dataset. "
+                    "Example: classes=['others', 'barrier', ..., 'vegetation', 'free'] (18 classes)"
+                )
+            if len(classes) != 18:
+                raise ValueError(
+                    f"occ3d requires 18 classes, but got {len(classes)} classes. "
+                    f"Expected: ['others', 'barrier', 'bicycle', 'bus', 'car', "
+                    f"'construction_vehicle', 'motorcycle', 'pedestrian', 'traffic_cone', "
+                    f"'trailer', 'truck', 'driveable_surface', 'other_flat', 'sidewalk', "
+                    f"'terrain', 'manmade', 'vegetation', 'free']"
+                )
+        
+        self.pc_range = pc_range if pc_range is not None else [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]
+        self.occ_size = occ_size if occ_size is not None else [200, 200, 16]
+        self.use_mask_camera = use_mask_camera
+        self.use_mask_camera_1_2 = use_mask_camera_1_2
+        self.use_mask_camera_1_4 = use_mask_camera_1_4
+        self.use_mask_camera_1_8 = use_mask_camera_1_8
 
         if split == 'train':
             data_path = os.path.join(data_root, 'nuscenes_occ_infos_train.pkl')
@@ -155,11 +210,25 @@ class nuScenesDataset(Dataset):
         self.shuffle_index = shuffle_index
 
         self.split = split 
-        self.class_names =  ['noise',
-               'barrier', 'bicycle', 'bus', 'car', 'construction',
-               'motorcycle', 'pedestrian', 'trafficcone', 'trailer',
-               'truck', 'driveable_surface', 'other', 'sidewalk', 'terrain',
-               'mannade', 'vegetation']
+        
+        # Set class names based on dataset
+        if classes is not None:
+            self.class_names = classes
+        elif self.use_occ3d:
+            # occ3d uses 18 classes (0=others, 1-16=semantic, 17=free)
+            self.class_names = ['others', 'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle', 
+                               'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck', 
+                               'driveable_surface', 'other_flat', 'sidewalk', 'terrain', 'manmade', 
+                               'vegetation', 'free']
+        else:
+            # Original 17 classes
+            self.class_names =  ['noise',
+                   'barrier', 'bicycle', 'bus', 'car', 'construction',
+                   'motorcycle', 'pedestrian', 'trafficcone', 'trailer',
+                   'truck', 'driveable_surface', 'other', 'sidewalk', 'terrain',
+                   'mannade', 'vegetation']
+        
+        self.num_classes = len(self.class_names)
         
         self.test_mode = test_mode
         self.set_group_flag()
@@ -169,6 +238,8 @@ class nuScenesDataset(Dataset):
         # data_start_ = time.time()
         flip_type = np.random.randint(0, 4) if self.augmentation else -1
         # flip_type = 3
+        # Store index for later use
+        self._current_index = index
         data = self.prepare_data(index, flip_type)
         # print('!!!!!!!!!!!!!!!!! ={}'.format(data))
         if data == None:
@@ -334,6 +405,107 @@ class nuScenesDataset(Dataset):
         return depth_map
 
 
+    def load_occ3d_gt(self, info, flip_type):
+        """
+        Load occ3d format GT (dense voxel grid with camera mask).
+        occ3d GT: .npz files with 'semantics' and 'mask_camera' keys.
+        File naming follows SurroundOcc: info['occ_path'] is the sample directory,
+        main file is labels.npz, multi-scale are labels_1_2.npz, labels_1_4.npz, labels_1_8.npz.
+        """
+        # breakpoint()
+        # SurroundOcc occ3d: occ_path = sample directory, GT file = labels.npz
+        occ_path_dir = info['occ_path'].rstrip('/')
+        occ3d_gt_path = os.path.join(occ_path_dir, 'labels.npz')
+
+        if not os.path.exists(occ3d_gt_path):
+            raise FileNotFoundError(
+                f"occ3d GT file not found: {occ3d_gt_path}\n"
+                f"Expected structure (SurroundOcc): {{occ_path}}/labels.npz\n"
+                f"occ_path from info: {info['occ_path']}\n"
+                f"Please check that occ_path is set correctly in data infos."
+            )
+        
+        # Load occ3d GT (dense format)
+        try:
+            occ3d_data = np.load(occ3d_gt_path)
+        except Exception as e:
+            raise IOError(
+                f"Failed to load occ3d GT file: {occ3d_gt_path}\n"
+                f"Error: {str(e)}\n"
+                f"Please check if the file is corrupted or in the correct format."
+            )
+        
+        # Extract semantics
+        if 'semantics' not in occ3d_data:
+            raise KeyError(
+                f"'semantics' key not found in occ3d GT file: {occ3d_gt_path}\n"
+                f"Available keys: {list(occ3d_data.keys())}\n"
+                f"Expected occ3d format with 'semantics' and 'mask_camera' keys."
+            )
+        occ3d_semantic = occ3d_data['semantics']  # (200, 200, 16) or similar
+        
+        # Extract camera mask
+        if 'mask_camera' not in occ3d_data:
+            raise KeyError(
+                f"'mask_camera' key not found in occ3d GT file: {occ3d_gt_path}\n"
+                f"Available keys: {list(occ3d_data.keys())}\n"
+                f"Expected occ3d format with 'semantics' and 'mask_camera' keys."
+            )
+        occ3d_cam_mask = occ3d_data['mask_camera']  # (200, 200, 16), may be bool or uint8 0/1
+        
+        # Apply camera mask if enabled (SurroundOcc: np.where avoids ~uint8 indexing as 255)
+        if self.use_mask_camera:
+            target = np.where(occ3d_cam_mask, occ3d_semantic, 255).astype(np.uint8)
+        else:
+            target = occ3d_semantic.copy().astype(np.uint8)
+        # Assert occ3d GT shape (200, 200, 16) to match loss dimensions
+        expected_shape = (self.sizes[0], self.sizes[1], self.sizes[2])
+        assert target.shape == expected_shape, (
+            f"occ3d full-scale GT shape {target.shape} != expected {expected_shape}"
+        )
+        
+        # Apply flip augmentation
+        target = augmentation_random_flip(target, flip_type, is_scan=False)
+        
+        # Multi-scale targets: load from pre-computed files (SurroundOcc: labels_1_2.npz, labels_1_4.npz, labels_1_8.npz)
+        occ3d_gt_path_1_2 = os.path.join(occ_path_dir, 'labels_1_2.npz')
+        occ3d_gt_path_1_4 = os.path.join(occ_path_dir, 'labels_1_4.npz')
+        occ3d_gt_path_1_8 = os.path.join(occ_path_dir, 'labels_1_8.npz')
+        for path in (occ3d_gt_path_1_2, occ3d_gt_path_1_4, occ3d_gt_path_1_8):
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"occ3d multi-scale GT file not found: {path}")
+        occ3d_data_1_2 = np.load(occ3d_gt_path_1_2)
+        if self.use_mask_camera_1_2:
+            target_1_2 = np.where(occ3d_data_1_2['mask_camera'], occ3d_data_1_2['semantics'], 255).astype(np.uint8)
+        else:
+            target_1_2 = occ3d_data_1_2['semantics'].astype(np.uint8)
+        shape_1_2 = (self.sizes[0] // 2, self.sizes[1] // 2, self.sizes[2] // 2)
+        assert target_1_2.shape == shape_1_2, (
+            f"occ3d target_1_2 shape {target_1_2.shape} != expected {shape_1_2}"
+        )
+        target_1_2 = augmentation_random_flip(target_1_2, flip_type, is_scan=False)
+        occ3d_data_1_4 = np.load(occ3d_gt_path_1_4)
+        if self.use_mask_camera_1_4:
+            target_1_4 = np.where(occ3d_data_1_4['mask_camera'], occ3d_data_1_4['semantics'], 255).astype(np.uint8)
+        else:
+            target_1_4 = occ3d_data_1_4['semantics'].astype(np.uint8)
+        shape_1_4 = (self.sizes[0] // 4, self.sizes[1] // 4, self.sizes[2] // 4)
+        assert target_1_4.shape == shape_1_4, (
+            f"occ3d target_1_4 shape {target_1_4.shape} != expected {shape_1_4}"
+        )
+        target_1_4 = augmentation_random_flip(target_1_4, flip_type, is_scan=False)
+        occ3d_data_1_8 = np.load(occ3d_gt_path_1_8)
+        if self.use_mask_camera_1_8:
+            target_1_8 = np.where(occ3d_data_1_8['mask_camera'], occ3d_data_1_8['semantics'], 255).astype(np.uint8)
+        else:
+            target_1_8 = occ3d_data_1_8['semantics'].astype(np.uint8)
+        shape_1_8 = (self.sizes[0] // 8, self.sizes[1] // 8, self.sizes[2] // 8)
+        assert target_1_8.shape == shape_1_8, (
+            f"occ3d target_1_8 shape {target_1_8.shape} != expected {shape_1_8}"
+        )
+        target_1_8 = augmentation_random_flip(target_1_8, flip_type, is_scan=False)
+        return target, target_1_2, target_1_4, target_1_8
+
     def prepare_data(self, index, flip_type):
         """
         Training data preparation.
@@ -381,6 +553,25 @@ class nuScenesDataset(Dataset):
                 sweep_points_list.append(points_sweep)
             points = np.concatenate(sweep_points_list, axis=0)
 
+        # For occ3d (ego frame): transform lidar points to ego so occupancy is in ego frame
+        # IMPORTANT: Transform BEFORE filtering (FusionOcc approach)
+        if self.use_ego_frame:
+            try:
+                from pyquaternion import Quaternion
+            except ImportError:
+                raise ImportError(
+                    "pyquaternion is required for ego frame. pip install pyquaternion"
+                )
+            sample_record = self.nusc.get('sample', info['token'])
+            lidar_data = self.nusc.get('sample_data', sample_record['data']['LIDAR_TOP'])
+            calib = self.nusc.get('calibrated_sensor', lidar_data['calibrated_sensor_token'])
+            lidar2ego_rot = Quaternion(calib['rotation']).rotation_matrix
+            lidar2ego_trans = np.array(calib['translation'])
+            # p_ego = R @ p_lidar + t
+            points[:, :3] = (points[:, :3] @ lidar2ego_rot.T) + lidar2ego_trans
+            radar_pc[:, :3] = (radar_pc[:, :3] @ lidar2ego_rot.T) + lidar2ego_trans
+
+        # Filter points by range AFTER ego transformation (FusionOcc approach)
         if self.lims:
             filter_mask = get_mask(points, self.lims)
             points = points[filter_mask]
@@ -388,8 +579,6 @@ class nuScenesDataset(Dataset):
             filter_radar_mask = get_mask(radar_pc, self.lims)
             radar_pc = radar_pc[filter_radar_mask]
 
-
-        
         
         min_bound = np.array([self.lims[0][0], self.lims[1][0], self.lims[2][0]])
         max_bound = np.array([self.lims[0][1], self.lims[1][1], self.lims[2][1]])
@@ -419,68 +608,73 @@ class nuScenesDataset(Dataset):
 
 
 
-        # nuScenes-Occupancy
-        rel_path = 'scene_{0}/occupancy/{1}.npy'.format(info['scene_token'], info['lidar_token'])
-        #  [z y x cls]
-        pcd = np.load(os.path.join(self.occ_root, rel_path))
-        occ_label = pcd[..., -1:]
-        occ_label[occ_label==0] = 255
-        occ_xyz_grid = pcd[..., [2,1,0]]
-
-
-        # 空间换时间
-        target_path = rel_path.replace('.npy', '.target')
-        target_path = os.path.join(self.downsample_root, target_path)
-        save_gt = False
-        if os.path.exists(target_path) and save_gt:
-            target = np.fromfile(target_path, dtype=np.uint8)  
-            target = target.reshape((self.sizes[0], self.sizes[1], self.sizes[2])) 
+        # Load GT based on dataset type
+        if self.use_occ3d:
+            # Load occ3d format GT (dense voxel grid)
+            target, target_1_2, target_1_4, target_1_8 = self.load_occ3d_gt(info, flip_type)
         else:
+            # nuScenes-Occupancy (original format)
+            rel_path = 'scene_{0}/occupancy/{1}.npy'.format(info['scene_token'], info['lidar_token'])
+            #  [z y x cls]
+            pcd = np.load(os.path.join(self.occ_root, rel_path))
+            occ_label = pcd[..., -1:]
+            occ_label[occ_label==0] = 255
+            occ_xyz_grid = pcd[..., [2,1,0]]
 
-            label_voxel_pair = np.concatenate([occ_xyz_grid, occ_label], axis=-1)
-            label_voxel_pair = label_voxel_pair[np.lexsort((occ_xyz_grid[:, 0], occ_xyz_grid[:, 1], occ_xyz_grid[:, 2])), :].astype(np.int32)
-            target = np.zeros([self.sizes[0], self.sizes[1], self.sizes[2]], dtype=np.uint8)
-            target = nb_process_label(target, label_voxel_pair)
-            # target.tofile(target_path)  
 
-        target_1_2_path = rel_path.replace('.npy', '.target_1_2')
-        target_1_2_path = os.path.join(self.downsample_root, target_1_2_path)
-        if os.path.exists(target_1_2_path) and save_gt:
-            target_1_2 = np.fromfile(target_1_2_path, dtype=np.uint8)  
-            target_1_2 = target_1_2.reshape((self.sizes[0]//2, self.sizes[1]//2, self.sizes[2]//2)) 
-        else:
-            occ_xyz_grid_1_2 = occ_xyz_grid//2
-            label_voxel_pair = np.concatenate([occ_xyz_grid_1_2, occ_label], axis=-1)
-            label_voxel_pair = label_voxel_pair[np.lexsort((occ_xyz_grid_1_2[:, 0], occ_xyz_grid_1_2[:, 1], occ_xyz_grid_1_2[:, 2])), :].astype(np.int32)
-            target_1_2 = np.zeros([self.sizes[0]//2, self.sizes[1]//2, self.sizes[2]//2], dtype=np.uint8)
-            target_1_2 = nb_process_label(target_1_2, label_voxel_pair)
-            # target_1_2.tofile(target_1_2_path)  
+            # 空间换时간
+            target_path = rel_path.replace('.npy', '.target')
+            target_path = os.path.join(self.downsample_root, target_path)
+            save_gt = False
+            if os.path.exists(target_path) and save_gt:
+                target = np.fromfile(target_path, dtype=np.uint8)  
+                target = target.reshape((self.sizes[0], self.sizes[1], self.sizes[2])) 
+            else:
 
-        target_1_4_path = rel_path.replace('.npy', '.target_1_4')
-        target_1_4_path = os.path.join(self.downsample_root, target_1_4_path)
-        if os.path.exists(target_1_4_path) and save_gt:
-            target_1_4 = np.fromfile(target_1_4_path, dtype=np.uint8)  
-            target_1_4 = target_1_4.reshape((self.sizes[0]//4, self.sizes[1]//4, self.sizes[2]//4)) 
-        else:
-            occ_xyz_grid_1_4 = occ_xyz_grid//4
-            label_voxel_pair = np.concatenate([occ_xyz_grid_1_4, occ_label], axis=-1)
-            label_voxel_pair = label_voxel_pair[np.lexsort((occ_xyz_grid_1_4[:, 0], occ_xyz_grid_1_4[:, 1], occ_xyz_grid_1_4[:, 2])), :].astype(np.int32)
-            target_1_4 = np.zeros([self.sizes[0]//4, self.sizes[1]//4, self.sizes[2]//4], dtype=np.uint8)
-            target_1_4 = nb_process_label(target_1_4, label_voxel_pair)
-            # target_1_4.tofile(target_1_4_path)  
+                label_voxel_pair = np.concatenate([occ_xyz_grid, occ_label], axis=-1)
+                label_voxel_pair = label_voxel_pair[np.lexsort((occ_xyz_grid[:, 0], occ_xyz_grid[:, 1], occ_xyz_grid[:, 2])), :].astype(np.int32)
+                target = np.zeros([self.sizes[0], self.sizes[1], self.sizes[2]], dtype=np.uint8)
+                target = nb_process_label(target, label_voxel_pair)
+                # target.tofile(target_path)  
 
-        target_1_8_path = rel_path.replace('.npy', '.target_1_8')
-        target_1_8_path = os.path.join(self.downsample_root, target_1_8_path)
-        if os.path.exists(target_1_8_path) and save_gt:
-            target_1_8 = np.fromfile(target_1_8_path, dtype=np.uint8)  
-            target_1_8 = target_1_8.reshape((self.sizes[0]//8, self.sizes[1]//8, self.sizes[2]//8)) 
-        else:
-            occ_xyz_grid_1_8 = occ_xyz_grid//8
-            label_voxel_pair = np.concatenate([occ_xyz_grid_1_8, occ_label], axis=-1)
-            label_voxel_pair = label_voxel_pair[np.lexsort((occ_xyz_grid_1_8[:, 0], occ_xyz_grid_1_8[:, 1], occ_xyz_grid_1_8[:, 2])), :].astype(np.int32)
-            target_1_8 = np.zeros([self.sizes[0]//8, self.sizes[1]//8, self.sizes[2]//8], dtype=np.uint8)
-            target_1_8 = nb_process_label(target_1_8, label_voxel_pair)
-            # target_1_8.tofile(target_1_8_path)  
+            target_1_2_path = rel_path.replace('.npy', '.target_1_2')
+            target_1_2_path = os.path.join(self.downsample_root, target_1_2_path)
+            if os.path.exists(target_1_2_path) and save_gt:
+                target_1_2 = np.fromfile(target_1_2_path, dtype=np.uint8)  
+                target_1_2 = target_1_2.reshape((self.sizes[0]//2, self.sizes[1]//2, self.sizes[2]//2)) 
+            else:
+                occ_xyz_grid_1_2 = occ_xyz_grid//2
+                label_voxel_pair = np.concatenate([occ_xyz_grid_1_2, occ_label], axis=-1)
+                label_voxel_pair = label_voxel_pair[np.lexsort((occ_xyz_grid_1_2[:, 0], occ_xyz_grid_1_2[:, 1], occ_xyz_grid_1_2[:, 2])), :].astype(np.int32)
+                target_1_2 = np.zeros([self.sizes[0]//2, self.sizes[1]//2, self.sizes[2]//2], dtype=np.uint8)
+                target_1_2 = nb_process_label(target_1_2, label_voxel_pair)
+                # target_1_2.tofile(target_1_2_path)  
+
+            target_1_4_path = rel_path.replace('.npy', '.target_1_4')
+            target_1_4_path = os.path.join(self.downsample_root, target_1_4_path)
+            if os.path.exists(target_1_4_path) and save_gt:
+                target_1_4 = np.fromfile(target_1_4_path, dtype=np.uint8)  
+                target_1_4 = target_1_4.reshape((self.sizes[0]//4, self.sizes[1]//4, self.sizes[2]//4)) 
+            else:
+                occ_xyz_grid_1_4 = occ_xyz_grid//4
+                label_voxel_pair = np.concatenate([occ_xyz_grid_1_4, occ_label], axis=-1)
+                label_voxel_pair = label_voxel_pair[np.lexsort((occ_xyz_grid_1_4[:, 0], occ_xyz_grid_1_4[:, 1], occ_xyz_grid_1_4[:, 2])), :].astype(np.int32)
+                target_1_4 = np.zeros([self.sizes[0]//4, self.sizes[1]//4, self.sizes[2]//4], dtype=np.uint8)
+                target_1_4 = nb_process_label(target_1_4, label_voxel_pair)
+                # target_1_4.tofile(target_1_4_path)  
+
+            target_1_8_path = rel_path.replace('.npy', '.target_1_8')
+            target_1_8_path = os.path.join(self.downsample_root, target_1_8_path)
+            if os.path.exists(target_1_8_path) and save_gt:
+                target_1_8 = np.fromfile(target_1_8_path, dtype=np.uint8)  
+                target_1_8 = target_1_8.reshape((self.sizes[0]//8, self.sizes[1]//8, self.sizes[2]//8)) 
+            else:
+                occ_xyz_grid_1_8 = occ_xyz_grid//8
+                label_voxel_pair = np.concatenate([occ_xyz_grid_1_8, occ_label], axis=-1)
+                label_voxel_pair = label_voxel_pair[np.lexsort((occ_xyz_grid_1_8[:, 0], occ_xyz_grid_1_8[:, 1], occ_xyz_grid_1_8[:, 2])), :].astype(np.int32)
+                target_1_8 = np.zeros([self.sizes[0]//8, self.sizes[1]//8, self.sizes[2]//8], dtype=np.uint8)
+                target_1_8 = nb_process_label(target_1_8, label_voxel_pair)
+                # target_1_8.tofile(target_1_8_path)  
 
         
         if self.shuffle_index:
@@ -504,6 +698,32 @@ class nuScenesDataset(Dataset):
             depth_map_list = []
 
             
+            # Compute ego2lidar transformation for ego frame (occ3d)
+            if self.use_ego_frame:
+                # Get lidar2ego transformation from NuScenes API
+                sample_record = self.nusc.get('sample', info['token'])
+                lidar_data = self.nusc.get('sample_data', sample_record['data']['LIDAR_TOP'])
+                calibrated_sensor = self.nusc.get('calibrated_sensor', lidar_data['calibrated_sensor_token'])
+                
+                # Import pyquaternion for rotation
+                try:
+                    from pyquaternion import Quaternion
+                except ImportError:
+                    raise ImportError(
+                        "pyquaternion is required for ego frame transformation. "
+                        "Install it with: pip install pyquaternion"
+                    )
+                
+                # Build lidar2ego transformation matrix
+                lidar2ego_rot = Quaternion(calibrated_sensor['rotation']).rotation_matrix
+                lidar2ego_trans = np.array(calibrated_sensor['translation'])
+                lidar2ego_4x4 = np.eye(4)
+                lidar2ego_4x4[:3, :3] = lidar2ego_rot
+                lidar2ego_4x4[:3, 3] = lidar2ego_trans
+                
+                # Compute ego2lidar (inverse)
+                ego2lidar_4x4 = np.linalg.inv(lidar2ego_4x4)
+                            
             # 添加图像增强
             for cam_type, cam_info in info['cams'].items():
 
@@ -543,7 +763,17 @@ class nuScenesDataset(Dataset):
                 viewpad = np.eye(4)
                 viewpad[:intrinsic.shape[0], :intrinsic.shape[1]] = intrinsic
                 lidar2img_rt = (viewpad @ lidar2cam_rt.T)
-                lidar2img_rts.append(lidar2img_rt)
+                
+                # For occ3d with ego frame: Convert lidar2img to ego2img
+                # This ensures model outputs are in ego frame, matching occ3d GT
+                if self.use_ego_frame:
+                    # ego2img = lidar2img @ ego2lidar
+                    ego2img_rt = (lidar2img_rt.astype(np.float64) @ ego2lidar_4x4.astype(np.float64)).astype(np.float32)
+                    lidar2img_rts.append(ego2img_rt)  # Store as lidar2img (encoder reads this key)
+                    proj_rt = ego2img_rt  # points in ego; use ego2img for depth map
+                else:
+                    lidar2img_rts.append(lidar2img_rt)
+                    proj_rt = lidar2img_rt
                 # print('viewpad = {}'.format(viewpad))
 
                 cam_intrinsics.append(viewpad[:3, :3])
@@ -558,9 +788,9 @@ class nuScenesDataset(Dataset):
                 post_rots_list.append(post_rot)         
                 post_trans_list.append(post_tran)      
               
-                points_img = torch.tensor(points_depth).float()[:, :3].matmul(torch.tensor(lidar2img_rt).float()[:3, :3].T) 
-              
-                points_img = points_img + torch.tensor(lidar2img_rt).float()[:3, 3].unsqueeze(0) 
+                # proj_rt: ego2img (occ3d) or lidar2img (original) so depth matches BEV frame
+                points_img = torch.tensor(points_depth).float()[:, :3].matmul(torch.tensor(proj_rt).float()[:3, :3].T) 
+                points_img = points_img + torch.tensor(proj_rt).float()[:3, 3].unsqueeze(0) 
 
                 points_img = torch.cat([points_img[:, :2] / points_img[:, 2:3], points_img[:, 2:3]],1)  # 归一化z
               
@@ -586,11 +816,20 @@ class nuScenesDataset(Dataset):
 
             # numpy2tensor
             _cam_intrinsic = torch.tensor(_cam_intrinsic).float()
-          
+            # View transformer expects sensor2ego (cam2keyframe). For ego frame (occ3d): use cam2ego so BEV is in ego
+            if self.use_ego_frame:
+                # cam2ego = lidar2ego @ cam2lidar = lidar2ego_4x4 @ inv(lidar2cam)
+                _cam2ego = np.array([
+                    lidar2ego_4x4.astype(np.float64) @ np.linalg.inv(_lidar2cam[i].astype(np.float64))
+                    for i in range(len(_lidar2cam))
+                ]).astype(np.float32)
+                _sensor2egos = torch.tensor(_cam2ego).float()
+            else:
+                _sensor2egos = torch.tensor(np.linalg.inv(_lidar2cam)).float()
             img_inputs = dict(
                 imgs = _images, 
                 intrins = _cam_intrinsic,
-                sensor2egos = torch.tensor(np.linalg.inv(_lidar2cam)).float(),
+                sensor2egos = _sensor2egos,
                 post_rots = (_post_rots).float(),
                 post_trans = (_post_trans).float(),
                 flip_type=flip_type,
@@ -618,6 +857,7 @@ class nuScenesDataset(Dataset):
             target_1_4=target_1_4,
             target_1_8=target_1_8,
             if_scene_useful = if_scene_useful,
+            sample_idx = index,  # Add sample index for evaluation
             )
 
         return points, target, meta_dict, img_inputs, radar_pc

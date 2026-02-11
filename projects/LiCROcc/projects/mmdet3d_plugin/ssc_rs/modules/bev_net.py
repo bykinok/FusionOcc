@@ -33,11 +33,15 @@ def draw_feat(feats, type='img'):
         
 
 class BEVFusion(nn.Module):
-    def __init__(self, channel, light=False, use_cam=True, use_DA=False, use_add=False):
+    def __init__(self, channel, light=False, use_cam=True, use_DA=False, use_add=False, img_upsample_scale=2, in_channels_sem=None, in_channels_com=None):
         super().__init__()
 
         self.use_cam = use_cam
         self.use_add = use_add
+        # Adapter input channels: use config values for occ3d (e.g. 256/128) or default channel//2
+        in_sem = in_channels_sem if in_channels_sem is not None else channel // 2
+        in_com = in_channels_com if in_channels_com is not None else channel // 2
+
         # if not self.use_add:
         self.attention_bev = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
@@ -70,22 +74,32 @@ class BEVFusion(nn.Module):
         
         self.light = light
         if not light:
-            self.adapter_sem = nn.Conv2d(channel//2, channel, 1)
-            self.adapter_com = nn.Conv2d(channel//2, channel, 1)
+            self.adapter_sem = nn.Conv2d(in_sem, channel, 1)
+            self.adapter_com = nn.Conv2d(in_com, channel, 1)
             if self.use_cam:
                 if not self.use_add:
-                    self.adapter_img = nn.Sequential(
-                        nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
-                        nn.Conv2d(channel, channel, kernel_size=3, padding=1, bias=False),
-                        build_norm_layer(dict(type='BN'), channel)[1],
-                        nn.ReLU(inplace=True),
-                        nn.Conv2d(channel, channel, kernel_size=1, padding=0)
-                    ) #nn.Conv2d(channel, channel, 1)
+                    # img_upsample_scale=1 for occ3d (image BEV already matches radar 100/50/25)
+                    if img_upsample_scale == 1:
+                        self.adapter_img = nn.Sequential(
+                            nn.Conv2d(channel, channel, kernel_size=3, padding=1, bias=False),
+                            build_norm_layer(dict(type='BN'), channel)[1],
+                            nn.ReLU(inplace=True),
+                            nn.Conv2d(channel, channel, kernel_size=1, padding=0)
+                        )
+                    else:
+                        self.adapter_img = nn.Sequential(
+                            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+                            nn.Conv2d(channel, channel, kernel_size=3, padding=1, bias=False),
+                            build_norm_layer(dict(type='BN'), channel)[1],
+                            nn.ReLU(inplace=True),
+                            nn.Conv2d(channel, channel, kernel_size=1, padding=0)
+                        ) #nn.Conv2d(channel, channel, 1)
                 else:
-                    self.adapter_img = nn.Sequential(
-                        # nn.ConvTranspose2d(channel, channel, kernel_size=3, stride=2, padding=1, output_padding=1, bias=False)
-                        nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
-                        # build_norm_layer(dict(type='BN'), channel)[1],
+                    if img_upsample_scale == 1:
+                        self.adapter_img = nn.Identity()
+                    else:
+                        self.adapter_img = nn.Sequential(
+                            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
                         )
         if self.use_DA: # 使用DA
             self.DA = CustonDATransformer(embed_dims=channel)
@@ -193,13 +207,15 @@ class myMLP(nn.Module):
 @HEADS.register_module()
 class BEVUNet(nn.Module):
     def __init__(self, n_class, n_height, class_frequences=None, dilation=1, 
-        bilinear=True, group_conv=False, input_batch_norm=True, dropout=0.5, circular_padding=False, dropblock=False, light=False, frozen=False, use_cam=[True,True,True], use_Distill_2 = False, use_DA=False, use_add=False, **kwargs):
+        bilinear=True, group_conv=False, input_batch_norm=True, dropout=0.5, circular_padding=False, dropblock=False, light=False, frozen=False,         use_cam=[True,True,True], use_Distill_2 = False, use_DA=False, use_add=False, empty_idx=0, fusion_cfg=None, **kwargs):
         super().__init__()
 
         self.nbr_classes = int(n_class / n_height)
         self.n_height = n_height
         self.class_frequencies = class_frequences
         self.use_Distill_2 = use_Distill_2
+        self.empty_idx = empty_idx  # Index of empty/free class (0 for original, 17 for occ3d)
+        self.fusion_cfg = fusion_cfg or []
         # TODO 这里的分辨率改到cfg里面
         if self.use_Distill_2:
             channels = [128, 256, 512]
@@ -232,7 +248,31 @@ class BEVUNet(nn.Module):
             self.outc = outconv(64, n_class)
 
             channels = [64, 128, 256]
-        self.bev_fusions = nn.ModuleList([BEVFusion(channels[i], use_cam=use_cam[i],light=light, use_DA=use_DA, use_add=use_add) for i in range(3)])
+        img_upsample_scales = [
+            self.fusion_cfg[i].get('img_upsample_scale', 2) if i < len(self.fusion_cfg) and isinstance(self.fusion_cfg[i], dict) else 2
+            for i in range(3)
+        ]
+        in_channels_sem_list = [
+            self.fusion_cfg[i].get('in_channels_sem') if i < len(self.fusion_cfg) and isinstance(self.fusion_cfg[i], dict) else None
+            for i in range(3)
+        ]
+        in_channels_com_list = [
+            self.fusion_cfg[i].get('in_channels_com') if i < len(self.fusion_cfg) and isinstance(self.fusion_cfg[i], dict) else None
+            for i in range(3)
+        ]
+        self.bev_fusions = nn.ModuleList([
+            BEVFusion(
+                channels[i],
+                use_cam=use_cam[i],
+                light=light,
+                use_DA=use_DA,
+                use_add=use_add,
+                img_upsample_scale=img_upsample_scales[i],
+                in_channels_sem=in_channels_sem_list[i],
+                in_channels_com=in_channels_com_list[i],
+            )
+            for i in range(3)
+        ])
         # 冻住
         if frozen:
             for k,v in self.named_parameters():
@@ -279,10 +319,10 @@ class BEVUNet(nn.Module):
         class_weights = torch.from_numpy(1 / np.log(np.array(self.class_frequencies) + 0.001)).float().to(scores.device)
         loss = F.cross_entropy(scores, labels.long(), weight=class_weights, ignore_index=255)
        
-        loss_sem_scal = sem_scal_loss(scores, labels.long())
+        loss_sem_scal = sem_scal_loss(scores, labels.long(), empty_idx=self.empty_idx)
         loss += loss_sem_scal
         
-        loss_geo_scal = geo_scal_loss(scores, labels.long())
+        loss_geo_scal = geo_scal_loss(scores, labels.long(), empty_idx=self.empty_idx)
 
         loss += loss_geo_scal
 
