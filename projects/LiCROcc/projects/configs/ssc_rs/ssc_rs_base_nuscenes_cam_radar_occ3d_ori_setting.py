@@ -214,8 +214,8 @@ test_batch_size = 1
 # MMEngine 2.x: Dataloader configuration
 train_dataloader = dict(
     batch_size=train_batch_size,
-    num_workers=0,#4,
-    persistent_workers=False,#True,
+    num_workers=4,
+    persistent_workers=True,
     sampler=dict(type='DistributedGroupSampler', samples_per_gpu=train_batch_size, seed=10),
     collate_fn=collate,  # Add custom collate function
     dataset=dict(
