@@ -191,8 +191,8 @@ test_batch_size = 1
 
 train_dataloader = dict(
     batch_size=train_batch_size,
-    num_workers=0,
-    persistent_workers=False,
+    num_workers=4,
+    persistent_workers=True,
     sampler=dict(type='DistributedGroupSampler', samples_per_gpu=train_batch_size, seed=10),
     collate_fn=collate,
     dataset=dict(
