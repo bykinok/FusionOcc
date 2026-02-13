@@ -782,8 +782,18 @@ class OccNet(BaseModel):
             if output.get('output_coords_fine') is not None and len(output.get('output_coords_fine', [])) > 0:
                 fine_pred = output['output_voxels_fine'][0]  # [N, ncls]
                 fine_coord = output['output_coords_fine'][0]  # [3, N]
-                # Occ3D config는 cascade_ratio=2로 fine=GT=200x200x16이라 fine_coord 그대로 사용
-                pred_f = self.empty_idx * torch.ones_like(gt_occ).unsqueeze(0).unsqueeze(0).repeat(1, fine_pred.shape[1], 1, 1, 1).float()
+                
+                # Get GT shape for interpolation
+                if gt_occ.dim() == 3:
+                    gt_shape = gt_occ.shape
+                else:
+                    gt_shape = gt_occ.shape[1:]
+                
+                # Initialize with coarse prediction (best for both nuScenes & Occ3D)
+                # This provides meaningful logits for all voxels instead of uniform values
+                pred_f = F.interpolate(pred_c, size=list(gt_shape), mode='trilinear', align_corners=False)
+                
+                # Override fine coordinates with refined predictions
                 pred_f[:, :, fine_coord[0], fine_coord[1], fine_coord[2]] = fine_pred.permute(1, 0).unsqueeze(0)
             else:
                 pred_f = output['output_voxels_fine'][0]
