@@ -140,6 +140,7 @@ model = dict(
         class_frequencies=ss_class_freq,
         phase=phase,
         frozen=False,
+        dataset_name=dataset_name,
     ),
     pts_middle_encoder=dict(
         type='CompletionBranch',
@@ -147,6 +148,7 @@ model = dict(
         nbr_class=nbr_classes,  # 18 classes (include 'free')
         phase=phase,
         frozen=False,
+        dataset_name=dataset_name,
     ),
     # occ3d: output (B, 18, 200, 200, 16); image fusion at all 3 scales
     pts_bbox_head=dict(
@@ -330,7 +332,9 @@ param_scheduler = [
     dict(type='CosineAnnealingLR', by_epoch=True, begin=0, end=24, eta_min=2e-7),
 ]
 
-train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=24, val_interval=1)
+train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=2,#24, 
+val_interval=999999#1
+)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 

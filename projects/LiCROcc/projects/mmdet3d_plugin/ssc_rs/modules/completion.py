@@ -32,9 +32,10 @@ def make_layers(in_dim, out_dim, kernel_size=3, padding=1, stride=1, dilation=1,
 
 @MIDDLE_ENCODERS.register_module()
 class CompletionBranch(nn.Module):
-    def __init__(self, init_size=32, nbr_class=20, phase='trainval', frozen = False):
+    def __init__(self, init_size=32, nbr_class=20, phase='trainval', frozen=False, dataset_name='nuscenes_occ'):
         super().__init__()
         self.nclass = nbr_class
+        self.dataset_name = dataset_name
         self.in_layer =  nn.Conv3d(1, 16, kernel_size=7, padding=3, stride=2, dilation=1)  # 1/2, 16
         self.block_1 = make_layers(16, 16, kernel_size=3, padding=1, stride=1, dilation=1, blocks=1) # 1/2, 16
         self.block_2 = make_layers(16, 32, kernel_size=3, padding=1, stride=1, dilation=1, downsample=True, blocks=1) # 1/4, 32
@@ -107,8 +108,15 @@ class CompletionBranch(nn.Module):
                 target.append(x[f'target_1_{2**(i+1)}'])
             target = torch.from_numpy(np.stack(target)).to(device)
             labels_copy = target.long().clone()
-            valid = (0 < labels_copy) & (labels_copy < self.nclass)
-            labels_copy[valid] = 1
+            # occ3d: empty=17 (free), occupied=0-16 (others + semantic). Completion: 0=empty, 1=occupied.
+            # Original: empty=0, occupied=1-16.
+            if getattr(self, 'dataset_name', 'nuscenes_occ') == 'occ3d':
+                labels_copy[labels_copy == 255] = 255  # keep ignore
+                labels_copy[(labels_copy >= 0) & (labels_copy <= 16)] = 1   # occupied (others + semantic)
+                labels_copy[labels_copy == 17] = 0   # free -> empty
+            else:
+                valid = (0 < labels_copy) & (labels_copy < self.nclass)
+                labels_copy[valid] = 1
             
             scores = mss_logits[i].permute(0, 1, 4, 3, 2) # BCDHW
             # scores = mss_logits[i].permute(0, 1, 3, 4, 2) # BCDHW

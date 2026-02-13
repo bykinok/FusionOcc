@@ -179,6 +179,7 @@ model = dict(
         class_frequencies=ss_class_freq,
         phase='test',
         frozen=True,
+        dataset_name=dataset_name,
     ),
     pts_middle_encoder=dict(
         type='CompletionBranch',
@@ -186,6 +187,7 @@ model = dict(
         nbr_class=nbr_classes,
         phase='test',
         frozen=True,
+        dataset_name=dataset_name,
     ),
     pts_bbox_head=dict(
         type='BEVUNet',
@@ -220,6 +222,7 @@ model = dict(
         class_frequencies=ss_class_freq,
         phase=phase,
         frozen=False,
+        dataset_name=dataset_name,
     ),
     radar_middle_encoder=dict(
         type='CompletionBranch',
@@ -227,6 +230,7 @@ model = dict(
         nbr_class=nbr_classes,
         phase=phase,
         frozen=False,
+        dataset_name=dataset_name,
     ),
     radar_bbox_head=dict(
         type='BEVUNet',

@@ -160,11 +160,12 @@ class SGFE(nn.Module):
 
 @BACKBONES.register_module()
 class SemanticBranch(nn.Module):
-    def __init__(self, sizes=[256, 256, 32], nbr_class=19, init_size=32, class_frequencies=None, phase='trainval', frozen = False):
+    def __init__(self, sizes=[256, 256, 32], nbr_class=19, init_size=32, class_frequencies=None, phase='trainval', frozen=False, dataset_name='nuscenes_occ'):
         super().__init__()
         self.class_frequencies = class_frequencies
         self.sizes = sizes
         self.nbr_class = nbr_class
+        self.dataset_name = dataset_name
         self.conv1_block = SFE(init_size, init_size, "svpfe_0")
         self.conv2_block = SFE(64, 64, "svpfe_1")
         self.conv3_block = SFE(128, 128, "svpfe_2")
@@ -261,9 +262,16 @@ class SemanticBranch(nn.Module):
             indexes = mss_indexes[i].long()
             labels = target[indexes[:, 0], indexes[:, 3], indexes[:, 2], indexes[:, 1]]
             labels_copy = labels.long().clone()
-            labels_copy[labels_copy == 255] += 1
-            labels_copy[labels_copy == 0] = 256
-            labels_copy = labels_copy - 1
+            # occ3d: 0=others (valid), 1-16=semantic, 17=free. SemanticBranch predicts 17 classes (0-16).
+            # Original: 0=noise (ignore), 1-16=semantic. Remap 1->0, ..., 16->15.
+            if getattr(self, 'dataset_name', 'nuscenes_occ') == 'occ3d':
+                labels_copy[labels_copy == 255] = 255  # keep ignore
+                labels_copy[labels_copy == 17] = 255   # free -> ignore for semantic (17 classes: 0-16)
+                # 0-16 stay as 0-16 (others, barrier, ..., vegetation)
+            else:
+                labels_copy[labels_copy == 255] += 1
+                labels_copy[labels_copy == 0] = 256
+                labels_copy = labels_copy - 1
             # breakpoint()
             res04_loss = lovasz_softmax(F.softmax(mss_logits[i], dim=1), labels_copy, ignore=255)
             res04_loss2 = F.cross_entropy(mss_logits[i], labels_copy, weight=class_weights, ignore_index=255)

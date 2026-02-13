@@ -153,14 +153,17 @@ model = dict(
         init_size=sizes[-1], 
         class_frequencies=ss_class_freq, 
         phase=phase,
-        frozen=False
+        frozen=False,
+        dataset_name=dataset_name,
         ),
     radar_middle_encoder=dict(
         type='CompletionBranch',
         init_size=sizes[-1],
         nbr_class=nbr_classes,  # 18 classes (including 'free')
         phase=phase,
-        frozen = False),
+        frozen=False,
+        dataset_name=dataset_name,
+        ),
     # occ3d: n_class=18*16=288, n_height=16, spatial=sizes[:2]=200x200 -> output (B, 18, 200, 200, 16)
     radar_bbox_head=dict(
         type='BEVUNet',
@@ -283,8 +286,8 @@ val_dataloader = dict(
 
 test_dataloader = dict(
     batch_size=test_batch_size,
-    num_workers=4,
-    persistent_workers=True,
+    num_workers=0,#4,
+    persistent_workers=False,#True,
     drop_last=False,
     sampler=dict(type='DistributedSampler', shuffle=False, seed=10),
     collate_fn=collate,  # Add custom collate function
@@ -379,8 +382,8 @@ param_scheduler = [
 # MMEngine 2.x: Training configuration
 train_cfg = dict(
     type='EpochBasedTrainLoop',
-    max_epochs=24,
-    val_interval=1
+    max_epochs=2,#24,
+    val_interval=999999#1
 )
 
 val_cfg = dict(type='ValLoop')
