@@ -24,14 +24,13 @@ occ_size = [200, 200, 16]  # Occ3D grid [X, Y, Z] -> output (B, nbr_classes, 200
 lims = [[-51.2, 51.2], [-51.2, 51.2], [-5, 3.0]]
 sizes = [512, 512, 40]
 if dataset_name == 'occ3d':
-    # FusionOcc approach: transform to ego first, then filter with small epsilon
-    # Epsilon 0.001 in get_mask() is sufficient to avoid boundary issues
-    # lims align with point_cloud_range (no large margin needed)
     lims = [[point_cloud_range[0], point_cloud_range[3]],   # x: [-40, 40]
             [point_cloud_range[1], point_cloud_range[4]],   # y: [-40, 40]
             [point_cloud_range[2], point_cloud_range[5]]]   # z: [-1, 5.4]
     sizes = occ_size  # [200, 200, 16]
-grid_meters = [0.2, 0.2, 0.2]
+    grid_meters = [0.4, 0.4, 0.4]  # 80m/200=0.4m, 6.4m/16=0.4m
+else:
+    grid_meters = [0.2, 0.2, 0.2]
 
 # occ3d uses 18 classes (0=others, 1-16=semantic, 17=free)
 nbr_classes = 18
