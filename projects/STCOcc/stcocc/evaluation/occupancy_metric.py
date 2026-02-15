@@ -258,7 +258,14 @@ class OccupancyMetric(BaseMetric):
                 occ_path = info['occ_path']
                 if self.dataset_name == 'openocc':
                     occ_path = occ_path.replace('gts', 'openocc_v2')
-            occ_path = os.path.join(occ_path, 'labels.npz')
+            
+            # Only append 'labels.npz' if not already present (BEVFormer includes it)
+            if not occ_path.endswith('labels.npz'):
+                occ_path = os.path.join(occ_path, 'labels.npz')
+            
+            # Prepend data_root if provided and path is relative
+            if self.data_root and not os.path.isabs(occ_path):
+                occ_path = os.path.join(self.data_root, occ_path)
             
             try:
                 occ_gt = np.load(occ_path, allow_pickle=True)
@@ -356,10 +363,22 @@ class OccupancyMetric(BaseMetric):
                 break
             info = self.data_infos[index]
 
-            occ_path = info['occ_path']
-            if self.dataset_name == 'openocc':
-                occ_path = occ_path.replace('gts', 'openocc_v2')
-            occ_path = os.path.join(occ_path, 'labels.npz')
+            # Priority: occ3d_gt_path (SurroundOcc/BEVFormer format) > occ_path (STCOcc format)
+            if 'occ3d_gt_path' in info:
+                occ_path = info['occ3d_gt_path']
+            else:
+                occ_path = info['occ_path']
+                if self.dataset_name == 'openocc':
+                    occ_path = occ_path.replace('gts', 'openocc_v2')
+            
+            # Only append 'labels.npz' if not already present (BEVFormer includes it)
+            if not occ_path.endswith('labels.npz'):
+                occ_path = os.path.join(occ_path, 'labels.npz')
+            
+            # Prepend data_root if provided and path is relative
+            if self.data_root and not os.path.isabs(occ_path):
+                occ_path = os.path.join(self.data_root, occ_path)
+            
             occ_gt = np.load(occ_path, allow_pickle=True)
             
             gt_semantics = occ_gt['semantics'].astype(np.uint8)

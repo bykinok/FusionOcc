@@ -42,6 +42,16 @@ class_names = [
     'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
 ]
 
+# Occ3D class names (18 classes: 0=others, 1-16=semantic, 17=free)
+occ_class_names = ['others', 'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle', 
+                   'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck', 
+                   'driveable_surface', 'other_flat', 'sidewalk', 'terrain', 'manmade', 
+                   'vegetation', 'free']
+
+# Dataset configuration for evaluation metric
+dataset_name = 'occ3d'
+eval_metric = 'miou'
+
 input_modality = dict(
     use_lidar=False,
     use_camera=True,
@@ -295,19 +305,33 @@ test_dataloader = dict(
     dataset=data['test']
 )
 
+# Use OccupancyMetricHybrid which uses STCOcc metric internally
+# This ensures evaluation metrics are calculated the same way as SurroundOcc, CONet, and STCOcc
 val_evaluator = dict(
-    type='mmdet3d.OccupancyMetric',
-    num_classes=18,
+    type='mmdet3d.OccupancyMetricHybrid',  # Hybrid metric using STCOcc's implementation
+    dataset_name=dataset_name,  # 'occ3d'
+    num_classes=18,  # occ3d uses 18 classes (0=others, 1-16=semantic, 17=free)
     use_lidar_mask=False,
-    use_image_mask=True,  # 원본과 동일하게 True로 설정 (mask dtype 수정 완료)
+    use_image_mask=True,  # occ3d provides mask_camera
+    ann_file='data/nuscenes/occ_infos_temporal_val.pkl',
+    data_root='data/nuscenes/',
+    class_names=occ_class_names,
+    eval_metric=eval_metric,  # 'miou'
+    sort_by_timestamp=True,  # BEVFormer dataset sorts by timestamp (line 100 in nuscenes_occ.py)
     prefix='val'  # prefix 설정하여 경고 제거
 )
 
 test_evaluator = dict(
-    type='mmdet3d.OccupancyMetric',
-    num_classes=18,
+    type='mmdet3d.OccupancyMetricHybrid',  # Hybrid metric using STCOcc's implementation
+    dataset_name=dataset_name,  # 'occ3d'
+    num_classes=18,  # occ3d uses 18 classes (0=others, 1-16=semantic, 17=free)
     use_lidar_mask=False,
-    use_image_mask=True,  # 원본과 동일하게 True로 설정 (mask dtype 수정 완료)
+    use_image_mask=True,  # occ3d provides mask_camera
+    ann_file='data/nuscenes/occ_infos_temporal_val.pkl',
+    data_root='data/nuscenes/',
+    class_names=occ_class_names,
+    eval_metric=eval_metric,  # 'miou'
+    sort_by_timestamp=True,  # BEVFormer dataset sorts by timestamp (line 100 in nuscenes_occ.py)
     prefix='test'
 )
 

@@ -55,6 +55,9 @@ class BEVFormerOcc(MVXTwoStageDetector):
     Args:
         video_test_mode (bool): Decide whether to use temporal information during inference.
     """
+    
+    # Class variable to track sample index during testing
+    _test_sample_idx = 0
 
     def __init__(self,
                  use_grid_mask=False,
@@ -451,6 +454,10 @@ class BEVFormerOcc(MVXTwoStageDetector):
         """
         import numpy as np
         
+        # Get current sample index and increment for next call
+        sample_idx = self._test_sample_idx
+        self._test_sample_idx += 1
+        
         # Simple unwrap: dataloader may wrap in list
         if isinstance(data, list):
             if len(data) == 0:
@@ -513,8 +520,15 @@ class BEVFormerOcc(MVXTwoStageDetector):
             if isinstance(result, torch.Tensor):
                 result = result.squeeze(dim=0).cpu().numpy().astype(np.uint8)
         
-        # Format as data_sample for OccupancyMetric
-        data_sample = {'pred_occ': result}
+        # Format as data_sample for OccupancyMetric and OccupancyMetricHybrid
+        # Use both 'pred_occ' (original BEVFormer) and 'occ_results' (STCOcc metric) for compatibility
+        # CRITICAL: occ_results must be a LIST for STCOcc's occupancy_metric.py (line 233-236)
+        # because it iterates: for i, id in enumerate(data_id): pred_sem = occ_results[i]
+        data_sample = {
+            'pred_occ': result,  # For original BEVFormer OccupancyMetric
+            'occ_results': [result],  # For STCOcc-based OccupancyMetricHybrid - MUST be list!
+            'index': [sample_idx]  # Required by OccupancyMetricHybrid - also as list!
+        }
         
         # Add ground truth if available
         def to_numpy(obj):
