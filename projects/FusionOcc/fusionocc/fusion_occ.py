@@ -427,6 +427,9 @@ class FusionDepthSeg(nn.Module):
 
 @MODELS.register_module()
 class FusionOCC(FusionDepthSeg):
+    # Class variable to track sample index during testing (for STCOcc metric)
+    _test_sample_idx = 0
+    
     def __init__(self,
                  loss_occ=None,
                  out_dim=32,
@@ -1483,12 +1486,49 @@ class FusionOCC(FusionDepthSeg):
         # Prepare output as data samples
         data_samples = []
         batch_size = occ_pred_labels.shape[0]
-        
+        img_metas = data.get('img_metas', data.get('data_samples', {}))
+
+        # Use real dataset indices from batch (avoids 0,0,1 when counter is wrong or DDP)
+        batch_indices = []
+        if isinstance(img_metas, list) and len(img_metas) >= batch_size:
+            for i in range(batch_size):
+                m = img_metas[i]
+                idx = m.get('index', m.get('sample_idx', i))
+                if isinstance(idx, (list, tuple)):
+                    idx = idx[0] if len(idx) else i
+                try:
+                    batch_indices.append(int(idx))
+                except (TypeError, ValueError):
+                    batch_indices.append(self._test_sample_idx + i)
+        elif isinstance(img_metas, dict) and batch_size >= 1:
+            idx = img_metas.get('index', img_metas.get('sample_idx', self._test_sample_idx))
+            if isinstance(idx, (list, tuple)):
+                idx = idx[0] if len(idx) else self._test_sample_idx
+            else:
+                idx = idx
+            try:
+                base = int(idx)
+            except (TypeError, ValueError):
+                base = self._test_sample_idx
+            batch_indices = [base + i for i in range(batch_size)]
+        else:
+            batch_indices = [self._test_sample_idx + i for i in range(batch_size)]
+        self._test_sample_idx += batch_size
+
         for i in range(batch_size):
             data_sample = {}
             
+            # Get numpy result for this sample
+            occ_result = occ_pred_labels[i].cpu().numpy()
+            
             # Add prediction (now should be shape (200, 200, 16))
-            data_sample['occ_pred'] = occ_pred_labels[i].cpu().numpy()
+            data_sample['occ_pred'] = occ_result
+            
+            # CRITICAL: Add occ_results and index for STCOcc-based OccupancyMetricHybrid
+            # occ_results must be a LIST (occupancy_metric.py line 233-236 iterates over it)
+            # index must also be a LIST for consistent iteration; use real batch index from img_metas
+            data_sample['occ_results'] = [occ_result]  # List format for STCOcc metric
+            data_sample['index'] = [batch_indices[i]]   # Dataset index from batch (0, 1, 2, ...)
             
             # Add ground truth if available
             if voxel_semantics is not None:

@@ -54,7 +54,8 @@ except ImportError:
 
 try:
     from .occupancy_metric import OccupancyMetric
-    metric_classes = ['OccupancyMetric']
+    from .occupancy_metric_hybrid import OccupancyMetricHybrid
+    metric_classes = ['OccupancyMetric', 'OccupancyMetricHybrid']
 except ImportError:
     metric_classes = []
 
@@ -71,8 +72,8 @@ except ImportError:
     neck_classes = []
 
 try:
-    from .hooks import SyncBNHook, SyncbnControlHook
-    hook_classes = ['SyncBNHook', 'SyncbnControlHook']
+    from .hooks import SyncBNHook, SyncbnControlHook, EMAHookSafeForTest
+    hook_classes = ['SyncBNHook', 'SyncbnControlHook', 'EMAHookSafeForTest']
 except ImportError:
     hook_classes = []
 

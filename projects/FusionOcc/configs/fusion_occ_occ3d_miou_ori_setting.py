@@ -53,6 +53,18 @@ img_channels = feature_channel
 numC_Trans = img_channels + lidar_out_channel
 num_classes = 18
 
+# Occupancy class names (occ3d format)
+occ_class_names = [
+    'others', 'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle',
+    'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck',
+    'driveable_surface', 'other_flat', 'sidewalk', 'terrain', 'manmade',
+    'vegetation', 'free'
+]
+
+# Dataset and evaluation settings
+dataset_name = 'occ3d'  # occ3d dataset (18 classes including 'free')
+eval_metric = 'miou'    # Use mIoU metric
+
 multi_adj_frame_id_cfg = (1, 1 + 1, 1)
 multi_adj_frame_id_cfg_lidar = (1, 7 + 1, 1)
 
@@ -288,29 +300,33 @@ train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=24, val_interval=999999)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
-# MMEngine Evaluator
-# IMPORTANT: Must use same pkl format as dataset for correct sample matching
+# MMEngine Evaluator - use STCOcc metric via OccupancyMetricHybrid (same as SurroundOcc, CONet, BEVFormer)
 val_evaluator = dict(
-    type='OccupancyMetric',
+    type='OccupancyMetricHybrid',
     num_classes=num_classes,
     use_lidar_mask=False,
     use_image_mask=use_mask,
     data_root='data/nuscenes/',
-    # ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_val.pkl',  # Match dataset pkl format
-    ann_file='data/nuscenes/fusionocc-nuscenes_infos_val.pkl',  # Match dataset pkl format
-    backend_args=None,
-    metric='bbox'
+    ann_file='data/nuscenes/fusionocc-nuscenes_infos_val.pkl',
+    dataset_name=dataset_name,
+    class_names=occ_class_names,
+    eval_metric=eval_metric,
+    sort_by_timestamp=True,
+    prefix='val'
 )
+
 test_evaluator = dict(
-    type='OccupancyMetric',
+    type='OccupancyMetricHybrid',
     num_classes=num_classes,
     use_lidar_mask=False,
     use_image_mask=use_mask,
     data_root='data/nuscenes/',
-    # ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_val.pkl',  # Match dataset pkl format
-    ann_file='data/nuscenes/fusionocc-nuscenes_infos_val.pkl',  # Match dataset pkl format
-    backend_args=None,
-    metric='bbox'
+    ann_file='data/nuscenes/fusionocc-nuscenes_infos_val.pkl',
+    dataset_name=dataset_name,
+    class_names=occ_class_names,
+    eval_metric=eval_metric,
+    sort_by_timestamp=True,
+    prefix='test'
 )
 
 # MMEngine DataLoader Configuration
@@ -389,7 +405,7 @@ test_dataloader = dict(
 
 custom_hooks = [
     dict(
-        type='EMAHook',
+        type='EMAHookSafeForTest',  # Same as EMAHook but no-op in test when ema_model not created (learning needs EMA)
         ema_type='ExponentialMovingAverage',
         momentum=0.001,  # Equivalent to decay=0.999 in MEGVII
         interval=1,  # Update EMA every iteration

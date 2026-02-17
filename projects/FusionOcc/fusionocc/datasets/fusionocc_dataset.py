@@ -331,7 +331,8 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         # Create input_dict in the format expected by the pipeline
         input_dict = dict()
         
-        # Basic info
+        # Basic info (index is integer for metric; sample_idx can be token or int)
+        input_dict['index'] = index
         if 'token' in info:
             input_dict['sample_idx'] = info['token']
         else:

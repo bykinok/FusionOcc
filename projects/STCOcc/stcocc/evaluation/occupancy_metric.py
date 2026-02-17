@@ -263,9 +263,12 @@ class OccupancyMetric(BaseMetric):
             if not occ_path.endswith('labels.npz'):
                 occ_path = os.path.join(occ_path, 'labels.npz')
             
-            # Prepend data_root if provided and path is relative
+            # Prepend data_root if provided and path is relative; avoid duplicating data_root
             if self.data_root and not os.path.isabs(occ_path):
-                occ_path = os.path.join(self.data_root, occ_path)
+                root = os.path.normpath(self.data_root.rstrip(os.sep))
+                path_norm = os.path.normpath(occ_path)
+                if not path_norm.startswith(root + os.sep) and path_norm != root:
+                    occ_path = os.path.join(self.data_root, occ_path)
             
             try:
                 occ_gt = np.load(occ_path, allow_pickle=True)
@@ -375,9 +378,12 @@ class OccupancyMetric(BaseMetric):
             if not occ_path.endswith('labels.npz'):
                 occ_path = os.path.join(occ_path, 'labels.npz')
             
-            # Prepend data_root if provided and path is relative
+            # Prepend data_root if provided and path is relative; avoid duplicating data_root
             if self.data_root and not os.path.isabs(occ_path):
-                occ_path = os.path.join(self.data_root, occ_path)
+                root = os.path.normpath(self.data_root.rstrip(os.sep))
+                path_norm = os.path.normpath(occ_path)
+                if not path_norm.startswith(root + os.sep) and path_norm != root:
+                    occ_path = os.path.join(self.data_root, occ_path)
             
             occ_gt = np.load(occ_path, allow_pickle=True)
             
