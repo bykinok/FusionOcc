@@ -171,9 +171,18 @@ data_root = 'data/nuscenes/'
 file_client_args = dict(backend='disk')
 occ_gt_data_root='data/nuscenes/'
 
+# BEV augmentation (Flip X/Y), same as STCOcc
+bda_aug_conf = dict(
+    rot_lim=(0, 0),
+    scale_lim=(1., 1.),
+    flip_dx_ratio=0.5,
+    flip_dy_ratio=0.5
+)
+
 train_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
     dict(type='LoadOccGTFromFile',data_root=occ_gt_data_root),
+    dict(type='BEVAug', bda_aug_conf=bda_aug_conf, is_train=True),
     dict(type='PhotoMetricDistortionMultiViewImage'),
     dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=False),
     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
@@ -187,6 +196,7 @@ train_pipeline = [
 test_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
     dict(type='LoadOccGTFromFile', data_root=occ_gt_data_root),  # GT 로드 (평가용)
+    dict(type='BEVAug', bda_aug_conf=bda_aug_conf, is_train=False),  # No augmentation in test, but adds identity bda_mat
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='PadMultiViewImage', size_divisor=32),
     # CRITICAL: Follow original BEVFormer's test pipeline with MultiScaleFlipAug3D

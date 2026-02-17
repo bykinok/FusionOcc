@@ -135,7 +135,16 @@ class BEVFormerEncoder(TransformerLayerSequence):
             lidar2img = lidar2img.unsqueeze(0)  # (1, N, 4, 4)
         
         ego2lidar = reference_points.new_tensor(ego2lidar)
-        # ego2lidar = ego2lidar.unsqueeze(dim=0).repeat(num_imgs,1,1).unsqueeze(0)
+        
+        # Get bda_mat (BEV Data Augmentation matrix) from img_metas if available
+        # If bda_mat exists, we need to apply inverse_bda to transform reference_points
+        # from augmented BEV space back to original ego/lidar space
+        bda_mat = None
+        if 'bda_mat' in img_metas[0] and img_metas[0]['bda_mat'] is not None:
+            bda_mat = reference_points.new_tensor(img_metas[0]['bda_mat'])  # (4, 4)
+            # Ensure bda_mat has batch dimension
+            if bda_mat.dim() == 2:
+                bda_mat = bda_mat.unsqueeze(0)  # (1, 4, 4)
 
         reference_points = reference_points.clone()
 
@@ -154,12 +163,31 @@ class BEVFormerEncoder(TransformerLayerSequence):
         num_cam = lidar2img.size(1)
 
         reference_points = reference_points.view(
-            D, B, 1, num_query, 4).repeat(1, 1, num_cam, 1, 1).unsqueeze(-1)  #shape: (num_points_in_pillar,bs,num_cam,h*w,4)
+            D, B, 1, num_query, 4).repeat(1, 1, num_cam, 1, 1).unsqueeze(-1)  #shape: (num_points_in_pillar,bs,num_cam,h*w,4,1)
 
         lidar2img = lidar2img.view(
             1, B, num_cam, 1, 4, 4).repeat(D, 1, 1, num_query, 1, 1)
         ego2lidar=ego2lidar.view(1,1,1,1,4,4).repeat(D,1,num_cam,num_query,1,1)
-        reference_points_cam = torch.matmul(torch.matmul(lidar2img.to(torch.float32),ego2lidar.to(torch.float32)),reference_points.to(torch.float32)).squeeze(-1)
+        
+        # Apply inverse_bda if bda_mat is provided (same as STCOcc)
+        if bda_mat is not None:
+            # Handle batch size mismatch: expand bda_mat if needed
+            if bda_mat.size(0) == 1 and B > 1:
+                bda_mat = bda_mat.repeat(B, 1, 1)
+            inverse_bda = bda_mat.view(1, B, 1, 1, 4, 4).repeat(D, 1, num_cam, num_query, 1, 1)
+            # Transform: lidar2img @ ego2lidar @ inverse_bda @ reference_points
+            # This transforms reference_points from augmented BEV space -> original ego/lidar space -> image
+            reference_points_cam = torch.matmul(
+                torch.matmul(
+                    torch.matmul(lidar2img.to(torch.float32), ego2lidar.to(torch.float32)),
+                    inverse_bda.to(torch.float32)
+                ),
+                reference_points.to(torch.float32)
+            ).squeeze(-1)
+        else:
+            # No BEV augmentation, use original transformation
+            reference_points_cam = torch.matmul(torch.matmul(lidar2img.to(torch.float32),ego2lidar.to(torch.float32)),reference_points.to(torch.float32)).squeeze(-1)
+        
         eps = 1e-5
 
         bev_mask = (reference_points_cam[..., 2:3] > eps)
