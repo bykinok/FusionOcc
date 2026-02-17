@@ -174,7 +174,11 @@ class BEVFormerEncoder(TransformerLayerSequence):
             # Handle batch size mismatch: expand bda_mat if needed
             if bda_mat.size(0) == 1 and B > 1:
                 bda_mat = bda_mat.repeat(B, 1, 1)
-            inverse_bda = bda_mat.view(1, B, 1, 1, 4, 4).repeat(D, 1, num_cam, num_query, 1, 1)
+            # CRITICAL: Compute actual inverse of bda_mat
+            # For flip-only augmentation, inverse(flip) = flip (self-inverse)
+            # But for rotation/scale, we need the actual inverse: inverse(R) = R^T, inverse(S) = S^-1
+            inverse_bda = torch.inverse(bda_mat)
+            inverse_bda = inverse_bda.view(1, B, 1, 1, 4, 4).repeat(D, 1, num_cam, num_query, 1, 1)
             # Transform: lidar2img @ ego2lidar @ inverse_bda @ reference_points
             # This transforms reference_points from augmented BEV space -> original ego/lidar space -> image
             reference_points_cam = torch.matmul(
