@@ -39,6 +39,14 @@ data_prefix = dict(
 
 backend_args = None
 
+# BEV augmentation (Flip X/Y), same as STCOcc and BEVFormer
+bda_aug_conf = dict(
+    rot_lim=(0, 0),
+    scale_lim=(1., 1.),
+    flip_dx_ratio=0.5,
+    flip_dy_ratio=0.5
+)
+
 train_pipeline = [
     dict(
         type='BEVLoadMultiViewImageFromFiles',
@@ -58,6 +66,7 @@ train_pipeline = [
         use_occ3d=True,
         pc_range=[-40.0, -40.0, -1.0, 40.0, 40.0, 5.4],
         use_camera_mask=use_camera_mask),  # Camera mask 적용 여부
+    dict(type='BEVAug', bda_aug_conf=bda_aug_conf, is_train=True),  # BEV augmentation after LoadOccupancy
     # ✅ 원본과 동일한 PhotoMetric Augmentation 추가 (train only)
     dict(
         type='PhotoMetricDistortionMultiViewImage',
@@ -77,7 +86,8 @@ train_pipeline = [
     dict(
         type='TPVPack3DDetInputs',  # Custom pack for occ3d support
         keys=['img', 'points', 'pts_semantic_mask', 'voxel_semantic_mask', 'occ_3d', 'occ_3d_masked'],  # occ3d 데이터 포함
-        meta_keys=['lidar2img', 'lidar_path', 'sample_idx', 'pts_filename', 'img_shape', 'token', 'scene_name', 'scene_token'])
+        meta_keys=['lidar2img', 'lidar_path', 'sample_idx', 'pts_filename', 'img_shape', 'token', 'scene_name', 'scene_token', 
+                   'pcd_horizontal_flip', 'pcd_vertical_flip', 'bda_mat'])  # BEV aug 정보 추가
 ]
 
 val_pipeline = [
@@ -99,6 +109,7 @@ val_pipeline = [
         use_occ3d=True,
         pc_range=[-40.0, -40.0, -1.0, 40.0, 40.0, 5.4],
         use_camera_mask=use_camera_mask),  # Camera mask 적용 여부
+    dict(type='BEVAug', bda_aug_conf=bda_aug_conf, is_train=False),  # No augmentation in test, but adds identity bda_mat
     # 원본과 동일한 정규화 값 적용
     dict(
         type='MultiViewImageNormalize',
@@ -111,7 +122,8 @@ val_pipeline = [
     dict(
         type='TPVPack3DDetInputs',  # Custom pack for occ3d support
         keys=['img', 'points', 'pts_semantic_mask', 'voxel_semantic_mask', 'occ_3d', 'occ_3d_masked'],  # occ3d 데이터 포함
-        meta_keys=['lidar2img', 'lidar_path', 'sample_idx', 'pts_filename', 'img_shape', 'token', 'scene_name', 'scene_token'])
+        meta_keys=['lidar2img', 'lidar_path', 'sample_idx', 'pts_filename', 'img_shape', 'token', 'scene_name', 'scene_token',
+                   'pcd_horizontal_flip', 'pcd_vertical_flip', 'bda_mat'])  # BEV aug 정보 추가
 ]
 
 test_pipeline = val_pipeline
