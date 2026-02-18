@@ -32,7 +32,7 @@ class OccDefaultFormatBundle3D(Pack3DDetInputs):
                             'img_norm_cfg', 'sample_idx', 'prev_idx', 'next_idx',
                             'scene_token', 'pc_range', 'occ_size', 'occ_path', 'occ3d_gt_path',
                             'voxel_semantics', 'voxel_semantics_1_2', 'voxel_semantics_1_4', 'voxel_semantics_1_8',
-                            'index')):
+                            'bda_mat', 'index')):
         # Initialize keys
         self.keys = keys
         self.meta_keys = meta_keys

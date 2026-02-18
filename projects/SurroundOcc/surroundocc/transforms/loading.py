@@ -8,6 +8,141 @@ import os
 
 @ENGINE_TRANSFORMS.register_module()
 @DET3D_TRANSFORMS.register_module()
+class BEVAug(BaseTransform):
+    """BEV augmentation (Flip X/Y) for occupancy, same as STCOcc/BEVFormer/TPVFormer BEVAug.
+
+    Applies random horizontal (flip_dx) and vertical (flip_dy) flips to
+    voxel_semantics and mask tensors. Computes bda_mat (BEV Data Augmentation matrix)
+    to be used in view transformation with inverse_bda.
+    """
+
+    def __init__(self, bda_aug_conf, is_train=True):
+        super().__init__()
+        self.bda_aug_conf = bda_aug_conf
+        self.is_train = is_train
+
+    def sample_bda_augmentation(self):
+        """Sample BEV data augmentation parameters."""
+        rotate_bda = np.random.uniform(*self.bda_aug_conf['rot_lim']) if self.is_train else 0.0
+        scale_bda = np.random.uniform(*self.bda_aug_conf['scale_lim']) if self.is_train else 1.0
+        flip_dx = np.random.uniform() < self.bda_aug_conf['flip_dx_ratio'] if self.is_train else False
+        flip_dy = np.random.uniform() < self.bda_aug_conf['flip_dy_ratio'] if self.is_train else False
+        
+        # Translation (ensure shape is (3,))
+        if self.is_train and 'tran_lim' in self.bda_aug_conf:
+            tran_lim = self.bda_aug_conf['tran_lim']
+            tran_bda = np.random.uniform(-tran_lim, tran_lim, size=3).astype(np.float32)
+        else:
+            tran_bda = np.zeros(3, dtype=np.float32)
+        return rotate_bda, scale_bda, flip_dx, flip_dy, tran_bda
+
+    def bev_transform(self, rotate_angle, scale_ratio, flip_dx, flip_dy, tran_bda):
+        """Get BEV transformation matrix (rotation, scale, flip)."""
+        # Get rotation matrix
+        rotate_angle = torch.tensor(rotate_angle / 180 * np.pi)
+        rot_sin = torch.sin(rotate_angle)
+        rot_cos = torch.cos(rotate_angle)
+        rot_mat = torch.Tensor([
+            [rot_cos, -rot_sin, 0],
+            [rot_sin, rot_cos, 0],
+            [0, 0, 1]])
+        
+        # Get scale matrix
+        scale_mat = torch.Tensor([
+            [scale_ratio, 0, 0],
+            [0, scale_ratio, 0],
+            [0, 0, 1]])
+        
+        # Get flip matrix
+        flip_mat = torch.Tensor([
+            [1, 0, 0],
+            [0, 1, 0],
+            [0, 0, 1]])
+
+        if flip_dx:
+            flip_mat = flip_mat @ torch.Tensor([
+                [-1, 0, 0],
+                [0, 1, 0],
+                [0, 0, 1]
+            ])
+        if flip_dy:
+            flip_mat = flip_mat @ torch.Tensor([
+                [1, 0, 0],
+                [0, -1, 0],
+                [0, 0, 1]
+            ])
+
+        rot_mat = flip_mat @ (scale_mat @ rot_mat)
+        return rot_mat
+
+    def _flip_voxel_x(self, arr):
+        """Flip along first axis (X)."""
+        return arr[::-1, ...].copy()
+
+    def _flip_voxel_y(self, arr):
+        """Flip along second axis (Y)."""
+        return arr[:, ::-1, ...].copy()
+
+    def transform(self, results):
+        """Transform function to apply BEV augmentation."""
+        # Sample augmentation parameters
+        rotate_bda, scale_bda, flip_dx, flip_dy, tran_bda = self.sample_bda_augmentation()
+        if 'bda_aug' in results:
+            flip_dx = results['bda_aug'].get('flip_dx', flip_dx)
+            flip_dy = results['bda_aug'].get('flip_dy', flip_dy)
+
+        # Get bda rotation matrix (3x3)
+        bda_rot = self.bev_transform(rotate_bda, scale_bda, flip_dx, flip_dy, tran_bda)
+        
+        # Build 4x4 bda_mat
+        bda_mat = torch.zeros(4, 4)
+        bda_mat[3, 3] = 1
+        bda_mat[:3, :3] = bda_rot
+        bda_mat[:3, 3] = torch.from_numpy(tran_bda if isinstance(tran_bda, np.ndarray) else np.array(tran_bda))
+
+        # Apply voxel transformations (SurroundOcc uses voxel_semantics)
+        if flip_dx:
+            if 'voxel_semantics' in results:
+                results['voxel_semantics'] = self._flip_voxel_x(results['voxel_semantics'])
+            # Also flip multiscale GT if present
+            for scale_key in ['voxel_semantics_1_2', 'voxel_semantics_1_4', 'voxel_semantics_1_8']:
+                if scale_key in results:
+                    results[scale_key] = self._flip_voxel_x(results[scale_key])
+            
+            # Flip sparse gt_occ if present (N, 4) format: [x, y, z, label]
+            if 'gt_occ' in results and isinstance(results['gt_occ'], np.ndarray):
+                gt_occ = results['gt_occ'].copy()
+                # Flip X: x_new = grid_size[0] - 1 - x_old (assuming 200x200x16 grid)
+                gt_occ[:, 0] = 199 - gt_occ[:, 0]  # 200-1 = 199
+                results['gt_occ'] = gt_occ
+
+        if flip_dy:
+            if 'voxel_semantics' in results:
+                results['voxel_semantics'] = self._flip_voxel_y(results['voxel_semantics'])
+            # Also flip multiscale GT if present
+            for scale_key in ['voxel_semantics_1_2', 'voxel_semantics_1_4', 'voxel_semantics_1_8']:
+                if scale_key in results:
+                    results[scale_key] = self._flip_voxel_y(results[scale_key])
+            
+            # Flip sparse gt_occ if present
+            if 'gt_occ' in results and isinstance(results['gt_occ'], np.ndarray):
+                gt_occ = results['gt_occ'].copy()
+                # Flip Y: y_new = grid_size[1] - 1 - y_old
+                gt_occ[:, 1] = 199 - gt_occ[:, 1]
+                results['gt_occ'] = gt_occ
+
+        # Store flip flags for meta
+        results['pcd_horizontal_flip'] = flip_dx
+        results['pcd_vertical_flip'] = flip_dy
+        
+        # Store bda_mat for model to use in view transformation
+        results['bda_mat'] = bda_mat.numpy()
+        
+        return results
+
+
+@ENGINE_TRANSFORMS.register_module()
+@DET3D_TRANSFORMS.register_module()
 class LoadOccupancy(BaseTransform):
     """Load occupancy ground truth.
     

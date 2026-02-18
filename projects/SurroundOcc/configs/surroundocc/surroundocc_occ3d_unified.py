@@ -31,6 +31,14 @@ class_names = ['others', 'barrier', 'bicycle', 'bus', 'car', 'construction_vehic
                'driveable_surface', 'other_flat', 'sidewalk', 'terrain', 'manmade', 
                'vegetation', 'free']
 
+# BEV augmentation configuration (same as STCOcc/BEVFormer/TPVFormer)
+bda_aug_conf = dict(
+    rot_lim=(0, 0),           # No rotation
+    scale_lim=(1., 1.),       # No scaling
+    flip_dx_ratio=0.5,        # 50% chance to flip X (horizontal)
+    flip_dy_ratio=0.5,        # 50% chance to flip Y (vertical)
+    tran_lim=0)               # No translation
+
 input_modality = dict(
     use_lidar=False,
     use_camera=True,
@@ -133,6 +141,7 @@ train_pipeline = [
          use_mask_camera_1_2=use_mask_camera_1_2,
          use_mask_camera_1_4=use_mask_camera_1_4,
          use_mask_camera_1_8=use_mask_camera_1_8),
+    dict(type='BEVAug', bda_aug_conf=bda_aug_conf, is_train=True),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='PadMultiViewImage', size_divisor=32),
     dict(type='OccDefaultFormatBundle3D')
@@ -148,6 +157,7 @@ test_pipeline = [
          use_mask_camera_1_2=use_mask_camera_1_2,
          use_mask_camera_1_4=use_mask_camera_1_4,
          use_mask_camera_1_8=use_mask_camera_1_8),
+    dict(type='BEVAug', bda_aug_conf=bda_aug_conf, is_train=False),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='PadMultiViewImage', size_divisor=32),
     dict(type='OccDefaultFormatBundle3D')
@@ -235,7 +245,7 @@ param_scheduler = [
 # Training config
 train_cfg = dict(
     type='EpochBasedTrainLoop',
-    max_epochs=24,
+    max_epochs=1,#24,
     val_interval=9999)
 
 val_cfg = dict(type='ValLoop')

@@ -106,6 +106,17 @@ class OccEncoder(TransformerLayerSequence if TransformerLayerSequence != BaseMod
             lidar2img.append(img_meta['lidar2img'])
         lidar2img = np.asarray(lidar2img)
         lidar2img = reference_points.new_tensor(lidar2img)  # (B, N, 4, 4)
+        
+        # Get bda_mat (BEV Data Augmentation matrix) from img_metas if available
+        # If bda_mat exists, we need to apply inverse_bda to transform reference_points
+        # from augmented BEV space back to original ego space
+        bda_mat = None
+        if 'bda_mat' in img_metas[0] and img_metas[0]['bda_mat'] is not None:
+            bda_mat = reference_points.new_tensor(img_metas[0]['bda_mat'])  # (4, 4)
+            # Ensure bda_mat has batch dimension
+            if bda_mat.dim() == 2:
+                bda_mat = bda_mat.unsqueeze(0)  # (1, 4, 4)
+        
         reference_points = reference_points.clone()
 
         reference_points[..., 0:1] = reference_points[..., 0:1] * \
@@ -128,8 +139,28 @@ class OccEncoder(TransformerLayerSequence if TransformerLayerSequence != BaseMod
         lidar2img = lidar2img.view(
             1, B, num_cam, 1, 4, 4).repeat(D, 1, 1, num_query, 1, 1)
 
-        reference_points_cam = torch.matmul(lidar2img.to(torch.float32),
-                                            reference_points.to(torch.float32)).squeeze(-1)
+        # Apply inverse_bda if bda_mat is provided (same as STCOcc/BEVFormer/TPVFormer)
+        # Note: SurroundOcc uses ego frame (lidar2img already contains ego2img transformation)
+        # So we only need: lidar2img @ inverse_bda @ reference_points
+        if bda_mat is not None:
+            # Handle batch size mismatch: expand bda_mat if needed
+            if bda_mat.size(0) == 1 and B > 1:
+                bda_mat = bda_mat.repeat(B, 1, 1)
+            # CRITICAL: Compute actual inverse of bda_mat
+            # For flip-only augmentation, inverse(flip) = flip (self-inverse)
+            # But for rotation/scale, we need the actual inverse: inverse(R) = R^T, inverse(S) = S^-1
+            inverse_bda = torch.inverse(bda_mat)
+            inverse_bda = inverse_bda.view(1, B, 1, 1, 4, 4).repeat(D, 1, num_cam, num_query, 1, 1)
+            # Transform: lidar2img @ inverse_bda @ reference_points
+            # This transforms reference_points from augmented BEV space -> original ego space -> image
+            reference_points_cam = torch.matmul(
+                torch.matmul(lidar2img.to(torch.float32), inverse_bda.to(torch.float32)),
+                reference_points.to(torch.float32)
+            ).squeeze(-1)
+        else:
+            # No BEV augmentation, use original transformation
+            reference_points_cam = torch.matmul(lidar2img.to(torch.float32),
+                                                reference_points.to(torch.float32)).squeeze(-1)
         eps = 1e-5
 
         volume_mask = (reference_points_cam[..., 2:3] > eps)
