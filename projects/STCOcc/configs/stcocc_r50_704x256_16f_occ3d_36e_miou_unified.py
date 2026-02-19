@@ -370,7 +370,7 @@ optim_wrapper = dict(
             'img_backbone': dict(lr_mult=0.1),
         }),
     clip_grad=dict(max_norm=35, norm_type=2),
-    accumulative_counts=8)
+    accumulative_counts=1)
 
 # LR: 0-500 iter 선형 1e-5->2e-4, 이후 epoch 24까지 cosine 2e-4->1e-6
 param_scheduler = [
