@@ -183,7 +183,8 @@ train_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
     dict(type='LoadOccGTFromFile',data_root=occ_gt_data_root),
     dict(type='BEVAug', bda_aug_conf=bda_aug_conf, is_train=True),
-    dict(type='PhotoMetricDistortionMultiViewImage'),
+    # BEV aug만 사용, PhotoMetricDistortion 비활성
+    # dict(type='PhotoMetricDistortionMultiViewImage'),
     dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=False),
     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='ObjectNameFilter', classes=class_names),
@@ -245,25 +246,11 @@ data = dict(
     nonshuffler_sampler=dict(type='DistributedSampler')
 )
 
-optimizer = dict(
-    type='AdamW',
-    lr=2e-4,
-    paramwise_cfg=dict(
-        custom_keys={
-            'img_backbone': dict(lr_mult=0.1),
-        }),
-    weight_decay=0.01)
-
+# Legacy (optim_wrapper below overrides; kept for reference)
+optimizer = dict(type='AdamW', lr=2e-4, weight_decay=0.01)
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 
-# learning policy
-lr_config = dict(
-    policy='CosineAnnealing',
-    warmup='linear',
-    warmup_iters=500,
-    warmup_ratio=1.0 / 3,
-    min_lr_ratio=1e-3)
-
+# learning policy: 0-500 iter linear 1e-5 -> 2e-4, 이후 epoch 24까지 cosine 2e-4 -> 1e-6
 total_epochs = 24
 evaluation = dict(interval=1, pipeline=test_pipeline)
 
@@ -345,17 +332,20 @@ test_evaluator = dict(
     prefix='test'
 )
 
-# Convert old-style optimizer config to new-style optim_wrapper
+# SurroundOcc와 동일한 optimizer 세팅 (MMEngine OptimWrapper)
+# Gradient accumulation: effective batch = batch_size * num_gpus * accumulative_counts
 optim_wrapper = dict(
     type='OptimWrapper',
     optimizer=dict(
-        type=optimizer['type'],
-        lr=optimizer['lr'],
-        weight_decay=optimizer.get('weight_decay', 0)
-    ),
-    paramwise_cfg=optimizer.get('paramwise_cfg', None),
-    clip_grad=optimizer_config.get('grad_clip', None)
-)
+        type='AdamW',
+        lr=2e-4,
+        weight_decay=0.01),
+    paramwise_cfg=dict(
+        custom_keys={
+            'img_backbone': dict(lr_mult=0.1),
+        }),
+    clip_grad=dict(max_norm=35, norm_type=2),
+    accumulative_counts=8)
 
 # Add train_cfg for mmengine
 train_cfg = dict(
@@ -368,21 +358,23 @@ train_cfg = dict(
 val_cfg = dict()
 test_cfg = dict()
 
-# Add param_scheduler for mmengine (from lr_config)
+# Param scheduler: 0-500 iter linear 1e-5->2e-4, then cosine 2e-4->1e-6 to end of epoch 24
+# steps_per_epoch ≈ len(train) / (batch_size * num_gpus) e.g. 28130/8 ≈ 3516
 param_scheduler = [
     dict(
         type='LinearLR',
-        start_factor=lr_config.get('warmup_ratio', 0.001),
+        start_factor=0.05,  # 1e-5 / 2e-4
+        end_factor=1.0,
         by_epoch=False,
         begin=0,
-        end=lr_config.get('warmup_iters', 500)
+        end=500
     ),
     dict(
         type='CosineAnnealingLR',
-        by_epoch=True,
-        begin=1,
-        end=total_epochs,
-        eta_min=lr_config['min_lr_ratio'] * optimizer['lr']
+        begin=500,
+        end=24 * 28130,  # total_epochs * steps_per_epoch (approx for nuscenes train)
+        by_epoch=False,
+        eta_min=1e-6
     )
 ]
 # Add default_hooks for mmengine
@@ -416,3 +408,6 @@ model_wrapper_cfg = dict(
     find_unused_parameters=True,
     broadcast_buffers=False,
 )
+
+# Reproducibility: seed=0. EMA/SyncBN/AMP 미사용 (optim_wrapper=OptimWrapper, model norm=BN)
+randomness = dict(seed=0, deterministic=False)
