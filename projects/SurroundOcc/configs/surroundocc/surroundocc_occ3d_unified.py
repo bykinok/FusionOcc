@@ -301,4 +301,4 @@ log_config = dict(
 checkpoint_config = dict(interval=1)
 
 # seed=0 적용됨. deterministic=True 시 재현성 보장 (cudnn deterministic 등, 약간 느려질 수 있음)
-randomness = dict(seed=0, deterministic=True)
+randomness = dict(seed=0, deterministic=False)
