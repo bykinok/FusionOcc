@@ -199,13 +199,19 @@ optim_wrapper = dict(
     clip_grad=dict(max_norm=35, norm_type=2),
     accumulative_counts=8)  # gradient accumulation
 
+# LR schedule end = 실제 총 iteration 수 (num_gpus=2 기준)
+train_samples = 28130
+num_gpus = 2
+samples_per_gpu = 1
+num_iters_per_epoch = train_samples // (num_gpus * samples_per_gpu)
+
 # LR: 0-500 iter 선형 1e-5→2e-4, 이후 epoch 24까지 cosine 2e-4→1e-6 (iter 기준)
 param_scheduler = [
     dict(type='LinearLR', start_factor=0.05, end_factor=1.0, by_epoch=False, begin=0, end=500),
     dict(
         type='CosineAnnealingLR',
         begin=500,
-        end=24 * 28130,  # total_epochs * steps_per_epoch (approx)
+        end=24 * num_iters_per_epoch,
         by_epoch=False,
         eta_min=1e-6)
 ]

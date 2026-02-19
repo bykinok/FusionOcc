@@ -321,6 +321,11 @@ test_evaluator = [
     )
 ]
 
+# LR schedule end = 실제 총 iteration 수 (num_gpus=2 기준)
+train_samples = 28130
+num_gpus = 2
+num_iters_per_epoch = train_samples // (num_gpus * train_batch_size)
+
 # SurroundOcc와 동일한 optimizer 세팅 + gradient accumulation 8
 optim_wrapper = dict(
     type='OptimWrapper',
@@ -336,7 +341,7 @@ optim_wrapper = dict(
 # LR: 0-500 iter 선형 1e-5->2e-4, 이후 epoch 24까지 cosine 2e-4->1e-6
 param_scheduler = [
     dict(type='LinearLR', start_factor=0.05, end_factor=1.0, by_epoch=False, begin=0, end=500),
-    dict(type='CosineAnnealingLR', begin=500, end=24 * 28130, by_epoch=False, eta_min=1e-6),
+    dict(type='CosineAnnealingLR', begin=500, end=24 * num_iters_per_epoch, by_epoch=False, eta_min=1e-6),
 ]
 
 train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=24, val_interval=999999)

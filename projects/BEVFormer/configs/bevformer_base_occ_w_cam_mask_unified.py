@@ -252,6 +252,10 @@ optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 
 # learning policy: 0-500 iter linear 1e-5 -> 2e-4, 이후 epoch 24까지 cosine 2e-4 -> 1e-6
 total_epochs = 24
+# LR schedule end = 실제 총 iteration 수 (EpochBased: 24 * iters_per_epoch). num_gpus는 실행 시 --cfg-options num_gpus=N 으로 override 가능
+train_samples = 28130
+num_gpus = 2
+num_iters_per_epoch = train_samples // (num_gpus * data['samples_per_gpu'])
 evaluation = dict(interval=1, pipeline=test_pipeline)
 
 runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
@@ -359,7 +363,6 @@ val_cfg = dict()
 test_cfg = dict()
 
 # Param scheduler: 0-500 iter linear 1e-5->2e-4, then cosine 2e-4->1e-6 to end of epoch 24
-# steps_per_epoch ≈ len(train) / (batch_size * num_gpus) e.g. 28130/8 ≈ 3516
 param_scheduler = [
     dict(
         type='LinearLR',
@@ -372,7 +375,7 @@ param_scheduler = [
     dict(
         type='CosineAnnealingLR',
         begin=500,
-        end=24 * 28130,  # total_epochs * steps_per_epoch (approx for nuscenes train)
+        end=total_epochs * num_iters_per_epoch,
         by_epoch=False,
         eta_min=1e-6
     )

@@ -267,6 +267,11 @@ data = dict(
 for key in ['val', 'train', 'test']:
     data[key].update(share_data_config)
 
+# LR schedule end = 실제 총 iteration 수 (num_gpus=2 기준)
+train_samples = 28130
+num_gpus = 2
+num_iters_per_epoch = train_samples // (num_gpus * data['samples_per_gpu'])
+
 # SurroundOcc와 동일한 optimizer 세팅 + gradient accumulation 8
 optim_wrapper = dict(
     type='OptimWrapper',
@@ -293,7 +298,7 @@ param_scheduler = [
     dict(
         type='CosineAnnealingLR',
         begin=500,
-        end=24 * 3516,  # total_epochs * steps_per_epoch (approx)
+        end=24 * num_iters_per_epoch,
         by_epoch=False,
         eta_min=1e-6)
 ]

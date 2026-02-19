@@ -217,6 +217,12 @@ val_dataloader = dict(
 
 test_dataloader = val_dataloader
 
+# LR schedule end = 실제 총 iteration 수. num_gpus는 실행 시 --cfg-options num_gpus=N 으로 override 가능
+train_samples = 28130
+num_gpus = 2
+samples_per_gpu = 1
+num_iters_per_epoch = train_samples // (num_gpus * samples_per_gpu)
+
 # New style config for MMEngine
 # Use OptimWrapper (FP32 only, no mixed precision)
 # Gradient accumulation: set accumulative_counts > 1 to accumulate gradients over
@@ -247,7 +253,7 @@ param_scheduler = [
     dict(
         type='CosineAnnealingLR',
         begin=500,
-        end=24 * 28130,  # total_epochs * steps_per_epoch (approximate)
+        end=24 * num_iters_per_epoch,  # total_epochs * steps_per_epoch (approximate)
         by_epoch=False,
         eta_min=1e-6)
 ]
