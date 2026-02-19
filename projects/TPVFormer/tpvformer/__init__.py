@@ -1,7 +1,7 @@
 from .cross_view_hybrid_attention import TPVCrossViewHybridAttention
 from .data_preprocessor import TPVFormerDataPreprocessor
 from .image_cross_attention import TPVImageCrossAttention
-from .loading import BEVLoadMultiViewImageFromFiles, LoadOccupancyAnnotations, LoadOccupancy, GridMask, SegLabelMapping, PadMultiViewImage
+from .loading import BEVLoadMultiViewImageFromFiles, LoadOccupancyAnnotations, LoadOccupancy, GridMask, SegLabelMapping, PadMultiViewImage, TPVFormerPointToMultiViewDepth
 from .custom_pack import TPVPack3DDetInputs
 from .nuscenes_dataset import NuScenesSegDataset
 from .nuscenes_occupancy_dataset import NuScenesOccupancyDataset
@@ -16,6 +16,7 @@ from .metrics import OccupancyMetric
 from .metrics_hybrid import OccupancyMetricHybrid
 from .transforms import MultiViewImageNormalize
 from .grid_mask import GridMask
+from .depth_head import AuxiliaryDepthHead
 
 __all__ = [
     'TPVCrossViewHybridAttention', 'TPVImageCrossAttention',
@@ -23,7 +24,7 @@ __all__ = [
     'TPVFormerEncoder', 'TPVFormerLayer', 'NuScenesSegDataset', 
     'NuScenesOccupancyDataset', 'BEVLoadMultiViewImageFromFiles',
     'LoadOccupancyAnnotations', 'LoadOccupancy', 'GridMask', 'PadMultiViewImage', 'SegLabelMapping',
-    'TPVPack3DDetInputs',
+    'TPVPack3DDetInputs', 'TPVFormerPointToMultiViewDepth', 'AuxiliaryDepthHead',
     'TPVFormerDecoder', 'TPVFormerHead', 'TPVAggregator', 'TPVFormerDataPreprocessor',
     'OccupancyMetric', 'OccupancyMetricHybrid', 'MultiViewImageNormalize', 'GridMask'
 ]

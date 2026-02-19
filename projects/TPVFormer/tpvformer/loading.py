@@ -229,6 +229,124 @@ class BEVLoadMultiViewImageFromFiles(LoadMultiViewImageFromFiles):
 
 
 @TRANSFORMS.register_module()
+class TPVFormerPointToMultiViewDepth(BaseTransform):
+    """LiDAR → multi-view depth map for auxiliary depth supervision (TPVFormer).
+
+    When TPVFormer uses use_ego_frame=True, results['lidar2img'] is ego2img
+    (lidar2img @ ego2lidar). So we must project **ego-frame** points with this
+    matrix. This transform converts points from lidar to ego using lidar2ego
+    when use_ego_frame=True, then projects with results['lidar2img'] so that
+    gt_depth is consistent with the model's view transformation.
+    """
+
+    def __init__(self, grid_config: dict, downsample: int = 1, use_ego_frame: bool = True):
+        super().__init__()
+        self.downsample = downsample
+        self.grid_config = grid_config
+        self.use_ego_frame = use_ego_frame
+
+    def _points_to_ego(self, results: dict) -> np.ndarray:
+        """Return 3D points in ego frame (N, 3). Uses lidar2ego from results."""
+        if not self.use_ego_frame:
+            pts = results['points']
+            if hasattr(pts, 'tensor'):
+                return pts.tensor[:, :3].numpy()
+            return np.asarray(pts)[:, :3]
+
+        lidar2ego = results.get('lidar_points', {}).get('lidar2ego')
+        if lidar2ego is None:
+            raise ValueError(
+                "TPVFormerPointToMultiViewDepth: use_ego_frame=True but "
+                "results['lidar_points']['lidar2ego'] not found. "
+                "Ensure dataset provides lidar2ego (same as BEVLoadMultiViewImageFromFiles)."
+            )
+        lidar2ego = np.array(lidar2ego, dtype=np.float64)
+        if lidar2ego.shape != (4, 4):
+            raise ValueError("lidar2ego must be 4x4, got shape %s" % (lidar2ego.shape,))
+
+        pts = results['points']
+        if hasattr(pts, 'tensor'):
+            p = pts.tensor[:, :3].numpy()
+        else:
+            p = np.asarray(pts)[:, :3]
+        ones = np.ones((p.shape[0], 1), dtype=np.float64)
+        p_homo = np.hstack([p, ones])  # (N, 4)
+        p_ego = (lidar2ego @ p_homo.T).T[:, :3]
+        return p_ego
+
+    def _points2depthmap(self, points_2d_z: np.ndarray, height: int, width: int) -> np.ndarray:
+        """points_2d_z: (N, 3) with (u, v, z) in image coords and depth z."""
+        height = height // self.downsample
+        width = width // self.downsample
+        depth_map = np.zeros((height, width), dtype=np.float32)
+
+        coor = np.round(points_2d_z[:, :2] / self.downsample).astype(np.int32)
+        depth = points_2d_z[:, 2]
+        d_min, d_max = self.grid_config['depth'][0], self.grid_config['depth'][1]
+
+        kept = (
+            (coor[:, 0] >= 0) & (coor[:, 0] < width) &
+            (coor[:, 1] >= 0) & (coor[:, 1] < height) &
+            (depth >= d_min) & (depth < d_max)
+        )
+        coor = coor[kept]
+        depth = depth[kept]
+        if coor.size == 0:
+            return depth_map
+
+        ranks = coor[:, 0] + coor[:, 1] * width
+        order = np.argsort(ranks + depth / 100.0)
+        coor = coor[order]
+        depth = depth[order]
+        ranks = ranks[order]
+
+        keep_first = np.ones(len(ranks), dtype=bool)
+        keep_first[1:] = ranks[1:] != ranks[:-1]
+        coor = coor[keep_first]
+        depth = depth[keep_first]
+        depth_map[coor[:, 1], coor[:, 0]] = depth
+        return depth_map
+
+    def transform(self, results: dict) -> dict:
+        # Points in ego frame when use_ego_frame=True (same as TPVFormer lidar2img)
+        points_ego = self._points_to_ego(results)
+        lidar2imgs = results['lidar2img']  # (num_cams, 4, 4), already ego2img when use_ego_frame
+        if isinstance(lidar2imgs, torch.Tensor):
+            lidar2imgs = lidar2imgs.numpy()
+        lidar2imgs = np.asarray(lidar2imgs)
+
+        # Image size: from img_shape or first image
+        if 'img_shape' in results:
+            h, w = results['img_shape'][0], results['img_shape'][1]
+        elif 'img' in results and len(results['img']) > 0:
+            img0 = results['img'][0]
+            h, w = img0.shape[0], img0.shape[1]
+        else:
+            raise KeyError("Need 'img_shape' or 'img' in results for depth map size")
+
+        num_cams = lidar2imgs.shape[0]
+        ones = np.ones((points_ego.shape[0], 1), dtype=np.float64)
+        p_homo = np.hstack([points_ego, ones]).T  # (4, N)
+
+        depth_maps = []
+        for cid in range(num_cams):
+            lidar2img = lidar2imgs[cid]
+            if lidar2img.shape != (4, 4):
+                lidar2img = np.eye(4, dtype=np.float64)
+                lidar2img[:3, :] = np.asarray(lidar2imgs[cid]).reshape(4, 4)[:3, :]
+            pts_cam = (lidar2img.astype(np.float64) @ p_homo).T  # (N, 4)
+            u = pts_cam[:, 0] / (pts_cam[:, 2] + 1e-6)
+            v = pts_cam[:, 1] / (pts_cam[:, 2] + 1e-6)
+            z = pts_cam[:, 2]
+            points_2d_z = np.stack([u, v, z], axis=1)
+            depth_map = self._points2depthmap(points_2d_z, h, w)
+            depth_maps.append(depth_map)
+
+        results['gt_depth'] = torch.from_numpy(np.stack(depth_maps, axis=0).astype(np.float32))
+        return results
+
+
+@TRANSFORMS.register_module()
 class LoadOccupancyAnnotations(BaseTransform):
     """Load occupancy annotations for 3D occupancy prediction.
     

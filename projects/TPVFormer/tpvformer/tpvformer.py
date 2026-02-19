@@ -25,6 +25,7 @@ class TPVFormer(Base3DSegmentor):
                  ce_input='voxel',
                  dataset_name=None,  # 'occ3d' or None for traditional GT
                  save_results=False,  # Save prediction results to disk
+                 depth_supervision=None,  # dict(enabled=True, grid_config=..., downsample=..., loss_weight=..., feature_level=...)
                  init_cfg=None):
 
         super().__init__(data_preprocessor=data_preprocessor, init_cfg=init_cfg)
@@ -45,6 +46,21 @@ class TPVFormer(Base3DSegmentor):
         self.ce_loss_func = nn.CrossEntropyLoss(ignore_index=ignore_label)
         self.dataset_name = dataset_name  # Store dataset_name for predict method
         self.save_results = save_results  # Save prediction results to disk
+
+        # Auxiliary depth supervision (ego-frame consistent with TPVFormer lidar2img=ego2img)
+        self.depth_supervision = depth_supervision or dict(enabled=False)
+        self.depth_head = None
+        self._depth_feature_level = 1
+        if self.depth_supervision.get('enabled'):
+            depth_cfg = dict(
+                type='AuxiliaryDepthHead',
+                in_channels=256,  # FPN out_channels
+                grid_config=self.depth_supervision['grid_config'],
+                downsample=self.depth_supervision['downsample'],
+                loss_weight=self.depth_supervision.get('loss_weight', 0.5),
+            )
+            self.depth_head = MODELS.build(depth_cfg)
+            self._depth_feature_level = self.depth_supervision.get('feature_level', 1)
 
         self.grid_mask = GridMask(
             True, True, rotate=1, offset=False, ratio=0.5, mode=1, prob=0.7)
@@ -129,7 +145,22 @@ class TPVFormer(Base3DSegmentor):
         # Extract features
         img_feats = self.extract_feat(img)
         tpv_queries = self.tpv_head(img_feats, batch_data_samples)
-        
+
+        # Auxiliary depth supervision (ego-frame gt_depth; only when gt_depth in batch)
+        loss_depth = None
+        if isinstance(batch_inputs, dict):
+            gt_depth = batch_inputs.get('gt_depth') or (batch_inputs.get('inputs') or {}).get('gt_depth')
+        else:
+            gt_depth = None
+        if self.depth_head is not None and gt_depth is not None:
+            level = min(self._depth_feature_level, len(img_feats) - 1)
+            depth_logits = self.depth_head(img_feats[level])
+            # gt_depth may be a list of tensors when collated (per-sample); stack and move to device
+            if isinstance(gt_depth, (list, tuple)):
+                gt_depth = torch.stack([t if torch.is_tensor(t) else torch.as_tensor(t) for t in gt_depth])
+            gt_depth = gt_depth.to(depth_logits.device)
+            loss_depth = self.depth_head.get_depth_loss(gt_depth, depth_logits)
+
         if hasattr(self, 'tpv_aggregator'):
             # Get voxel coordinates and labels from data samples
             # Following original train.py structure
@@ -263,6 +294,10 @@ class TPVFormer(Base3DSegmentor):
                 
                 losses['loss_ce'] = ce_loss
                 total_loss += ce_loss
+
+            if loss_depth is not None:
+                losses['loss_depth'] = loss_depth
+                total_loss = total_loss + loss_depth
             
             losses['loss'] = total_loss
             return losses

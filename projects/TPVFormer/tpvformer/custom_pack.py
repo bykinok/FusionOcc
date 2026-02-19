@@ -11,8 +11,8 @@ class TPVPack3DDetInputs(Pack3DDetInputs):
     and adds scene_name and scene_token to default meta_keys.
     """
     
-    # Extend INPUTS_KEYS to include occ3d data
-    INPUTS_KEYS = ['points', 'img', 'occ_3d', 'occ_3d_masked']
+    # Extend INPUTS_KEYS to include occ3d data and optional gt_depth (for DepthSV)
+    INPUTS_KEYS = ['points', 'img', 'occ_3d', 'occ_3d_masked', 'gt_depth']
     
     def __init__(self, meta_keys=None, **kwargs):
         """Initialize TPVPack3DDetInputs.

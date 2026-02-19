@@ -17,6 +17,15 @@ from mmdet3d.structures.det3d_data_sample import SampleList
 @MODELS.register_module()
 class TPVFormerDataPreprocessor(Det3DDataPreprocessor):
 
+    def simple_process(self, data: dict, training: bool = False) -> dict:
+        """Forward gt_depth to batch_inputs for auxiliary depth supervision (DepthSV)."""
+        out = super().simple_process(data, training)
+        # Parent only copies points/voxels/imgs; gt_depth is in collated inputs
+        collated = self.collate_data(data)
+        if isinstance(collated, dict) and 'inputs' in collated and 'gt_depth' in collated['inputs']:
+            out['inputs']['gt_depth'] = collated['inputs']['gt_depth']
+        return out
+
     @torch.no_grad()
     def voxelize(self, points: List[Tensor],
                  data_samples: SampleList) -> List[Tensor]:
