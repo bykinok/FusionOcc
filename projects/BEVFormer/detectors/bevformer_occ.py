@@ -75,7 +75,8 @@ class BEVFormerOcc(MVXTwoStageDetector):
                  train_cfg=None,
                  test_cfg=None,
                  pretrained=None,
-                 video_test_mode=False
+                 video_test_mode=False,
+                 depth_supervision=None,
                  ):
 
         super(BEVFormerOcc,
@@ -103,6 +104,21 @@ class BEVFormerOcc(MVXTwoStageDetector):
             if pts_bbox_head is not None:
                 from mmdet3d.registry import MODELS
                 self.pts_bbox_head = MODELS.build(pts_bbox_head)
+
+        # Auxiliary depth supervision (same as TPVFormer)
+        self.depth_head = None
+        self._depth_feature_level = 1
+        if depth_supervision and depth_supervision.get('enabled'):
+            from mmdet3d.registry import MODELS
+            depth_cfg = dict(
+                type='AuxiliaryDepthHead',
+                in_channels=256,
+                grid_config=depth_supervision['grid_config'],
+                downsample=depth_supervision['downsample'],
+                loss_weight=depth_supervision.get('loss_weight', 0.5),
+            )
+            self.depth_head = MODELS.build(depth_cfg)
+            self._depth_feature_level = depth_supervision.get('feature_level', 1)
 
         # temporal
         self.video_test_mode = video_test_mode
@@ -288,7 +304,8 @@ class BEVFormerOcc(MVXTwoStageDetector):
                       gt_bboxes_ignore=None,
                       img_depth=None,
                       img_mask=None,
-                      ):
+                      gt_depth=None,
+                      **kwargs):
         """Forward training function.
         Args:
             points (list[torch.Tensor], optional): Points of each sample.
@@ -373,8 +390,20 @@ class BEVFormerOcc(MVXTwoStageDetector):
         losses_pts = self.forward_pts_train(img_feats, gt_bboxes_3d,
                                             gt_labels_3d, voxel_semantics, mask_camera, img_metas,
                                             gt_bboxes_ignore, prev_bev)
-
         losses.update(losses_pts)
+
+        # Auxiliary depth supervision (current frame only; gt_depth from BEVFormerPointToMultiViewDepth)
+        if self.depth_head is not None and gt_depth is not None:
+            if hasattr(gt_depth, 'data'):
+                gt_depth = gt_depth.data
+            level = self._depth_feature_level
+            depth_logits = self.depth_head(img_feats[level])
+            if isinstance(gt_depth, (list, tuple)):
+                gt_depth = torch.stack([t if torch.is_tensor(t) else torch.as_tensor(t) for t in gt_depth])
+            gt_depth = gt_depth.to(depth_logits.device)
+            loss_depth = self.depth_head.get_depth_loss(gt_depth, depth_logits)
+            losses['loss_depth'] = loss_depth
+
         return losses
 
     def forward_test(self, img_metas,

@@ -642,7 +642,8 @@ class LoadPointsFromFile(BaseTransform):
 
                 - points (:obj:`BasePoints`): Point clouds data.
         """
-        pts_file_path = results['lidar_points']['lidar_path']
+        # breakpoint()
+        pts_file_path = results['pts_filename']
         points = self._load_points(pts_file_path)
         points = points.reshape(-1, self.load_dim)
         points = points[:, self.use_dim]
