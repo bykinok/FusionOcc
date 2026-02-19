@@ -11,6 +11,8 @@ print(f"[DEBUG ssc_rs.py] DETECTORS registry name: {DETECTORS.name}")
 from mmdet3d.models.detectors.mvx_two_stage import MVXTwoStageDetector
 from PIL import Image  
 
+import subprocess
+import sys
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -19,6 +21,49 @@ import torch.nn as nn
 from torch.nn.functional import cosine_similarity
 from skimage.measure import block_reduce
 from thop import profile
+
+
+def _spconv_available():
+    """Return True if spconv is installed and has SparseModule (spconv 1.x style)."""
+    try:
+        import spconv.pytorch as spconv
+        return hasattr(spconv, 'SparseModule')
+    except Exception:
+        return False
+
+
+def check_and_install_spconv_cu113():
+    """spconv가 설치되지 않았거나 사용 불가할 때만 spconv-cu113 설치 시도."""
+    if _spconv_available():
+        return
+    try:
+        result = subprocess.run(
+            [sys.executable, '-m', 'pip', 'show', 'spconv-cu113'],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        if result.returncode != 0:
+            print("spconv-cu113이 설치되어 있지 않습니다. 설치 중...")
+            install_result = subprocess.run(
+                [sys.executable, '-m', 'pip', 'install', 'spconv-cu113'],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if install_result.returncode == 0:
+                print("spconv-cu113이 성공적으로 설치되었습니다.")
+            else:
+                print(f"spconv-cu113 설치 중 오류 발생: {install_result.stderr}")
+        else:
+            print("spconv-cu113이 이미 설치되어 있습니다.")
+    except Exception as e:
+        print(f"spconv-cu113 확인 중 오류 발생: {e}")
+
+
+# spconv가 없거나 SparseModule이 없을 때만 설치 체크/실행
+if not _spconv_available():
+    check_and_install_spconv_cu113()
 
 def draw_feat(feats, type='img'):
     mean_along_128 = [tensor.mean(dim=1)[0] for tensor in feats] 
