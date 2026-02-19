@@ -91,7 +91,16 @@ class OccDefaultFormatBundle3D(Pack3DDetInputs):
                 inputs = imgs
         else:
             inputs = {}
-        
+
+        # Pack gt_depth for auxiliary depth supervision (DepthSV)
+        if 'gt_depth' in results:
+            gt_depth = results['gt_depth']
+            if isinstance(gt_depth, np.ndarray):
+                gt_depth = torch.from_numpy(gt_depth)
+            if not isinstance(inputs, dict):
+                inputs = {}
+            inputs['gt_depth'] = gt_depth
+
         # Collect metainfo
         metainfo = {}
         for key in self.meta_keys:

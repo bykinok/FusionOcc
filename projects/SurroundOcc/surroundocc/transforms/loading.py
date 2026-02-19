@@ -380,3 +380,99 @@ class LoadOccupancy(BaseTransform):
                    f'occ_size={self.occ_size}, '
                    f'pc_range={self.pc_range})')
         return repr_str
+
+
+@ENGINE_TRANSFORMS.register_module()
+@DET3D_TRANSFORMS.register_module()
+class SurroundOccPointToMultiViewDepth(BaseTransform):
+    """LiDAR points -> multi-view depth maps for auxiliary depth supervision (SurroundOcc).
+
+    When use_ego_frame=True, dataset sets results['lidar2img'] = ego2img and provides
+    results['ego2lidar']. We convert points to ego (lidar2ego @ p_lidar) then project
+    with lidar2img (ego2img), so gt_depth is ego-frame depth and matches the encoder.
+    """
+
+    def __init__(self, grid_config, downsample=16):
+        super().__init__()
+        self.downsample = downsample
+        self.grid_config = grid_config
+
+    def _points_to_ego(self, results):
+        """Points in ego frame (N, 3). lidar2ego = inv(ego2lidar)."""
+        ego2lidar = results['ego2lidar']
+        ego2lidar = np.asarray(ego2lidar, dtype=np.float64)
+        if ego2lidar.shape != (4, 4):
+            ego2lidar = np.eye(4, dtype=np.float64)
+            ego2lidar[:3, :] = np.asarray(results['ego2lidar']).reshape(4, 4)[:3, :]
+        lidar2ego = np.linalg.inv(ego2lidar)
+        pts = results['points']
+        if hasattr(pts, 'tensor'):
+            p = pts.tensor[:, :3].numpy()
+        else:
+            p = np.asarray(pts)[:, :3]
+        ones = np.ones((p.shape[0], 1), dtype=np.float64)
+        p_homo = np.hstack([p, ones])
+        p_ego = (lidar2ego @ p_homo.T).T[:, :3]
+        return p_ego
+
+    def _points2depthmap(self, points_2d_z, height, width):
+        """points_2d_z: (N, 3) (u, v, z). Output (height//downsample, width//downsample)."""
+        height = height // self.downsample
+        width = width // self.downsample
+        depth_map = np.zeros((height, width), dtype=np.float32)
+        d_min, d_max = self.grid_config['depth'][0], self.grid_config['depth'][1]
+        coor = np.round(points_2d_z[:, :2] / self.downsample).astype(np.int32)
+        depth = points_2d_z[:, 2]
+        kept = (
+            (coor[:, 0] >= 0) & (coor[:, 0] < width) &
+            (coor[:, 1] >= 0) & (coor[:, 1] < height) &
+            (depth >= d_min) & (depth < d_max)
+        )
+        coor = coor[kept]
+        depth = depth[kept]
+        if coor.size == 0:
+            return depth_map
+        ranks = coor[:, 0] + coor[:, 1] * width
+        order = np.argsort(ranks + depth / 100.0)
+        coor = coor[order]
+        depth = depth[order]
+        ranks = ranks[order]
+        keep_first = np.ones(len(ranks), dtype=bool)
+        keep_first[1:] = ranks[1:] != ranks[:-1]
+        coor = coor[keep_first]
+        depth = depth[keep_first]
+        depth_map[coor[:, 1], coor[:, 0]] = depth
+        return depth_map
+
+    def transform(self, results: dict) -> dict:
+        points_ego = self._points_to_ego(results)
+        lidar2img_list = results['lidar2img']
+        if 'img' in results and len(results['img']) > 0:
+            img0 = results['img'][0]
+            h, w = img0.shape[0], img0.shape[1]
+        elif 'img_shape' in results and len(results['img_shape']) > 0:
+            sh = results['img_shape'][0]
+            h, w = sh[0], sh[1]
+        else:
+            raise KeyError("Need 'img' or 'img_shape' in results for depth map size")
+        num_cams = len(lidar2img_list)
+        ones = np.ones((points_ego.shape[0], 1), dtype=np.float64)
+        p_homo = np.hstack([points_ego, ones]).T
+        depth_maps = []
+        for cid in range(num_cams):
+            l2i = np.asarray(lidar2img_list[cid], dtype=np.float64)
+            if l2i.shape != (4, 4):
+                l2i = np.eye(4, dtype=np.float64)
+                l2i[:3, :] = np.asarray(lidar2img_list[cid]).reshape(4, 4)[:3, :]
+            pts_cam = (l2i @ p_homo).T
+            u = pts_cam[:, 0] / (pts_cam[:, 2] + 1e-6)
+            v = pts_cam[:, 1] / (pts_cam[:, 2] + 1e-6)
+            z = pts_cam[:, 2]
+            points_2d_z = np.stack([u, v, z], axis=1)
+            depth_map = self._points2depthmap(points_2d_z, h, w)
+            depth_maps.append(depth_map)
+        results['gt_depth'] = torch.from_numpy(np.stack(depth_maps, axis=0).astype(np.float32))
+        return results
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(downsample={self.downsample}, grid_config={self.grid_config})"

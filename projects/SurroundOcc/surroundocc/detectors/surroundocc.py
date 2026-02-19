@@ -124,6 +124,21 @@ class SurroundOcc(Base3DDetector):
             self.pts_bbox_head = ENGINE_MODELS.build(pts_bbox_head)
         else:
             self.pts_bbox_head = None
+
+        # Auxiliary depth supervision (same idea as TPVFormer/BEVFormer)
+        depth_supervision = kwargs.pop('depth_supervision', None)
+        self.depth_head = None
+        self._depth_feature_level = 1
+        if depth_supervision and depth_supervision.get('enabled'):
+            depth_cfg = dict(
+                type='AuxiliaryDepthHead',
+                in_channels=512,
+                grid_config=depth_supervision['grid_config'],
+                downsample=depth_supervision['downsample'],
+                loss_weight=depth_supervision.get('loss_weight', 0.5),
+            )
+            self.depth_head = ENGINE_MODELS.build(depth_cfg)
+            self._depth_feature_level = depth_supervision.get('feature_level', 1)
         
         # Initialize other attributes
         self.train_cfg = train_cfg
@@ -281,8 +296,19 @@ class SurroundOcc(Base3DDetector):
             img_metas = [data_sample.metainfo for data_sample in batch_data_samples]
             losses_occ = self.forward_pts_train(img_feats, gt_occ, img_metas)
             losses.update(losses_occ)
-        else:
-            return dict(loss_occ=torch.tensor(0.0, requires_grad=True))
+
+        # Auxiliary depth supervision (gt_depth from SurroundOccPointToMultiViewDepth)
+        gt_depth = batch_inputs.get('gt_depth', None) if isinstance(batch_inputs, dict) else None
+        if self.depth_head is not None and gt_depth is not None:
+            if hasattr(gt_depth, 'data'):
+                gt_depth = gt_depth.data
+            level = self._depth_feature_level
+            depth_logits = self.depth_head(img_feats[level])
+            if isinstance(gt_depth, (list, tuple)):
+                gt_depth = torch.stack([t if torch.is_tensor(t) else torch.as_tensor(t) for t in gt_depth])
+            gt_depth = gt_depth.to(depth_logits.device)
+            loss_depth = self.depth_head.get_depth_loss(gt_depth, depth_logits)
+            losses['loss_depth'] = loss_depth
         
         return losses
 

@@ -468,7 +468,7 @@ class CustomNuScenesOccDataset(NuScenesDataset):
                 
                 lidar2cam_dic[cam_type] = lidar2cam_rt.T
 
-            # For Occ3D (Ego-frame GT): pass ego2img so encoder outputs in Ego frame
+            # For Occ3D (Ego-frame GT): set lidar2img = ego2img so encoder and depth supervision use the same frame
             if self.use_ego_frame:
                 lidar2ego_rot = Quaternion(
                     input_dict['lidar2ego_rotation']
@@ -486,6 +486,7 @@ class CustomNuScenesOccDataset(NuScenesDataset):
                     dict(
                         img_filename=image_paths,
                         lidar2img=ego2img_rts,
+                        ego2lidar=ego2lidar_4x4,
                         cam_intrinsic=cam_intrinsics,
                         lidar2cam=lidar2cam_rts,
                         lidar2cam_dic=lidar2cam_dic,
@@ -499,7 +500,7 @@ class CustomNuScenesOccDataset(NuScenesDataset):
                         lidar2cam=lidar2cam_rts,
                         lidar2cam_dic=lidar2cam_dic,
                     ))
-                
+
         if self.modality.get('use_lidar', False):
             # FIXME alter lidar path
             input_dict['pts_filename'] = input_dict['pts_filename'].replace('./data/nuscenes/', self.data_root)
