@@ -210,7 +210,7 @@ param_scheduler = [
         eta_min=1e-6)
 ]
 
-train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=24, val_interval=1)
+train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=24, val_interval=999)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
