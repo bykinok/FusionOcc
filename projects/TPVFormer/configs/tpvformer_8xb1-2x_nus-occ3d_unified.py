@@ -11,6 +11,9 @@ ce_input = 'voxel'
 # Dataset format 설정: 'occ3d' 또는 None (기존 GT)
 dataset_name = 'occ3d'  # occ3d 형식 사용
 
+# Grid mask (이미지 augmentation): True=사용, False=비활성
+use_grid_mask = False
+
 # Camera mask 설정: invisible voxels를 ignore (255)로 처리할지 여부
 use_camera_mask = True  # True: camera mask 적용 (invisible voxels → 255)
                         # False: 모든 voxels 사용 (원본 labels 유지)
@@ -67,13 +70,13 @@ train_pipeline = [
         pc_range=[-40.0, -40.0, -1.0, 40.0, 40.0, 5.4],
         use_camera_mask=use_camera_mask),  # Camera mask 적용 여부
     dict(type='BEVAug', bda_aug_conf=bda_aug_conf, is_train=True),  # BEV augmentation after LoadOccupancy
-    # ✅ 원본과 동일한 PhotoMetric Augmentation 추가 (train only)
-    dict(
-        type='PhotoMetricDistortionMultiViewImage',
-        brightness_delta=32,
-        contrast_range=(0.5, 1.5),
-        saturation_range=(0.5, 1.5),
-        hue_delta=18),
+    # BEV aug만 사용, PhotoMetricDistortion 비활성
+    # dict(
+    #     type='PhotoMetricDistortionMultiViewImage',
+    #     brightness_delta=32,
+    #     contrast_range=(0.5, 1.5),
+    #     saturation_range=(0.5, 1.5),
+    #     hue_delta=18),
     # 원본과 동일한 정규화 값 적용
     dict(
         type='MultiViewImageNormalize',
@@ -194,19 +197,17 @@ optim_wrapper = dict(
         'img_backbone': dict(lr_mult=0.1),  # 원본과 동일하게 img_backbone으로 변경
     }),
     clip_grad=dict(max_norm=35, norm_type=2),
-)
+    accumulative_counts=8)  # gradient accumulation
 
+# LR: 0-500 iter 선형 1e-5→2e-4, 이후 epoch 24까지 cosine 2e-4→1e-6 (iter 기준)
 param_scheduler = [
-    # Warmup: 500 iterations, 1e-5 → 2e-4 (원본과 동일)
-    # start_factor = warmup_lr_init / base_lr = 1e-5 / 2e-4 = 0.05
-    dict(type='LinearLR', start_factor=0.05, by_epoch=False, begin=0, end=500),
+    dict(type='LinearLR', start_factor=0.05, end_factor=1.0, by_epoch=False, begin=0, end=500),
     dict(
         type='CosineAnnealingLR',
-        begin=0,
-        T_max=24,
-        by_epoch=True,
-        eta_min=1e-6,
-        convert_to_iter_based=True)
+        begin=500,
+        end=24 * 28130,  # total_epochs * steps_per_epoch (approx)
+        by_epoch=False,
+        eta_min=1e-6)
 ]
 
 train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=24, val_interval=1)
@@ -215,7 +216,7 @@ test_cfg = dict(type='TestLoop')
 
 default_hooks = dict(checkpoint=dict(type='CheckpointHook', interval=1))
 
-# Reproducibility settings (for consistent results across runs)
+# Reproducibility: seed=0. EMA/SyncBN/AMP 미사용 (default_hooks·optim_wrapper·model 확인됨)
 randomness = dict(seed=0, deterministic=False, diff_rank_seed=False)
 
 # DDP settings (following original TPVFormer)
@@ -266,7 +267,7 @@ model = dict(
             max_num_points=-1,
             max_voxels=-1,
         )),
-    use_grid_mask=True,
+    use_grid_mask=use_grid_mask,
     # Loss configuration (Occ3D standard format)
     ignore_label=255,  # ✅ Class 255 (invisible voxels) ignore - Occ3D standard
     lovasz_input=lovasz_input,  # 'voxel' or 'points'
