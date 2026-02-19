@@ -275,8 +275,8 @@ runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
 # CRITICAL: Use DistributedGroupSampler to match original BEVFormer sampling order
 train_dataloader = dict(
     batch_size=data['samples_per_gpu'],
-    num_workers=0,#data['workers_per_gpu'],
-    persistent_workers=False,
+    num_workers=data['workers_per_gpu'],
+    persistent_workers=True, #False
     sampler=dict(
         type='DistributedGroupSampler',
         # shuffle=False
