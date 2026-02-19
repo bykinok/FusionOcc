@@ -16,6 +16,9 @@ point_cloud_range = [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]  # occ3d range
 occ_size = [200, 200, 16]
 use_semantic = True
 
+# Grid mask (image augmentation): True=사용, False=비활성
+use_grid_mask = False
+
 # Mask camera option
 use_mask_camera = True
 use_mask_camera_1_2 = False
@@ -56,7 +59,7 @@ _num_layers_ = [1, 3, 6]
 
 model = dict(
     type='SurroundOcc',
-    use_grid_mask=True,
+    use_grid_mask=use_grid_mask,
     use_semantic=use_semantic,
     dataset_name=dataset_name,
     img_backbone=dict(
@@ -130,9 +133,10 @@ data_root = 'data/nuscenes/'
 file_client_args = dict(backend='disk')
 
 
+# Data augmentation: BEV Aug만 사용, PhotoMetricDistortion 등 이미지 augmentation 비활성
 train_pipeline = [
     dict(type='LoadMultiViewImageFromFilesFullRes', to_float32=True),
-    dict(type='PhotoMetricDistortionMultiViewImage'),
+    # dict(type='PhotoMetricDistortionMultiViewImage'),  # 비활성: BEV Aug만 사용
     dict(type='LoadOccupancy', 
          use_semantic=use_semantic,
          use_occ3d=True if dataset_name == 'occ3d' else False,
@@ -215,6 +219,9 @@ test_dataloader = val_dataloader
 
 # New style config for MMEngine
 # Use OptimWrapper (FP32 only, no mixed precision)
+# Gradient accumulation: set accumulative_counts > 1 to accumulate gradients over
+# multiple iterations before each optimizer step. Effective batch size =
+# batch_size * num_gpus * accumulative_counts (e.g. 4 -> effective batch 4 per GPU).
 optim_wrapper = dict(
     type='OptimWrapper',
     optimizer=dict(
@@ -225,27 +232,30 @@ optim_wrapper = dict(
         custom_keys={
             'img_backbone': dict(lr_mult=0.1),
         }),
-    clip_grad=dict(max_norm=35, norm_type=2))
+    clip_grad=dict(max_norm=35, norm_type=2),
+    accumulative_counts=8)  # 2, 4, 8 등으로 늘려 gradient accumulation 사용
 
+# LR schedule: 0-500 iter 선형 1e-5 -> 2e-4, 이후 ~epoch24까지 cosine 2e-4 -> 1e-6
 param_scheduler = [
     dict(
         type='LinearLR',
-        start_factor=1.0 / 3,
+        start_factor=0.05,  # 1e-5 / 2e-4
+        end_factor=1.0,
         by_epoch=False,
         begin=0,
         end=500),
     dict(
         type='CosineAnnealingLR',
         begin=500,
-        end=24*28130,  # total_epochs * steps_per_epoch (approximate)
+        end=24 * 28130,  # total_epochs * steps_per_epoch (approximate)
         by_epoch=False,
-        eta_min_ratio=1e-3)
+        eta_min=1e-6)
 ]
 
 # Training config
 train_cfg = dict(
     type='EpochBasedTrainLoop',
-    max_epochs=1,#24,
+    max_epochs=24,
     val_interval=9999)
 
 val_cfg = dict(type='ValLoop')
@@ -290,4 +300,5 @@ log_config = dict(
 
 checkpoint_config = dict(interval=1)
 
-randomness = dict(seed=0, deterministic=False)
+# seed=0 적용됨. deterministic=True 시 재현성 보장 (cudnn deterministic 등, 약간 느려질 수 있음)
+randomness = dict(seed=0, deterministic=True)
