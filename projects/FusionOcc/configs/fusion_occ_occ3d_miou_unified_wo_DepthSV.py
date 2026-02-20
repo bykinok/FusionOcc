@@ -78,6 +78,7 @@ model = dict(
     align_after_view_transformation=True,
     num_adj=len(range(*multi_adj_frame_id_cfg)),
     fuse_loss_weight=0.1,
+    depth_loss_weight=0.0,  # wo_DepthSV: no depth supervision
     img_backbone=dict(
         type='SwinTransformer',
         pretrain_img_size=224,

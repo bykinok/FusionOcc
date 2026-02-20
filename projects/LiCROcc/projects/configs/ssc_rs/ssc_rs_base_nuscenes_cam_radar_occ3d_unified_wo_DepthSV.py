@@ -127,7 +127,7 @@ model = dict(
         input_size=data_config['input_size'],
         in_channels=256,
         out_channels=numC_Trans,
-        loss_depth_weight=1,
+        loss_depth_weight=0.0,  # wo_DepthSV: no depth supervision
         depthnet_cfg=dict(use_dcn=False, aspp_mid_channels=96),
         downsample=16,
         temporal_adapter=False),

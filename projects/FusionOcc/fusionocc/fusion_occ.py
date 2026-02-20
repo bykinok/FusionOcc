@@ -442,6 +442,7 @@ class FusionOCC(FusionDepthSeg):
                  lidar_in_channel=5,
                  lidar_out_channel=32,
                  fuse_loss_weight=0.1,
+                 depth_loss_weight=1.0,
                  img_bev_encoder_backbone=None,
                  img_bev_encoder_neck=None,
                  data_preprocessor=None,
@@ -498,6 +499,7 @@ class FusionOCC(FusionDepthSeg):
         self.class_wise = class_wise
         self.align_after_view_transformation = False
         self.fuse_loss_weight = fuse_loss_weight
+        self.depth_loss_weight = depth_loss_weight
 
     def occ_encoder(self, x):
         """Encode fusion features using BEV encoder (backbone + neck)."""
@@ -796,7 +798,7 @@ class FusionOCC(FusionDepthSeg):
         depth_loss, seg_loss, vis_depth_pred, vis_depth_label, vis_seg_pred, vis_seg_label = \
             self.img_view_transformer.get_loss(sparse_depth, depth_key_frame, segs, seg_key_frame)
         
-        losses['depth_loss'] = depth_loss * self.fuse_loss_weight
+        losses['depth_loss'] = depth_loss * self.fuse_loss_weight * self.depth_loss_weight
         losses['seg_loss'] = seg_loss * self.fuse_loss_weight
 
         occ_pred = self.final_conv(fusion_feat).permute(0, 4, 3, 2, 1)

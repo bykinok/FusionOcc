@@ -111,6 +111,7 @@ voxel_out_indices = (0, 1, 2, 3)
 # Model configuration
 model = dict(
     type='OccNet',
+    disable_loss_depth=True,  # wo_DepthSV: no depth supervision, depth_net trained only by occupancy loss
     data_preprocessor=dict(
         type='Det3DDataPreprocessor',
         voxel=True,

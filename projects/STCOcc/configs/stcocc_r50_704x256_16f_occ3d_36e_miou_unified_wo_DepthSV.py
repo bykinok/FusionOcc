@@ -161,7 +161,7 @@ model = dict(
             out_channels=forward_numC_Trans,
             sid=False,
             collapse_z=False,
-            loss_depth_weight=0.5,
+            loss_depth_weight=0.0,
             depthnet_cfg=dict(use_dcn=False,
                               aspp_mid_channels=96,
                               stereo=True,
