@@ -326,21 +326,54 @@ class BEVFormerOccHead(BaseModule):
             loss_occ = self.loss_occ(preds, voxel_semantics,)
         return loss_occ
 
-    @force_fp32(apply_to=('preds'))
-    def get_occ(self, preds_dicts, img_metas, rescale=False):
-        """Generate bboxes from bbox head predictions.
+    @force_fp32(apply_to=('preds', 'occ_logits'))
+    def compute_occ_uncertainty(self, occ_logits):
+        """Compute per-voxel uncertainty scores from occupancy logits.
+
         Args:
-            predss : occ results.
-            img_metas (list[dict]): Point cloud and image's meta info.
+            occ_logits (Tensor): Raw logits, shape (B, H, W, Z, num_classes).
+
         Returns:
-            list[dict]: Decoded bbox, scores and labels after nms.
+            tuple[Tensor]: (uncertainty_msp, uncertainty_entropy)
+                - uncertainty_msp: 1 - max_prob, shape (B, H, W, Z). Higher = more uncertain.
+                - uncertainty_entropy: predictive entropy -sum(p*log(p)), shape (B, H, W, Z).
         """
-        # return self.transformer.get_occ(
-        #     preds_dicts, img_metas, rescale=rescale)
-        # print(img_metas[0].keys())
-        occ_out=preds_dicts['occ']
-        occ_score=occ_out.softmax(-1)
-        occ_score=occ_score.argmax(-1)
+        probs = F.softmax(occ_logits, dim=-1)
+        # Maximum Softmax Probability (MSP): uncertainty = 1 - max_c p(c|x)
+        max_prob = probs.max(dim=-1)[0]
+        uncertainty_msp = 1.0 - max_prob
+        # Predictive entropy: H = -sum_c p(c|x) log p(c|x)
+        eps = 1e-10
+        entropy = -(probs * (probs.clamp(min=eps).log())).sum(dim=-1)
+        uncertainty_entropy = entropy
+        return uncertainty_msp, uncertainty_entropy
 
+    @force_fp32(apply_to=('preds'))
+    def get_occ(self, preds_dicts, img_metas, rescale=False, return_uncertainty=False):
+        """Generate occupancy prediction from head logits; optionally return uncertainty maps.
 
-        return occ_score
+        Args:
+            preds_dicts: dict with 'occ' (logits), shape (B, H, W, Z, num_classes).
+            img_metas (list[dict]): Meta info (unused, for API compatibility).
+            rescale (bool): Unused, for API compatibility.
+            return_uncertainty (bool): If True, return dict with pred_occ, uncertainty_msp, uncertainty_entropy.
+
+        Returns:
+            If return_uncertainty is False: Tensor of predicted class indices (B, H, W, Z).
+            If return_uncertainty is True: dict with keys pred_occ, uncertainty_msp, uncertainty_entropy.
+        """
+        occ_out = preds_dicts['occ']
+        occ_score = occ_out.softmax(-1)
+        pred_occ = occ_score.argmax(-1)
+
+        # breakpoint()
+
+        if return_uncertainty:
+            uncertainty_msp, uncertainty_entropy = self.compute_occ_uncertainty(occ_out)
+            return {
+                'pred_occ': pred_occ,
+                'uncertainty_msp': uncertainty_msp,
+                'uncertainty_entropy': uncertainty_entropy,
+                'softmax_probs': occ_score,  # (B,H,W,Z,num_classes) for ECE/NLL
+            }
+        return pred_occ

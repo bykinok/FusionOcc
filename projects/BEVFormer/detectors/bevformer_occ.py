@@ -452,11 +452,11 @@ class BEVFormerOcc(MVXTwoStageDetector):
         return occ_results
 
     def simple_test_pts(self, x, img_metas, prev_bev=None, rescale=False):
-        """Test function"""
+        """Test function. Returns occupancy prediction and per-voxel uncertainty (MSP, entropy)."""
         outs = self.pts_bbox_head(x, img_metas, prev_bev=prev_bev, test=True)
 
         occ = self.pts_bbox_head.get_occ(
-            outs, img_metas, rescale=rescale)
+            outs, img_metas, rescale=rescale, return_uncertainty=True)
 
         return outs['bev_embed'], occ
 
@@ -540,24 +540,45 @@ class BEVFormerOcc(MVXTwoStageDetector):
         # Forward pass - follow original BEVFormer: model(return_loss=False, rescale=True, **data)
         with torch.no_grad():
             result = self(return_loss=False, rescale=True, **unwrapped_data)
-        
-        # Follow original BEVFormer's output processing: result.squeeze(dim=0).cpu().numpy().astype(np.uint8)
-        if isinstance(result, torch.Tensor):
-            result = result.squeeze(dim=0).cpu().numpy().astype(np.uint8)
-        elif isinstance(result, list) and len(result) > 0:
-            result = result[0]
-            if isinstance(result, torch.Tensor):
-                result = result.squeeze(dim=0).cpu().numpy().astype(np.uint8)
-        
+
+        # result may be dict (pred_occ + uncertainty_msp, uncertainty_entropy, softmax_probs) or legacy tensor
+        pred_occ = result
+        uncertainty_msp = None
+        uncertainty_entropy = None
+        softmax_probs = None
+        if isinstance(result, dict):
+            pred_occ = result['pred_occ']
+            uncertainty_msp = result.get('uncertainty_msp')
+            uncertainty_entropy = result.get('uncertainty_entropy')
+            softmax_probs = result.get('softmax_probs')
+
+        # Convert pred_occ to numpy for metrics
+        if isinstance(pred_occ, torch.Tensor):
+            pred_occ = pred_occ.squeeze(dim=0).cpu().numpy().astype(np.uint8)
+        elif isinstance(pred_occ, list) and len(pred_occ) > 0:
+            p = pred_occ[0]
+            if isinstance(p, torch.Tensor):
+                pred_occ = p.squeeze(dim=0).cpu().numpy().astype(np.uint8)
+            else:
+                pred_occ = np.asarray(p, dtype=np.uint8)
+
         # Format as data_sample for OccupancyMetric and OccupancyMetricHybrid
         # Use both 'pred_occ' (original BEVFormer) and 'occ_results' (STCOcc metric) for compatibility
         # CRITICAL: occ_results must be a LIST for STCOcc's occupancy_metric.py (line 233-236)
         # because it iterates: for i, id in enumerate(data_id): pred_sem = occ_results[i]
         data_sample = {
-            'pred_occ': result,  # For original BEVFormer OccupancyMetric
-            'occ_results': [result],  # For STCOcc-based OccupancyMetricHybrid - MUST be list!
+            'pred_occ': pred_occ,  # For original BEVFormer OccupancyMetric
+            'occ_results': [pred_occ],  # For STCOcc-based OccupancyMetricHybrid - MUST be list!
             'index': [sample_idx]  # Required by OccupancyMetricHybrid - also as list!
         }
+
+        # Add per-voxel uncertainty scores (MSP and predictive entropy) when available
+        if uncertainty_msp is not None:
+            data_sample['uncertainty_msp'] = uncertainty_msp.squeeze(0).cpu().numpy()
+        if uncertainty_entropy is not None:
+            data_sample['uncertainty_entropy'] = uncertainty_entropy.squeeze(0).cpu().numpy()
+        if softmax_probs is not None:
+            data_sample['softmax_probs'] = softmax_probs.squeeze(0).cpu().numpy()
         
         # Add ground truth if available
         def to_numpy(obj):

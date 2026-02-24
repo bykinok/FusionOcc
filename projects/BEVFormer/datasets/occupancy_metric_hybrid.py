@@ -156,6 +156,7 @@ class OccupancyMetricHybrid(BaseMetric):
         
         # CRITICAL: MMEngine gathers this metric's self.results, not stcocc_metric.results.
         # So we must append to self.results here; otherwise compute_metrics receives [].
+        # Include uncertainty keys so STCOcc metric can compute AUROC/FPR95.
         for data_sample in data_samples:
             occ = data_sample.get('occ_results') if isinstance(data_sample, dict) else getattr(data_sample, 'occ_results', None)
             idx = data_sample.get('index') if isinstance(data_sample, dict) else getattr(data_sample, 'index', None)
@@ -163,6 +164,16 @@ class OccupancyMetricHybrid(BaseMetric):
                 pred_dict = {'occ_results': occ, 'index': idx}
                 if isinstance(data_sample, dict) and 'flow_results' in data_sample:
                     pred_dict['flow_results'] = data_sample['flow_results']
+                # STCOcc expects list of arrays (one per sample); BEVFormer often has one sample per batch
+                if isinstance(data_sample, dict) and 'uncertainty_msp' in data_sample:
+                    u = data_sample['uncertainty_msp']
+                    pred_dict['uncertainty_msp'] = [u] if not isinstance(u, (list, tuple)) else u
+                if isinstance(data_sample, dict) and 'uncertainty_entropy' in data_sample:
+                    u = data_sample['uncertainty_entropy']
+                    pred_dict['uncertainty_entropy'] = [u] if not isinstance(u, (list, tuple)) else u
+                if isinstance(data_sample, dict) and 'softmax_probs' in data_sample:
+                    p = data_sample['softmax_probs']
+                    pred_dict['softmax_probs'] = [p] if not isinstance(p, (list, tuple)) else p
                 self.results.append(pred_dict)
     
     def compute_metrics(self, results: list) -> Dict[str, float]:
