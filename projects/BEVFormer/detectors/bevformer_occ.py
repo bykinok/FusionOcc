@@ -449,15 +449,21 @@ class BEVFormerOcc(MVXTwoStageDetector):
         self.prev_frame_info['prev_pos'] = tmp_pos
         self.prev_frame_info['prev_angle'] = tmp_angle
         self.prev_frame_info['prev_bev'] = new_prev_bev
+        # When export_occ_logits: simple_test returns (new_prev_bev, (occ_dict, occ_logits))
+        if isinstance(occ_results, tuple):
+            return (occ_results[0], occ_results[1])  # (occ_dict, occ_logits) for test_step
         return occ_results
 
     def simple_test_pts(self, x, img_metas, prev_bev=None, rescale=False):
-        """Test function. Returns occupancy prediction and per-voxel uncertainty (MSP, entropy)."""
+        """Test function. Returns occupancy prediction and per-voxel uncertainty (MSP, entropy).
+        When export_occ_logits is True, also returns raw occ logits for temperature scaling."""
         outs = self.pts_bbox_head(x, img_metas, prev_bev=prev_bev, test=True)
 
         occ = self.pts_bbox_head.get_occ(
             outs, img_metas, rescale=rescale, return_uncertainty=True)
 
+        if getattr(self, 'export_occ_logits', False):
+            return outs['bev_embed'], occ, outs['occ']
         return outs['bev_embed'], occ
 
     def simple_test(self, img_metas, img=None, prev_bev=None, rescale=False):
@@ -465,11 +471,12 @@ class BEVFormerOcc(MVXTwoStageDetector):
         # breakpoint()
         img_feats = self.extract_feat(img=img, img_metas=img_metas)
 
-        # bbox_list = [dict() for i in range(len(img_metas))]
-        new_prev_bev, occ = self.simple_test_pts(
-            img_feats, img_metas, prev_bev, rescale=rescale)
-        # for result_dict, pts_bbox in zip(bbox_list, bbox_pts):
-        #     result_dict['pts_bbox'] = pts_bbox
+        result_pts = self.simple_test_pts(
+            img_feats, img_metas, prev_bev=prev_bev, rescale=rescale)
+        new_prev_bev, occ = result_pts[0], result_pts[1]
+        occ_logits = result_pts[2] if len(result_pts) > 2 else None
+        if occ_logits is not None:
+            return new_prev_bev, (occ, occ_logits)
         return new_prev_bev, occ
 
     def test_step(self, data):
@@ -541,6 +548,12 @@ class BEVFormerOcc(MVXTwoStageDetector):
         with torch.no_grad():
             result = self(return_loss=False, rescale=True, **unwrapped_data)
 
+        # breakpoint()
+        # When export_occ_logits, forward_test returns (occ_results, occ_logits)
+        occ_logits_batch = None
+        if isinstance(result, tuple):
+            result, occ_logits_batch = result
+
         # result may be dict (pred_occ + uncertainty_msp, uncertainty_entropy, softmax_probs) or legacy tensor
         pred_occ = result
         uncertainty_msp = None
@@ -579,6 +592,8 @@ class BEVFormerOcc(MVXTwoStageDetector):
             data_sample['uncertainty_entropy'] = uncertainty_entropy.squeeze(0).cpu().numpy()
         if softmax_probs is not None:
             data_sample['softmax_probs'] = softmax_probs.squeeze(0).cpu().numpy()
+        if occ_logits_batch is not None:
+            data_sample['occ_logits'] = occ_logits_batch.squeeze(0).cpu().numpy()
         
         # Add ground truth if available
         def to_numpy(obj):

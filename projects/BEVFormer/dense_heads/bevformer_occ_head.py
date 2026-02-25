@@ -165,6 +165,7 @@ class BEVFormerOccHead(BaseModule):
                  loss_occ=None,
                  use_mask=False,
                  positional_encoding=None,
+                 temperature=None,
                  **kwargs):
 
         self.bev_h = bev_h
@@ -172,6 +173,8 @@ class BEVFormerOccHead(BaseModule):
         self.fp16_enabled = False
         self.num_classes=kwargs['num_classes']
         self.use_mask=use_mask
+        # Temperature scaling for calibration (T > 1 softens softmax). Set via config or load_state_dict.
+        self.temperature = float(temperature) if temperature is not None else None
 
         self.with_box_refine = with_box_refine
         self.as_two_stage = as_two_stage
@@ -362,7 +365,10 @@ class BEVFormerOccHead(BaseModule):
             If return_uncertainty is False: Tensor of predicted class indices (B, H, W, Z).
             If return_uncertainty is True: dict with keys pred_occ, uncertainty_msp, uncertainty_entropy.
         """
+        # breakpoint()
         occ_out = preds_dicts['occ']
+        if self.temperature is not None and self.temperature != 1.0:
+            occ_out = occ_out / self.temperature
         occ_score = occ_out.softmax(-1)
         pred_occ = occ_score.argmax(-1)
 
