@@ -434,7 +434,7 @@ visualizer = dict(
 vis_backends = [dict(type='LocalVisBackend')]
 
 # Work directory for saving logs and models
-work_dir = './work_dirs/fusion_occ'
+work_dir = './work_dirs/fusion_occ_occ3d_miou_unified'
 
 # Voxel size for occupancy grid
 voxel_size = [0.05, 0.05, 0.05]

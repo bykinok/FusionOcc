@@ -1,5 +1,5 @@
 # MMEngine 2.x Style Configuration
-work_dir = './work_dirs/ssc_rs_base_nuscenes_cam_radar_occ3d_ori_setting'
+work_dir = './work_dirs/ssc_rs_base_nuscenes_cam_radar_occ3d_unified'
 
 # Custom imports for mmdet3d 2.x (mmengine)
 custom_imports = dict(

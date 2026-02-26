@@ -1,5 +1,5 @@
 # MMEngine 2.x Style Configuration - Cam + Lidar with Occ3D GT
-work_dir = './work_dirs/ssc_rs_base_nuscenes_cam_lidar_occ3d_ori_setting'
+work_dir = './work_dirs/ssc_rs_base_nuscenes_cam_lidar_unified'
 
 # Custom imports for mmdet3d 2.x (mmengine)
 custom_imports = dict(
