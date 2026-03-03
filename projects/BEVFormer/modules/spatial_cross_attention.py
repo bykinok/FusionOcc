@@ -71,8 +71,7 @@ try:
 except ImportError:
     # ext_loader might not be available in newer versions
     ext_loader = None
-from .multi_scale_deformable_attn_function import MultiScaleDeformableAttnFunction_fp32, \
-    MultiScaleDeformableAttnFunction_fp16
+from .multi_scale_deformable_attn_function import MultiScaleDeformableAttnFunction_fp32
 from projects.BEVFormer.utils.bricks import run_time
 ext_module = ext_loader.load_ext(
     '_ext', ['ms_deform_attn_backward', 'ms_deform_attn_forward'])
@@ -219,7 +218,9 @@ class SpatialCrossAttention(BaseModule):
         count = bev_mask.sum(-1) > 0
         count = count.permute(1, 2, 0).sum(-1)
         count = torch.clamp(count, min=1.0)
-        slots = slots / count[..., None]
+        # Cast count to slots dtype to prevent float32/fp16 mismatch when
+        # slots is fp16 but torch.clamp(min=1.0) returns float32.
+        slots = slots / count[..., None].to(slots.dtype)
         slots = self.output_proj(slots)
 
         return self.dropout(slots) + inp_residual
@@ -434,13 +435,18 @@ class MSDeformableAttention3D(BaseModule):
         #
 
         if torch.cuda.is_available() and value.is_cuda:
-            if value.dtype == torch.float16:
-                MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
-            else:
-                MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
-            output = MultiScaleDeformableAttnFunction.apply(
-                value, spatial_shapes, level_start_index, sampling_locations,
-                attention_weights, self.im2col_step)
+            # Always use fp32 kernel for numerical stability.
+            # Explicitly cast fp inputs to float32 before calling apply() because
+            # @custom_fwd(cast_inputs=torch.float32) does not reliably cast when
+            # called via Function.apply() in newer PyTorch versions under autocast.
+            # Without this, value (fp16) causes the CUDA kernel to dispatch to the
+            # fp16 path, while sampling_locations (fp32) triggers a dtype mismatch.
+            _out_dtype = value.dtype
+            output = MultiScaleDeformableAttnFunction_fp32.apply(
+                value.float(), spatial_shapes, level_start_index,
+                sampling_locations.float(), attention_weights.float(),
+                self.im2col_step)
+            output = output.to(_out_dtype)
         else:
             output = multi_scale_deformable_attn_pytorch(
                 value, spatial_shapes, sampling_locations, attention_weights)

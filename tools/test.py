@@ -151,6 +151,12 @@ def parse_args():
         action='store_true',
         help='With --save-predictions: skip evaluation metrics during test (only write pkl). '
              'Saves memory; run compute_metrics_from_file.py afterward for mIoU etc.')
+    parser.add_argument(
+        '--fp16',
+        action='store_true',
+        help='Run inference in float16 (AMP autocast) without retraining. '
+             'Reduces GPU memory usage by ~40-50%%. '
+             'BatchNorm layers are automatically kept in float32 by autocast.')
     # When using PyTorch version >= 2.0.0, the `torch.distributed.launch`
     # will pass the `--local-rank` parameter to `tools/test.py` instead
     # of `--local_rank`.
@@ -395,7 +401,61 @@ def main():
 
         # start testing
         try:
-            runner.test()
+            import torch
+            import torch.nn as nn
+
+            def _report_gpu_memory(label):
+                if torch.cuda.is_available():
+                    allocated = torch.cuda.memory_allocated() / 1024 ** 3
+                    reserved  = torch.cuda.memory_reserved()  / 1024 ** 3
+                    print(f"\n==> [GPU Memory] {label}: "
+                          f"allocated={allocated:.2f} GB, reserved={reserved:.2f} GB\n")
+
+            if args.fp16:
+                # Convert model weights to fp16 for real memory reduction.
+                # BN layers are reverted to fp32 to avoid numerical instability.
+                runner.model.half()
+                for m in runner.model.modules():
+                    if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
+                        m.float()
+                bn_count = sum(
+                    1 for m in runner.model.modules()
+                    if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d))
+                )
+                # Patch extract_img_feat to cast fp32 input img to fp16.
+                # The data pipeline loads images as fp32 (to_float32=True), but
+                # model weights are now fp16, so the dtypes must match before
+                # entering the backbone.
+                _model = runner.model.module
+                _orig_extract = _model.extract_img_feat
+                def _patched_extract(img, img_metas, len_queue=None):
+                    if isinstance(img, torch.Tensor):
+                        img = img.to(torch.float16)
+                    return _orig_extract(img, img_metas, len_queue=len_queue)
+                _model.extract_img_feat = _patched_extract
+                print(f"\n==> FP16 inference enabled: model weights converted to fp16 "
+                      f"({bn_count} BN layers kept in fp32). "
+                      f"img input auto-cast fp32→fp16. autocast active.\n")
+                torch.cuda.reset_peak_memory_stats()
+                _report_gpu_memory("before FP16 inference (after model.half())")
+                # autocast is required so that _fp32 deformable attention kernel's
+                # @custom_fwd(cast_inputs=torch.float32) can cast fp16 tensors
+                # (value, attention_weights) to fp32 before the CUDA kernel call,
+                # preventing "expected Half but found Float" dtype mismatches.
+                with torch.cuda.amp.autocast():  # type: ignore[attr-defined]
+                    runner.test()
+                peak = torch.cuda.max_memory_allocated() / 1024 ** 3
+                _report_gpu_memory("after FP16 inference")
+                if torch.cuda.is_available():
+                    print(f"==> [GPU Memory] FP16 peak allocated: {peak:.2f} GB\n")
+            else:
+                torch.cuda.reset_peak_memory_stats()
+                _report_gpu_memory("before FP32 inference")
+                runner.test()
+                peak = torch.cuda.max_memory_allocated() / 1024 ** 3
+                _report_gpu_memory("after FP32 inference")
+                if torch.cuda.is_available():
+                    print(f"==> [GPU Memory] FP32 peak allocated: {peak:.2f} GB\n")
         except TypeError as e:
             if "join() argument must be str" in str(e) and "LoggerHook" in str(e):
                 # Ignore LoggerHook path errors during testing

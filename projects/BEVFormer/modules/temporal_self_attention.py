@@ -286,15 +286,17 @@ class TemporalSelfAttention(BaseModule):
                 f'Last dim of reference_points must be'
                 f' 2 or 4, but get {reference_points.shape[-1]} instead.')
         if torch.cuda.is_available() and value.is_cuda:
-
-            # using fp16 deformable attention is unstable because it performs many sum operations
-            if value.dtype == torch.float16:
-                MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
-            else:
-                MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
-            output = MultiScaleDeformableAttnFunction.apply(
-                value, spatial_shapes, level_start_index, sampling_locations,
-                attention_weights, self.im2col_step)
+            # Always use fp32 kernel for numerical stability (fp16 deformable
+            # attention is unstable due to many sum operations).
+            # Explicitly cast fp inputs to float32 before calling apply() because
+            # @custom_fwd(cast_inputs=torch.float32) does not reliably cast when
+            # called via Function.apply() in newer PyTorch versions under autocast.
+            _out_dtype = value.dtype
+            output = MultiScaleDeformableAttnFunction_fp32.apply(
+                value.float(), spatial_shapes, level_start_index,
+                sampling_locations.float(), attention_weights.float(),
+                self.im2col_step)
+            output = output.to(_out_dtype)
         else:
 
             output = multi_scale_deformable_attn_pytorch(
