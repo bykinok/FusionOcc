@@ -140,6 +140,17 @@ def parse_args():
         type=int,
         default=None,
         help='Maximum number of samples to test (for quick evaluation)')
+    parser.add_argument(
+        '--save-predictions',
+        type=str,
+        default=None,
+        help='Save predictions to this path (one file per rank: path_rank0.pkl). '
+             'Then run: python tools/compute_metrics_from_file.py --predictions <path_rank0.pkl> --config <config>')
+    parser.add_argument(
+        '--save-predictions-only',
+        action='store_true',
+        help='With --save-predictions: skip evaluation metrics during test (only write pkl). '
+             'Saves memory; run compute_metrics_from_file.py afterward for mIoU etc.')
     # When using PyTorch version >= 2.0.0, the `torch.distributed.launch`
     # will pass the `--local-rank` parameter to `tools/test.py` instead
     # of `--local_rank`.
@@ -201,6 +212,32 @@ def main():
                 print(f"Importing custom module: {module_name}")
                 importlib.import_module(module_name)
 
+        # If --save-predictions: add SavePredictionsEvaluator. Optionally skip other metrics to save memory.
+        if getattr(args, 'save_predictions', None):
+            import importlib
+            importlib.import_module('projects.BEVFormer.datasets.save_predictions_metric')
+            save_path = os.path.abspath(args.save_predictions)
+            save_only = getattr(args, 'save_predictions_only', False)
+            if save_only:
+                cfg.test_evaluator = [
+                    dict(type='mmdet3d.SavePredictionsEvaluator', save_path=save_path),
+                ]
+                print(f"\n==> Save-predictions-only: no metrics during test (lower memory). Predictions → {save_path}_rank<N>.pkl")
+                print("    Run mIoU later: python tools/compute_metrics_from_file.py --predictions <path_rank0.pkl> --config <config>\n")
+            else:
+                original_evaluator = cfg.test_evaluator
+                if isinstance(original_evaluator, list):
+                    cfg.test_evaluator = original_evaluator + [
+                        dict(type='mmdet3d.SavePredictionsEvaluator', save_path=save_path),
+                    ]
+                else:
+                    cfg.test_evaluator = [
+                        original_evaluator,
+                        dict(type='mmdet3d.SavePredictionsEvaluator', save_path=save_path),
+                    ]
+                print(f"\n==> Save-predictions mode: mIoU computed during test; predictions also → {save_path}_rank<N>.pkl")
+                print("    For uncertainty metrics, run: python tools/compute_metrics_from_file.py --predictions <path_rank0.pkl> --config <config>\n")
+
         # TODO: We will unify the ceph support approach with other OpenMMLab repos
         if args.ceph:
             if replace_ceph_backend is not None:
@@ -252,7 +289,6 @@ def main():
 
         # Ensure work_dir exists
         if cfg.work_dir is not None:
-            import os
             os.makedirs(cfg.work_dir, exist_ok=True)
         else:
             # Set a default work_dir if not specified

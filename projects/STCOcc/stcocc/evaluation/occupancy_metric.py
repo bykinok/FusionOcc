@@ -1,5 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import numpy as np
+import pickle
+import os
+import sys
 from typing import List, Dict, Any, Optional, Sequence, Tuple
 from mmengine.evaluator import BaseMetric
 from mmdet3d.registry import METRICS
@@ -11,9 +14,31 @@ except ImportError:
     roc_curve = None
     auc = None
 
+# For ECE / NLL (calibration)
+try:
+    from .occupancy_metric_utils import (
+        compute_ece,
+        compute_nll,
+        nll_neglog_sum_count,
+        ece_bin_stats_update,
+        ece_from_bin_stats,
+    )
+except ImportError:
+    # Loaded as standalone (e.g. by OccupancyMetricHybrid via importlib); load utils from same dir
+    import importlib.util
+    _utils_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'occupancy_metric_utils.py')
+    if not os.path.isfile(_utils_path):
+        raise ImportError(f"occupancy_metric_utils not found at {_utils_path}")
+    _spec = importlib.util.spec_from_file_location('occupancy_metric_utils', _utils_path)
+    _mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    compute_ece = _mod.compute_ece
+    compute_nll = _mod.compute_nll
+    nll_neglog_sum_count = _mod.nll_neglog_sum_count
+    ece_bin_stats_update = _mod.ece_bin_stats_update
+    ece_from_bin_stats = _mod.ece_from_bin_stats
+
 # Import original metric functions
-import sys
-import os
 try:
     from mmdet3d.datasets.occ_metrics import Metric_mIoU, Metric_FScore
 except ImportError:
@@ -197,15 +222,47 @@ def _print_radius_height_uncertainty_summary(
     num_classes: int = 0,
 ) -> None:
     """Print AUROC/FPR95/ECE/NLL by radius range and height; per-bin overall + per-class rows."""
-    # Overall bin keys: radius_0-20m_AUROC_msp (no class name; middle part has no '_')
-    radius_keys = sorted(
-        [k.replace('radius_', '').replace('_AUROC_msp', '') for k in metrics if k.startswith('radius_') and k.endswith('_AUROC_msp') and '_' not in k.replace('radius_', '').replace('_AUROC_msp', '')],
-        key=lambda x: float(x.split('-')[0])
-    )
-    height_keys = sorted(
-        [k.replace('height_', '').replace('_AUROC_msp', '') for k in metrics if k.startswith('height_') and k.endswith('_AUROC_msp') and '_' not in k.replace('height_', '').replace('_AUROC_msp', '')],
-        key=lambda x: float(x.split('-')[0])
-    )
+    # Collect bin keys from any radius/height metric (AUROC_msp, ECE, or NLL) so ece_nll-only mode still prints.
+    def _bin_sort_key(x: str) -> float:
+        try:
+            return float(x.split('-')[0])
+        except (ValueError, IndexError):
+            return 0.0
+
+    radius_keys = set()
+    for k in metrics:
+        if not k.startswith('radius_'):
+            continue
+        parts = k.split('_', 2)
+        if len(parts) != 3:
+            continue
+        bin_part = parts[1]
+        if '-' in bin_part and bin_part.endswith('m'):
+            try:
+                float(bin_part.split('-')[0])
+                float(bin_part.split('-')[1].replace('m', ''))
+            except (ValueError, IndexError):
+                continue
+            radius_keys.add(bin_part)
+    radius_keys = sorted(radius_keys, key=_bin_sort_key)
+
+    height_keys = set()
+    for k in metrics:
+        if not k.startswith('height_'):
+            continue
+        parts = k.split('_', 2)
+        if len(parts) != 3:
+            continue
+        bin_part = parts[1]
+        if '-' in bin_part and bin_part.endswith('m'):
+            try:
+                float(bin_part.split('-')[0])
+                float(bin_part.split('-')[1].replace('m', ''))
+            except (ValueError, IndexError):
+                continue
+            height_keys.add(bin_part)
+    height_keys = sorted(height_keys, key=_bin_sort_key)
+
     if not radius_keys and not height_keys:
         return
     class_names = class_names or []
@@ -244,7 +301,10 @@ def _print_radius_height_uncertainty_summary(
             _row(r, '', r, metrics, is_radius=True)
             for c in range(num_classes):
                 cname = class_names[c] if c < len(class_names) else f"class_{c}"
-                if metrics.get(f'radius_{r}_{cname}_AUROC_msp', None) is not None:
+                has_any = (metrics.get(f'radius_{r}_{cname}_AUROC_msp') is not None
+                           or metrics.get(f'radius_{r}_{cname}_ECE') is not None
+                           or metrics.get(f'radius_{r}_{cname}_NLL') is not None)
+                if has_any:
                     _row(f'  {cname}', cname, r, metrics, is_radius=True)
     print('\n===> Height-based AUROC/FPR95/ECE/NLL Summary:')
     print('     (same height bins as mIoU: 0-2m, 2-4m, 4-6m)')
@@ -255,7 +315,10 @@ def _print_radius_height_uncertainty_summary(
             _row(h, '', h, metrics, is_radius=False)
             for c in range(num_classes):
                 cname = class_names[c] if c < len(class_names) else f"class_{c}"
-                if metrics.get(f'height_{h}_{cname}_AUROC_msp', None) is not None:
+                has_any = (metrics.get(f'height_{h}_{cname}_AUROC_msp') is not None
+                           or metrics.get(f'height_{h}_{cname}_ECE') is not None
+                           or metrics.get(f'height_{h}_{cname}_NLL') is not None)
+                if has_any:
                     _row(f'  {cname}', cname, h, metrics, is_radius=False)
     print('')
 
@@ -288,6 +351,7 @@ class OccupancyMetric(BaseMetric):
                  point_cloud_range: Optional[List[float]] = None,
                  collect_device: str = 'cpu',
                  prefix: Optional[str] = None,
+                 compute_uncertainty_metrics: bool = False,
                  **kwargs):
         super().__init__(collect_device=collect_device, prefix=prefix)
         
@@ -299,6 +363,8 @@ class OccupancyMetric(BaseMetric):
         self.dataset_name = dataset_name
         self.eval_metric = eval_metric
         self.sort_by_timestamp = sort_by_timestamp
+        # When False, only mIoU is computed (e.g. during test.py); use compute_metrics_from_file.py for uncertainty
+        self.compute_uncertainty_metrics = bool(compute_uncertainty_metrics)
         # For radius/height breakdown (same as occ_metrics: [-40,-40,-1,40,40,5.4])
         self.point_cloud_range = point_cloud_range or [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]
         
@@ -345,7 +411,6 @@ class OccupancyMetric(BaseMetric):
     
     def reset(self):
         """Reset metric state for new epoch."""
-        # Reset miou_metric
         self.miou_metric.reset()
         # Clear predictions
         self.predictions = []
@@ -368,7 +433,6 @@ class OccupancyMetric(BaseMetric):
                 'occ_results': data_sample['occ_results'],
                 'index': data_sample['index']
             }
-
             # Store per-voxel uncertainty for AUROC/FPR95 (used by BEVFormer and other models)
             if 'uncertainty_msp' in data_sample:
                 u = data_sample['uncertainty_msp']
@@ -430,6 +494,494 @@ class OccupancyMetric(BaseMetric):
             self.miou_metric.reset()
             self.predictions = []
     
+    def compute_metrics_from_file(
+        self,
+        file_paths: List[str],
+        chunk_size: int = 400,
+        metric_groups: Optional[List[str]] = None,
+    ) -> Dict[str, float]:
+        """Compute metrics by reading predictions from file(s) in chunks.
+
+        Optionally run only a subset of metrics to reduce peak memory (run 3 passes
+        and merge results): metric_groups=['miou'], ['ece_nll'], ['auroc_fpr95'].
+
+        File format: repeated pickle.dump(batch_list, f) per batch.
+        """
+        if not self.data_infos:
+            print("Warning: data_infos not loaded. Cannot compute metrics.")
+            return {'mIoU': 0.0, 'count': 0}
+        groups = metric_groups if metric_groups is not None else ['miou', 'ece_nll', 'auroc_fpr95']
+        self._f_metric_groups = set(groups)
+        print('\nStarting Evaluation (from file)...')
+        if len(self._f_metric_groups) < 3:
+            print(f'  Metric groups: {sorted(self._f_metric_groups)} (single-pass mode)')
+        from tqdm import tqdm
+        self.miou_metric.reset()
+        self._f_processed_set = set()
+        self._f_height_bins_actual = _get_height_bins_actual(self.point_cloud_range)
+        rk = [f'{RADIUS_BINS[i]}-{RADIUS_BINS[i+1]}m' for i in range(len(RADIUS_BINS) - 1)]
+        hk = [f'{HEIGHT_BINS_RELATIVE[i]}-{HEIGHT_BINS_RELATIVE[i+1]}m' for i in range(len(HEIGHT_BINS_RELATIVE) - 1)]
+
+        def _mk_list(bin_keys):
+            return {k: [] for k in bin_keys}
+        def _mkcls_list(bin_keys):
+            return {k: {c: [] for c in range(self.num_classes)} for k in bin_keys}
+        def _mk_bin_stats(bin_keys):
+            return {k: [(0.0, 0.0, 0) for _ in range(10)] for k in bin_keys}
+        def _mk_sum_count(bin_keys):
+            return {k: 0.0 for k in bin_keys}
+        def _mk_count(bin_keys):
+            return {k: 0 for k in bin_keys}
+        def _mkcls_bin_stats(bin_keys):
+            return {k: {c: [(0.0, 0.0, 0) for _ in range(10)] for c in range(self.num_classes)} for k in bin_keys}
+        def _mkcls_sum_count(bin_keys):
+            return {k: {c: 0.0 for c in range(self.num_classes)} for k in bin_keys}
+        def _mkcls_count(bin_keys):
+            return {k: {c: 0 for c in range(self.num_classes)} for k in bin_keys}
+
+        # AUROC/FPR95: list-based (exact, same as non-chunked)
+        # Only created when selected — other groups' accumulators are not created (saves memory).
+        if 'auroc_fpr95' in self._f_metric_groups:
+            self._f_pairs_msp = []
+            self._f_pairs_entropy = []
+            self._f_class_pairs_msp = {c: [] for c in range(self.num_classes)}
+            self._f_class_pairs_entropy = {c: [] for c in range(self.num_classes)}
+            self._f_r_msp = _mk_list(rk)
+            self._f_r_ent = _mk_list(rk)
+            self._f_r_cls_msp = _mkcls_list(rk)
+            self._f_r_cls_ent = _mkcls_list(rk)
+            self._f_h_msp = _mk_list(hk)
+            self._f_h_ent = _mk_list(hk)
+            self._f_h_cls_msp = _mkcls_list(hk)
+            self._f_h_cls_ent = _mkcls_list(hk)
+        # ECE/NLL: streaming (fixed memory)
+        # Only created when selected — other groups' accumulators are not created (saves memory).
+        if 'ece_nll' in self._f_metric_groups:
+            self._f_ece_bin_stats = [(0.0, 0.0, 0) for _ in range(10)]
+            self._f_nll_neglog_sum = 0.0
+            self._f_nll_count = 0
+            self._f_class_ece_bin_stats = {c: [(0.0, 0.0, 0) for _ in range(10)] for c in range(self.num_classes)}
+            self._f_class_nll_sum = {c: 0.0 for c in range(self.num_classes)}
+            self._f_class_nll_count = {c: 0 for c in range(self.num_classes)}
+            self._f_r_ece_bin_stats = _mk_bin_stats(rk)
+            self._f_r_nll_sum = _mk_sum_count(rk)
+            self._f_r_nll_count = _mk_count(rk)
+            self._f_r_cls_ece_bin_stats = _mkcls_bin_stats(rk)
+            self._f_r_cls_nll_sum = _mkcls_sum_count(rk)
+            self._f_r_cls_nll_count = _mkcls_count(rk)
+            self._f_h_ece_bin_stats = _mk_bin_stats(hk)
+            self._f_h_nll_sum = _mk_sum_count(hk)
+            self._f_h_nll_count = _mk_count(hk)
+            self._f_h_cls_ece_bin_stats = _mkcls_bin_stats(hk)
+            self._f_h_cls_nll_sum = _mkcls_sum_count(hk)
+            self._f_h_cls_nll_count = _mkcls_count(hk)
+
+        buffer = []
+        for path in file_paths:
+            if not os.path.isfile(path):
+                continue
+            with open(path, 'rb') as f:
+                while True:
+                    try:
+                        batch = pickle.load(f)
+                    except EOFError:
+                        break
+                    if isinstance(batch, list):
+                        buffer.extend(batch)
+                    else:
+                        buffer.append(batch)
+                    while len(buffer) >= chunk_size:
+                        chunk = buffer[:chunk_size]
+                        buffer = buffer[chunk_size:]
+                        self._process_one_chunk(chunk)
+        if buffer:
+            self._process_one_chunk(buffer)
+
+        return self._finalize_file_metrics()
+    
+    def _process_one_chunk(self, chunk: List[dict]) -> None:
+        """Process one chunk of pred_dicts and update file-mode accumulators."""
+        from tqdm import tqdm
+        pred_sems, data_index = [], []
+        u_msp, u_ent, sp = [], [], []
+        for pred_dict in chunk:
+            occ_results = pred_dict.get('occ_results')
+            if occ_results is None or 'index' not in pred_dict or pred_dict['index'] is None:
+                continue
+            data_id = pred_dict['index']
+            if not isinstance(data_id, (list, tuple, np.ndarray)):
+                data_id = [data_id]
+            for i, id in enumerate(data_id):
+                if id in self._f_processed_set:
+                    continue
+                self._f_processed_set.add(id)
+                if i >= len(occ_results):
+                    continue
+                data_index.append(id)
+                pred_sems.append(occ_results[i])
+                need_auroc = 'auroc_fpr95' in self._f_metric_groups
+                need_ece_nll = 'ece_nll' in self._f_metric_groups
+                if need_auroc or need_ece_nll:
+                    u_msp.append(np.asarray(pred_dict['uncertainty_msp'][i]).astype(np.float64) if pred_dict.get('uncertainty_msp') and i < len(pred_dict['uncertainty_msp']) else None)
+                    u_ent.append(np.asarray(pred_dict['uncertainty_entropy'][i]).astype(np.float64) if pred_dict.get('uncertainty_entropy') and i < len(pred_dict['uncertainty_entropy']) else None)
+                else:
+                    u_msp.append(None)
+                    u_ent.append(None)
+                if need_ece_nll:
+                    sp.append(np.asarray(pred_dict['softmax_probs'][i]).astype(np.float64) if pred_dict.get('softmax_probs') and i < len(pred_dict['softmax_probs']) else None)
+                else:
+                    sp.append(None)
+
+        if not data_index:
+            return
+        # Run GT loop for this chunk (same as in _compute_miou chunk branch)
+        for index in tqdm(data_index, leave=False, desc='Chunk'):
+            if index >= len(self.data_infos):
+                break
+            info = self.data_infos[index]
+            occ_path = info.get('occ3d_gt_path') or info.get('occ_path') or info.get('occ_gt_path')
+            if not occ_path:
+                continue
+            if self.dataset_name == 'openocc':
+                occ_path = occ_path.replace('gts', 'openocc_v2')
+            if not occ_path.endswith('labels.npz'):
+                occ_path = os.path.join(occ_path, 'labels.npz')
+            if self.data_root and not os.path.isabs(occ_path):
+                root = os.path.normpath(self.data_root.rstrip(os.sep))
+                path_norm = os.path.normpath(occ_path)
+                if not path_norm.startswith(root + os.sep) and path_norm != root:
+                    occ_path = os.path.join(self.data_root, occ_path)
+            try:
+                occ_gt = np.load(occ_path, allow_pickle=True)
+                gt_semantics = occ_gt['semantics']
+                idx = data_index.index(index)
+                pr_semantics = pred_sems[idx]
+                mask_camera = occ_gt['mask_camera'].astype(bool) if (self.dataset_name == 'occ3d' or self.use_image_mask) else None
+                if 'miou' in self._f_metric_groups:
+                    self.miou_metric.add_batch(pr_semantics, gt_semantics, None, mask_camera)
+                pr_flat = np.asarray(pr_semantics).reshape(-1)
+                gt_flat = np.asarray(gt_semantics).reshape(-1)
+                mask_flat = mask_camera.reshape(-1) if mask_camera is not None else np.ones(pr_flat.shape, dtype=bool)
+                valid = mask_flat
+                n_valid = valid.sum()
+                if n_valid > 0:
+                    gt_valid = gt_flat[valid].astype(np.int64)
+                    pr_valid = pr_flat[valid].astype(np.int64)
+                    y_incorrect = (pr_valid != gt_valid).astype(np.int64)
+                    if 'auroc_fpr95' in self._f_metric_groups:
+                        if idx < len(u_msp) and u_msp[idx] is not None:
+                            u_msp_flat = np.asarray(u_msp[idx]).reshape(-1)[valid].astype(np.float64)
+                            self._f_pairs_msp.append((y_incorrect, u_msp_flat))
+                            for c in range(self.num_classes):
+                                mask_c = (gt_valid == c)
+                                if mask_c.sum() > 0:
+                                    self._f_class_pairs_msp[c].append(((pr_valid[mask_c] != c).astype(np.int64), u_msp_flat[mask_c]))
+                        if idx < len(u_ent) and u_ent[idx] is not None:
+                            u_ent_flat = np.asarray(u_ent[idx]).reshape(-1)[valid].astype(np.float64)
+                            self._f_pairs_entropy.append((y_incorrect, u_ent_flat))
+                            for c in range(self.num_classes):
+                                mask_c = (gt_valid == c)
+                                if mask_c.sum() > 0:
+                                    self._f_class_pairs_entropy[c].append(((pr_valid[mask_c] != c).astype(np.int64), u_ent_flat[mask_c]))
+                    if 'ece_nll' in self._f_metric_groups:
+                        if idx < len(u_msp) and u_msp[idx] is not None:
+                            conf = (1.0 - np.asarray(u_msp[idx]).reshape(-1)[valid]).astype(np.float64)
+                            acc = (pr_valid == gt_valid).astype(np.float64)
+                            ece_bin_stats_update(self._f_ece_bin_stats, conf, acc, n_bins=10)
+                            for c in range(self.num_classes):
+                                mask_c = (gt_valid == c)
+                                if mask_c.sum() > 0:
+                                    ece_bin_stats_update(self._f_class_ece_bin_stats[c], conf[mask_c], acc[mask_c], n_bins=10)
+                        if idx < len(sp) and sp[idx] is not None:
+                            probs_flat = np.asarray(sp[idx]).reshape(-1, self.num_classes)[valid]
+                            neglog_sum, cnt = nll_neglog_sum_count(probs_flat, gt_valid)
+                            self._f_nll_neglog_sum += neglog_sum
+                            self._f_nll_count += cnt
+                            for c in range(self.num_classes):
+                                mask_c = (gt_valid == c)
+                                if mask_c.sum() > 0:
+                                    ns_c, nc_c = nll_neglog_sum_count(probs_flat[mask_c], gt_valid[mask_c])
+                                    self._f_class_nll_sum[c] += ns_c
+                                    self._f_class_nll_count[c] += nc_c
+                    try:
+                        shp = np.asarray(pr_semantics).shape
+                        if len(shp) >= 3:
+                            radius_grid, z_grid = _get_radius_height_grids(shp, self.point_cloud_range)
+                            radius_flat = radius_grid.reshape(-1)[valid]
+                            height_flat = z_grid.reshape(-1)[valid]
+                            for ri in range(len(RADIUS_BINS) - 1):
+                                r_min, r_max = RADIUS_BINS[ri], RADIUS_BINS[ri + 1]
+                                r_key = f'{r_min}-{r_max}m'
+                                if ri == len(RADIUS_BINS) - 2:
+                                    in_r = (radius_flat >= r_min)
+                                else:
+                                    in_r = (radius_flat >= r_min) & (radius_flat < r_max)
+                                if in_r.sum() == 0:
+                                    continue
+                                gt_in_r = gt_valid[in_r]
+                                if 'auroc_fpr95' in self._f_metric_groups:
+                                    if idx < len(u_msp) and u_msp[idx] is not None:
+                                        u_msp_flat = np.asarray(u_msp[idx]).reshape(-1)[valid].astype(np.float64)
+                                        self._f_r_msp[r_key].append((y_incorrect[in_r], u_msp_flat[in_r]))
+                                        for c in range(self.num_classes):
+                                            mask_c = (gt_in_r == c)
+                                            if mask_c.sum() > 0:
+                                                self._f_r_cls_msp[r_key][c].append((y_incorrect[in_r][mask_c], u_msp_flat[in_r][mask_c]))
+                                    if idx < len(u_ent) and u_ent[idx] is not None:
+                                        u_ent_flat = np.asarray(u_ent[idx]).reshape(-1)[valid].astype(np.float64)
+                                        self._f_r_ent[r_key].append((y_incorrect[in_r], u_ent_flat[in_r]))
+                                        for c in range(self.num_classes):
+                                            mask_c = (gt_in_r == c)
+                                            if mask_c.sum() > 0:
+                                                self._f_r_cls_ent[r_key][c].append((y_incorrect[in_r][mask_c], u_ent_flat[in_r][mask_c]))
+                                if 'ece_nll' in self._f_metric_groups:
+                                    if idx < len(u_msp) and u_msp[idx] is not None:
+                                        conf = (1.0 - np.asarray(u_msp[idx]).reshape(-1)[valid]).astype(np.float64)
+                                        acc = (pr_valid == gt_valid).astype(np.float64)
+                                        ece_bin_stats_update(self._f_r_ece_bin_stats[r_key], conf[in_r], acc[in_r], n_bins=10)
+                                        for c in range(self.num_classes):
+                                            mask_c = (gt_in_r == c)
+                                            if mask_c.sum() > 0:
+                                                ece_bin_stats_update(self._f_r_cls_ece_bin_stats[r_key][c], conf[in_r][mask_c], acc[in_r][mask_c], n_bins=10)
+                                    if idx < len(sp) and sp[idx] is not None:
+                                        probs_flat = np.asarray(sp[idx]).reshape(-1, self.num_classes)[valid]
+                                        ns, nc = nll_neglog_sum_count(probs_flat[in_r], gt_valid[in_r])
+                                        self._f_r_nll_sum[r_key] += ns
+                                        self._f_r_nll_count[r_key] += nc
+                                        for c in range(self.num_classes):
+                                            mask_c = (gt_in_r == c)
+                                            if mask_c.sum() > 0:
+                                                nsc, ncc = nll_neglog_sum_count(probs_flat[in_r][mask_c], gt_valid[in_r][mask_c])
+                                                self._f_r_cls_nll_sum[r_key][c] += nsc
+                                                self._f_r_cls_nll_count[r_key][c] += ncc
+                            for hi in range(len(self._f_height_bins_actual) - 1):
+                                h_min, h_max = self._f_height_bins_actual[hi], self._f_height_bins_actual[hi + 1]
+                                h_key = f'{HEIGHT_BINS_RELATIVE[hi]}-{HEIGHT_BINS_RELATIVE[hi+1]}m'
+                                if hi == len(self._f_height_bins_actual) - 2:
+                                    in_h = (height_flat >= h_min)
+                                else:
+                                    in_h = (height_flat >= h_min) & (height_flat < h_max)
+                                if in_h.sum() == 0:
+                                    continue
+                                gt_in_h = gt_valid[in_h]
+                                if 'auroc_fpr95' in self._f_metric_groups:
+                                    if idx < len(u_msp) and u_msp[idx] is not None:
+                                        u_msp_flat = np.asarray(u_msp[idx]).reshape(-1)[valid].astype(np.float64)
+                                        self._f_h_msp[h_key].append((y_incorrect[in_h], u_msp_flat[in_h]))
+                                        for c in range(self.num_classes):
+                                            mask_c = (gt_in_h == c)
+                                            if mask_c.sum() > 0:
+                                                self._f_h_cls_msp[h_key][c].append((y_incorrect[in_h][mask_c], u_msp_flat[in_h][mask_c]))
+                                    if idx < len(u_ent) and u_ent[idx] is not None:
+                                        u_ent_flat = np.asarray(u_ent[idx]).reshape(-1)[valid].astype(np.float64)
+                                        self._f_h_ent[h_key].append((y_incorrect[in_h], u_ent_flat[in_h]))
+                                        for c in range(self.num_classes):
+                                            mask_c = (gt_in_h == c)
+                                            if mask_c.sum() > 0:
+                                                self._f_h_cls_ent[h_key][c].append((y_incorrect[in_h][mask_c], u_ent_flat[in_h][mask_c]))
+                                if 'ece_nll' in self._f_metric_groups:
+                                    if idx < len(u_msp) and u_msp[idx] is not None:
+                                        conf = (1.0 - np.asarray(u_msp[idx]).reshape(-1)[valid]).astype(np.float64)
+                                        acc = (pr_valid == gt_valid).astype(np.float64)
+                                        ece_bin_stats_update(self._f_h_ece_bin_stats[h_key], conf[in_h], acc[in_h], n_bins=10)
+                                        for c in range(self.num_classes):
+                                            mask_c = (gt_in_h == c)
+                                            if mask_c.sum() > 0:
+                                                ece_bin_stats_update(self._f_h_cls_ece_bin_stats[h_key][c], conf[in_h][mask_c], acc[in_h][mask_c], n_bins=10)
+                                    if idx < len(sp) and sp[idx] is not None:
+                                        probs_flat = np.asarray(sp[idx]).reshape(-1, self.num_classes)[valid]
+                                        ns, nc = nll_neglog_sum_count(probs_flat[in_h], gt_valid[in_h])
+                                        self._f_h_nll_sum[h_key] += ns
+                                        self._f_h_nll_count[h_key] += nc
+                                        for c in range(self.num_classes):
+                                            mask_c = (gt_in_h == c)
+                                            if mask_c.sum() > 0:
+                                                nsc, ncc = nll_neglog_sum_count(probs_flat[in_h][mask_c], gt_valid[in_h][mask_c])
+                                                self._f_h_cls_nll_sum[h_key][c] += nsc
+                                                self._f_h_cls_nll_count[h_key][c] += ncc
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"Warning: Failed to load GT for index {index}: {e}")
+
+    def _finalize_file_metrics(self) -> Dict[str, float]:
+        """Compute final metrics dict from file-mode accumulators."""
+        class_names, miou_array, cnt = self.miou_metric.count_miou()
+        metrics = {}
+        if 'miou' in self._f_metric_groups:
+            mean_iou = np.nanmean(miou_array[:self.num_classes - 1]) * 100
+            metrics['mIoU'] = mean_iou
+            metrics['count'] = cnt
+            for i, (class_name, iou) in enumerate(zip(class_names, miou_array)):
+                if i < len(class_names):
+                    metrics[f'IoU_{class_name}'] = round(iou * 100, 2)
+        else:
+            metrics['count'] = cnt
+
+        has_auroc = 'auroc_fpr95' in self._f_metric_groups and getattr(self, '_f_pairs_msp', None) is not None and (self._f_pairs_msp or self._f_pairs_entropy)
+        has_ece_nll = 'ece_nll' in self._f_metric_groups and (getattr(self, '_f_nll_count', 0) > 0 or any(b[2] > 0 for b in getattr(self, '_f_ece_bin_stats', [])))
+        if not has_auroc and not has_ece_nll:
+            return metrics
+
+        if 'auroc_fpr95' in self._f_metric_groups:
+            if self._f_pairs_msp:
+                y_all = np.concatenate([p[0] for p in self._f_pairs_msp], axis=0)
+                s_all = np.concatenate([p[1] for p in self._f_pairs_msp], axis=0)
+                auroc_msp, fpr95_msp = compute_auroc_fpr95(y_all, s_all)
+                metrics['AUROC_uncertainty_msp'] = round(auroc_msp * 100, 2)
+                metrics['FPR95_uncertainty_msp'] = round(fpr95_msp * 100, 2)
+            if self._f_pairs_entropy:
+                y_all = np.concatenate([p[0] for p in self._f_pairs_entropy], axis=0)
+                s_all = np.concatenate([p[1] for p in self._f_pairs_entropy], axis=0)
+                auroc_ent, fpr95_ent = compute_auroc_fpr95(y_all, s_all)
+                metrics['AUROC_uncertainty_entropy'] = round(auroc_ent * 100, 2)
+                metrics['FPR95_uncertainty_entropy'] = round(fpr95_ent * 100, 2)
+
+            def _add_per_class_auroc(class_pairs_dict, prefix, class_names):
+                auroc_list, fpr95_list = [], []
+                for c in range(self.num_classes):
+                    if not class_pairs_dict[c]:
+                        continue
+                    y_all = np.concatenate([p[0] for p in class_pairs_dict[c]], axis=0)
+                    s_all = np.concatenate([p[1] for p in class_pairs_dict[c]], axis=0)
+                    auroc_c, fpr95_c = compute_auroc_fpr95(y_all, s_all)
+                    name = class_names[c] if c < len(class_names) else f"class_{c}"
+                    metrics[f'{prefix}_AUROC_{name}'] = round(auroc_c * 100, 2)
+                    metrics[f'{prefix}_FPR95_{name}'] = round(fpr95_c * 100, 2)
+                    if not np.isnan(auroc_c):
+                        auroc_list.append(auroc_c * 100)
+                    if not np.isnan(fpr95_c):
+                        fpr95_list.append(fpr95_c * 100)
+                if auroc_list:
+                    metrics[f'mAUROC_{prefix}'] = round(float(np.mean(auroc_list)), 2)
+                if fpr95_list:
+                    metrics[f'mFPR95_{prefix}'] = round(float(np.mean(fpr95_list)), 2)
+
+            if any(self._f_class_pairs_msp[c] for c in range(self.num_classes)):
+                _add_per_class_auroc(self._f_class_pairs_msp, 'uncertainty_msp', class_names)
+            if any(self._f_class_pairs_entropy[c] for c in range(self.num_classes)):
+                _add_per_class_auroc(self._f_class_pairs_entropy, 'uncertainty_entropy', class_names)
+            _print_auroc_fpr95_summary(metrics, class_names, self.num_classes)
+
+        if 'ece_nll' in self._f_metric_groups:
+            if any(b[2] > 0 for b in self._f_ece_bin_stats):
+                ece_val = ece_from_bin_stats(self._f_ece_bin_stats, n_bins=10)
+                metrics['ECE'] = round(ece_val * 100, 2)
+            if self._f_nll_count > 0:
+                metrics['NLL'] = round(self._f_nll_neglog_sum / self._f_nll_count, 4)
+
+            if any(any(b[2] > 0 for b in self._f_class_ece_bin_stats[c]) for c in range(self.num_classes)):
+                ece_list = []
+                for c in range(self.num_classes):
+                    if not any(b[2] > 0 for b in self._f_class_ece_bin_stats[c]):
+                        continue
+                    ece_c = ece_from_bin_stats(self._f_class_ece_bin_stats[c], n_bins=10)
+                    name = class_names[c] if c < len(class_names) else f"class_{c}"
+                    metrics[f'ECE_{name}'] = round(ece_c * 100, 2)
+                    if not np.isnan(ece_c):
+                        ece_list.append(ece_c * 100)
+                if ece_list:
+                    metrics['mECE'] = round(float(np.mean(ece_list)), 2)
+            if any(self._f_class_nll_count[c] > 0 for c in range(self.num_classes)):
+                nll_list = []
+                for c in range(self.num_classes):
+                    if self._f_class_nll_count[c] <= 0:
+                        continue
+                    nll_c = self._f_class_nll_sum[c] / self._f_class_nll_count[c]
+                    name = class_names[c] if c < len(class_names) else f"class_{c}"
+                    metrics[f'NLL_{name}'] = round(nll_c, 4)
+                    if not np.isnan(nll_c):
+                        nll_list.append(nll_c)
+                if nll_list:
+                    metrics['mNLL'] = round(float(np.mean(nll_list)), 4)
+            _print_ece_nll_summary(metrics, class_names, self.num_classes)
+
+            for r_key in sorted(self._f_r_ece_bin_stats.keys(), key=lambda x: float(x.split('-')[0])):
+                if any(b[2] > 0 for b in self._f_r_ece_bin_stats[r_key]):
+                    metrics[f'radius_{r_key}_ECE'] = round(ece_from_bin_stats(self._f_r_ece_bin_stats[r_key], n_bins=10) * 100, 2)
+                if self._f_r_nll_count[r_key] > 0:
+                    metrics[f'radius_{r_key}_NLL'] = round(self._f_r_nll_sum[r_key] / self._f_r_nll_count[r_key], 4)
+                for c in range(self.num_classes):
+                    cname = class_names[c] if c < len(class_names) else f"class_{c}"
+                    if any(b[2] > 0 for b in self._f_r_cls_ece_bin_stats[r_key][c]):
+                        metrics[f'radius_{r_key}_{cname}_ECE'] = round(ece_from_bin_stats(self._f_r_cls_ece_bin_stats[r_key][c], n_bins=10) * 100, 2)
+                    if self._f_r_cls_nll_count[r_key][c] > 0:
+                        metrics[f'radius_{r_key}_{cname}_NLL'] = round(self._f_r_cls_nll_sum[r_key][c] / self._f_r_cls_nll_count[r_key][c], 4)
+
+            for h_key in sorted(self._f_h_ece_bin_stats.keys(), key=lambda x: float(x.split('-')[0])):
+                if any(b[2] > 0 for b in self._f_h_ece_bin_stats[h_key]):
+                    metrics[f'height_{h_key}_ECE'] = round(ece_from_bin_stats(self._f_h_ece_bin_stats[h_key], n_bins=10) * 100, 2)
+                if self._f_h_nll_count[h_key] > 0:
+                    metrics[f'height_{h_key}_NLL'] = round(self._f_h_nll_sum[h_key] / self._f_h_nll_count[h_key], 4)
+                for c in range(self.num_classes):
+                    cname = class_names[c] if c < len(class_names) else f"class_{c}"
+                    if any(b[2] > 0 for b in self._f_h_cls_ece_bin_stats[h_key][c]):
+                        metrics[f'height_{h_key}_{cname}_ECE'] = round(ece_from_bin_stats(self._f_h_cls_ece_bin_stats[h_key][c], n_bins=10) * 100, 2)
+                    if self._f_h_cls_nll_count[h_key][c] > 0:
+                        metrics[f'height_{h_key}_{cname}_NLL'] = round(self._f_h_cls_nll_sum[h_key][c] / self._f_h_cls_nll_count[h_key][c], 4)
+
+        if 'auroc_fpr95' in self._f_metric_groups:
+            for r_key in sorted(self._f_r_msp.keys(), key=lambda x: float(x.split('-')[0])):
+                if self._f_r_msp[r_key]:
+                    y_all = np.concatenate([p[0] for p in self._f_r_msp[r_key]], axis=0)
+                    s_all = np.concatenate([p[1] for p in self._f_r_msp[r_key]], axis=0)
+                    auroc, fpr95 = compute_auroc_fpr95(y_all, s_all)
+                    metrics[f'radius_{r_key}_AUROC_msp'] = round(auroc * 100, 2)
+                    metrics[f'radius_{r_key}_FPR95_msp'] = round(fpr95 * 100, 2)
+                if self._f_r_ent[r_key]:
+                    y_all = np.concatenate([p[0] for p in self._f_r_ent[r_key]], axis=0)
+                    s_all = np.concatenate([p[1] for p in self._f_r_ent[r_key]], axis=0)
+                    auroc, fpr95 = compute_auroc_fpr95(y_all, s_all)
+                    metrics[f'radius_{r_key}_AUROC_entropy'] = round(auroc * 100, 2)
+                    metrics[f'radius_{r_key}_FPR95_entropy'] = round(fpr95 * 100, 2)
+                for c in range(self.num_classes):
+                    cname = class_names[c] if c < len(class_names) else f"class_{c}"
+                    if self._f_r_cls_msp[r_key][c]:
+                        y_all = np.concatenate([p[0] for p in self._f_r_cls_msp[r_key][c]], axis=0)
+                        s_all = np.concatenate([p[1] for p in self._f_r_cls_msp[r_key][c]], axis=0)
+                        auroc_c, fpr95_c = compute_auroc_fpr95(y_all, s_all)
+                        metrics[f'radius_{r_key}_{cname}_AUROC_msp'] = round(auroc_c * 100, 2)
+                        metrics[f'radius_{r_key}_{cname}_FPR95_msp'] = round(fpr95_c * 100, 2)
+                    if self._f_r_cls_ent[r_key][c]:
+                        y_all = np.concatenate([p[0] for p in self._f_r_cls_ent[r_key][c]], axis=0)
+                        s_all = np.concatenate([p[1] for p in self._f_r_cls_ent[r_key][c]], axis=0)
+                        auroc_c, fpr95_c = compute_auroc_fpr95(y_all, s_all)
+                        metrics[f'radius_{r_key}_{cname}_AUROC_entropy'] = round(auroc_c * 100, 2)
+                        metrics[f'radius_{r_key}_{cname}_FPR95_entropy'] = round(fpr95_c * 100, 2)
+
+            for h_key in sorted(self._f_h_msp.keys(), key=lambda x: float(x.split('-')[0])):
+                if self._f_h_msp[h_key]:
+                    y_all = np.concatenate([p[0] for p in self._f_h_msp[h_key]], axis=0)
+                    s_all = np.concatenate([p[1] for p in self._f_h_msp[h_key]], axis=0)
+                    auroc, fpr95 = compute_auroc_fpr95(y_all, s_all)
+                    metrics[f'height_{h_key}_AUROC_msp'] = round(auroc * 100, 2)
+                    metrics[f'height_{h_key}_FPR95_msp'] = round(fpr95 * 100, 2)
+                if self._f_h_ent[h_key]:
+                    y_all = np.concatenate([p[0] for p in self._f_h_ent[h_key]], axis=0)
+                    s_all = np.concatenate([p[1] for p in self._f_h_ent[h_key]], axis=0)
+                    auroc, fpr95 = compute_auroc_fpr95(y_all, s_all)
+                    metrics[f'height_{h_key}_AUROC_entropy'] = round(auroc * 100, 2)
+                    metrics[f'height_{h_key}_FPR95_entropy'] = round(fpr95 * 100, 2)
+                for c in range(self.num_classes):
+                    cname = class_names[c] if c < len(class_names) else f"class_{c}"
+                    if self._f_h_cls_msp[h_key][c]:
+                        y_all = np.concatenate([p[0] for p in self._f_h_cls_msp[h_key][c]], axis=0)
+                        s_all = np.concatenate([p[1] for p in self._f_h_cls_msp[h_key][c]], axis=0)
+                        auroc_c, fpr95_c = compute_auroc_fpr95(y_all, s_all)
+                        metrics[f'height_{h_key}_{cname}_AUROC_msp'] = round(auroc_c * 100, 2)
+                        metrics[f'height_{h_key}_{cname}_FPR95_msp'] = round(fpr95_c * 100, 2)
+                    if self._f_h_cls_ent[h_key][c]:
+                        y_all = np.concatenate([p[0] for p in self._f_h_cls_ent[h_key][c]], axis=0)
+                        s_all = np.concatenate([p[1] for p in self._f_h_cls_ent[h_key][c]], axis=0)
+                        auroc_c, fpr95_c = compute_auroc_fpr95(y_all, s_all)
+                        metrics[f'height_{h_key}_{cname}_AUROC_entropy'] = round(auroc_c * 100, 2)
+                        metrics[f'height_{h_key}_{cname}_FPR95_entropy'] = round(fpr95_c * 100, 2)
+
+        if 'ece_nll' in self._f_metric_groups or 'auroc_fpr95' in self._f_metric_groups:
+            _print_radius_height_uncertainty_summary(metrics, class_names, self.num_classes)
+
+        return metrics
+    
     def _compute_miou(self) -> Dict[str, float]:
         """Compute standard mIoU metric.
         
@@ -442,81 +994,17 @@ class OccupancyMetric(BaseMetric):
         
         print(f'\nStarting Evaluation...')
         
-        # CRITICAL: Match original STCOcc logic exactly
-        # Original code from STCOcc_ori/mmdet3d/datasets/nuscenes_dataset_occ.py:
-        # processed_set = set()
-        # for result in results:
-        #     data_id = result['index']
-        #     for i, id in enumerate(data_id):
-        #         if id in processed_set: continue
-        #         processed_set.add(id)
-        #         data_index.append(id)
-        #         pred_sems.append(result['occ_results'][i])
-        
-        pred_sems = []
-        data_index = []
-        uncertainty_msp_sems = []   # same order as pred_sems, for AUROC/FPR95 / ECE
-        uncertainty_entropy_sems = []
-        softmax_probs_sems = []     # for NLL
         processed_set = set()
-
-        for pred_dict in self.predictions:
-            # breakpoint()
-            occ_results = pred_dict['occ_results']
-            
-            # Get actual indices from pred_dict (matching original: result['index'])
-            if 'index' in pred_dict and pred_dict['index'] is not None:
-                data_id = pred_dict['index']  # Match original variable name
-                
-                # Handle different formats
-                if not isinstance(data_id, (list, tuple, np.ndarray)):
-                    # Single value - convert to list
-                    data_id = [data_id]
-                
-                # Match original logic: iterate through indices
-                for i, id in enumerate(data_id):
-                    if id in processed_set:
-                        continue  # Skip duplicates (same as original)
-                    processed_set.add(id)
-                    
-                    if i < len(occ_results):
-                        pred_sem = occ_results[i]
-                        data_index.append(id)
-                        pred_sems.append(pred_sem)
-                        # Collect uncertainty for AUROC/FPR95 (same index as pred_sems)
-                        u_msp = pred_dict.get('uncertainty_msp')
-                        u_ent = pred_dict.get('uncertainty_entropy')
-                        if u_msp is not None and i < len(u_msp):
-                            uncertainty_msp_sems.append(np.asarray(u_msp[i]).astype(np.float64))
-                        else:
-                            uncertainty_msp_sems.append(None)
-                        if u_ent is not None and i < len(u_ent):
-                            uncertainty_entropy_sems.append(np.asarray(u_ent[i]).astype(np.float64))
-                        else:
-                            uncertainty_entropy_sems.append(None)
-                        sp = pred_dict.get('softmax_probs')
-                        if sp is not None and i < len(sp):
-                            softmax_probs_sems.append(np.asarray(sp[i]).astype(np.float64))
-                        else:
-                            softmax_probs_sems.append(None)
-                    else:
-                        print(f"Warning: Index {i} out of range for occ_results (len={len(occ_results)})")
-            else:
-                # FALLBACK: No index - this should not happen in STCOcc
-                print(f"ERROR: No 'index' in pred_dict! Cannot match with GT.")
-                continue
         
-        # Accumulators for AUROC/FPR95: global (current) and per-class
+        # Accumulators for AUROC/FPR95/ECE/NLL and radius/height (created once, filled by chunk or full)
         pairs_msp = []
         pairs_entropy = []
-        class_pairs_msp = {c: [] for c in range(self.num_classes)}   # per-class (y_incorrect, scores)
+        class_pairs_msp = {c: [] for c in range(self.num_classes)}
         class_pairs_entropy = {c: [] for c in range(self.num_classes)}
-        # Accumulators for ECE/NLL
-        ece_conf_acc = []           # list of (confidence, accuracy) for overall ECE
-        nll_probs_gt = []            # list of (probs, gt) for overall NLL
-        class_ece = {c: [] for c in range(self.num_classes)}   # (conf, acc) per class
-        class_nll = {c: [] for c in range(self.num_classes)}   # (probs, gt) per class
-        # Radius/height bin accumulators: overall and per-class per bin
+        ece_conf_acc = []
+        nll_probs_gt = []
+        class_ece = {c: [] for c in range(self.num_classes)}
+        class_nll = {c: [] for c in range(self.num_classes)}
         def _make_bin_dict(bin_keys):
             return {k: [] for k in bin_keys}
         def _make_bin_class_dict(bin_keys):
@@ -541,7 +1029,48 @@ class OccupancyMetric(BaseMetric):
         height_bin_class_nll = _make_bin_class_dict(height_keys_list)
         height_bins_actual = _get_height_bins_actual(self.point_cloud_range)
 
-        # Load ground truth and evaluate (matching original STCOcc logic)
+        def _extract_predictions(pred_dicts, _processed_set, _pred_sems, _data_index, _u_msp, _u_ent, _sp):
+            for pred_dict in pred_dicts:
+                occ_results = pred_dict.get('occ_results')
+                if occ_results is None or 'index' not in pred_dict or pred_dict['index'] is None:
+                    if 'index' not in pred_dict or pred_dict['index'] is None:
+                        continue
+                data_id = pred_dict['index']
+                if not isinstance(data_id, (list, tuple, np.ndarray)):
+                    data_id = [data_id]
+                for i, id in enumerate(data_id):
+                    if id in _processed_set:
+                        continue
+                    _processed_set.add(id)
+                    if i >= len(occ_results):
+                        continue
+                    _data_index.append(id)
+                    _pred_sems.append(occ_results[i])
+                    u_msp = pred_dict.get('uncertainty_msp')
+                    u_ent = pred_dict.get('uncertainty_entropy')
+                    if u_msp is not None and i < len(u_msp):
+                        _u_msp.append(np.asarray(u_msp[i]).astype(np.float64))
+                    else:
+                        _u_msp.append(None)
+                    if u_ent is not None and i < len(u_ent):
+                        _u_ent.append(np.asarray(u_ent[i]).astype(np.float64))
+                    else:
+                        _u_ent.append(None)
+                    sp = pred_dict.get('softmax_probs')
+                    if sp is not None and i < len(sp):
+                        _sp.append(np.asarray(sp[i]).astype(np.float64))
+                    else:
+                        _sp.append(None)
+
+        pred_sems = []
+        data_index = []
+        uncertainty_msp_sems = []
+        uncertainty_entropy_sems = []
+        softmax_probs_sems = []
+
+        _extract_predictions(self.predictions, processed_set, pred_sems, data_index,
+                             uncertainty_msp_sems, uncertainty_entropy_sems, softmax_probs_sems)
+
         for index in tqdm(data_index):
             if index >= len(self.data_infos):
                 print(f"Warning: Index {index} >= dataset size {len(self.data_infos)}. Skipping.")
@@ -549,8 +1078,6 @@ class OccupancyMetric(BaseMetric):
             
             info = self.data_infos[index]
 
-            # breakpoint()
-            
             # Priority: occ3d_gt_path (SurroundOcc format) > occ_path (STCOcc format)
             if 'occ3d_gt_path' in info:
                 occ_path = info['occ3d_gt_path']
@@ -559,11 +1086,9 @@ class OccupancyMetric(BaseMetric):
                 if self.dataset_name == 'openocc':
                     occ_path = occ_path.replace('gts', 'openocc_v2')
             
-            # Only append 'labels.npz' if not already present (BEVFormer includes it)
             if not occ_path.endswith('labels.npz'):
                 occ_path = os.path.join(occ_path, 'labels.npz')
             
-            # Prepend data_root if provided and path is relative; avoid duplicating data_root
             if self.data_root and not os.path.isabs(occ_path):
                 root = os.path.normpath(self.data_root.rstrip(os.sep))
                 path_norm = os.path.normpath(occ_path)
@@ -573,32 +1098,25 @@ class OccupancyMetric(BaseMetric):
             try:
                 occ_gt = np.load(occ_path, allow_pickle=True)
                 gt_semantics = occ_gt['semantics']
-                
-                # Match prediction with GT using the same index
                 idx = data_index.index(index)
                 pr_semantics = pred_sems[idx]
-                
                 if self.dataset_name == 'occ3d' or self.use_image_mask:
                     mask_camera = occ_gt['mask_camera'].astype(bool)
                 else:
                     mask_camera = None
-                
                 self.miou_metric.add_batch(pr_semantics, gt_semantics, None, mask_camera)
-
-                # Collect labels and uncertainty scores for AUROC/FPR95 (global + per-class)
                 pr_flat = np.asarray(pr_semantics).reshape(-1)
                 gt_flat = np.asarray(gt_semantics).reshape(-1)
                 mask_flat = mask_camera.reshape(-1) if mask_camera is not None else np.ones(pr_flat.shape, dtype=bool)
                 valid = mask_flat
                 n_valid = valid.sum()
-                if n_valid > 0:
+                if n_valid > 0 and self.compute_uncertainty_metrics:
                     gt_valid = gt_flat[valid].astype(np.int64)
                     pr_valid = pr_flat[valid].astype(np.int64)
                     y_incorrect = (pr_valid != gt_valid).astype(np.int64)
                     if idx < len(uncertainty_msp_sems) and uncertainty_msp_sems[idx] is not None:
                         u_msp = np.asarray(uncertainty_msp_sems[idx]).reshape(-1)[valid].astype(np.float64)
                         pairs_msp.append((y_incorrect, u_msp))
-                        # Per-class: for each class c, among voxels with gt==c, label = (pred!=c), score = uncertainty
                         for c in range(self.num_classes):
                             mask_c = (gt_valid == c)
                             if mask_c.sum() > 0:
@@ -612,7 +1130,6 @@ class OccupancyMetric(BaseMetric):
                             if mask_c.sum() > 0:
                                 y_c = (pr_valid[mask_c] != c).astype(np.int64)
                                 class_pairs_entropy[c].append((y_c, u_ent[mask_c]))
-                    # ECE: confidence = 1 - uncertainty_msp, accuracy = (pred==gt)
                     if idx < len(uncertainty_msp_sems) and uncertainty_msp_sems[idx] is not None:
                         conf = (1.0 - np.asarray(uncertainty_msp_sems[idx]).reshape(-1)[valid]).astype(np.float64)
                         acc = (pr_valid == gt_valid).astype(np.float64)
@@ -621,7 +1138,6 @@ class OccupancyMetric(BaseMetric):
                             mask_c = (gt_valid == c)
                             if mask_c.sum() > 0:
                                 class_ece[c].append((conf[mask_c], acc[mask_c]))
-                    # NLL: softmax probs and gt
                     if idx < len(softmax_probs_sems) and softmax_probs_sems[idx] is not None:
                         probs_flat = np.asarray(softmax_probs_sems[idx]).reshape(-1, self.num_classes)[valid]
                         nll_probs_gt.append((probs_flat, gt_valid))
@@ -629,15 +1145,12 @@ class OccupancyMetric(BaseMetric):
                             mask_c = (gt_valid == c)
                             if mask_c.sum() > 0:
                                 class_nll[c].append((probs_flat[mask_c], gt_valid[mask_c]))
-
-                    # Radius/height bins: build grids and accumulate per-bin data
                     try:
                         shp = np.asarray(pr_semantics).shape
                         if len(shp) >= 3:
                             radius_grid, z_grid = _get_radius_height_grids(shp, self.point_cloud_range)
                             radius_flat = radius_grid.reshape(-1)[valid]
                             height_flat = z_grid.reshape(-1)[valid]
-                            # Radius bins
                             for ri in range(len(RADIUS_BINS) - 1):
                                 r_min, r_max = RADIUS_BINS[ri], RADIUS_BINS[ri + 1]
                                 r_key = f'{r_min}-{r_max}m'
@@ -672,7 +1185,6 @@ class OccupancyMetric(BaseMetric):
                                         mask_c = (gt_in_r == c)
                                         if mask_c.sum() > 0:
                                             radius_bin_class_nll[r_key][c].append((probs_flat[in_r][mask_c], gt_valid[in_r][mask_c]))
-                            # Height bins (use actual z)
                             for hi in range(len(height_bins_actual) - 1):
                                 h_min, h_max = height_bins_actual[hi], height_bins_actual[hi + 1]
                                 h_key = f'{HEIGHT_BINS_RELATIVE[hi]}-{HEIGHT_BINS_RELATIVE[hi+1]}m'
@@ -707,210 +1219,197 @@ class OccupancyMetric(BaseMetric):
                                         mask_c = (gt_in_h == c)
                                         if mask_c.sum() > 0:
                                             height_bin_class_nll[h_key][c].append((probs_flat[in_h][mask_c], gt_valid[in_h][mask_c]))
-                    except Exception as _e:
-                        pass  # skip radius/height if shape or grid fails
-
+                    except Exception:
+                        pass
             except Exception as e:
                 print(f"Warning: Failed to load GT for index {index}: {e}")
                 continue
-        
-        # Compute final metrics
+
+        # Compute final metrics: mIoU always, then uncertainty metrics when available
         class_names, miou_array, cnt = self.miou_metric.count_miou()
-        
-        # Calculate mean IoU (exclude free class for final metric)
-        # miou_array has shape (num_classes,), with free at index -1
         mean_iou = np.nanmean(miou_array[:self.num_classes - 1]) * 100
-        
         metrics = {
             'mIoU': mean_iou,
             'count': cnt
         }
-        
-        # Add per-class IoU
         for i, (class_name, iou) in enumerate(zip(class_names, miou_array)):
             if i < len(class_names):
                 metrics[f'IoU_{class_name}'] = round(iou * 100, 2)
 
-        # AUROC and FPR95 from uncertainty (global: correct vs incorrect)
-        if pairs_msp:
-            y_all = np.concatenate([p[0] for p in pairs_msp], axis=0)
-            s_all = np.concatenate([p[1] for p in pairs_msp], axis=0)
-            auroc_msp, fpr95_msp = compute_auroc_fpr95(y_all, s_all)
-            metrics['AUROC_uncertainty_msp'] = round(auroc_msp * 100, 2)
-            metrics['FPR95_uncertainty_msp'] = round(fpr95_msp * 100, 2)
-        if pairs_entropy:
-            y_all = np.concatenate([p[0] for p in pairs_entropy], axis=0)
-            s_all = np.concatenate([p[1] for p in pairs_entropy], axis=0)
-            auroc_ent, fpr95_ent = compute_auroc_fpr95(y_all, s_all)
-            metrics['AUROC_uncertainty_entropy'] = round(auroc_ent * 100, 2)
-            metrics['FPR95_uncertainty_entropy'] = round(fpr95_ent * 100, 2)
+        if not self.compute_uncertainty_metrics:
+            return metrics
 
-        # Per-class AUROC and FPR95 (only for classes with both correct and incorrect voxels)
-        def _add_per_class_metrics(class_pairs_dict, prefix, class_names):
-            auroc_list, fpr95_list = [], []
-            for c in range(self.num_classes):
-                if not class_pairs_dict[c]:
-                    continue
-                y_all = np.concatenate([p[0] for p in class_pairs_dict[c]], axis=0)
-                s_all = np.concatenate([p[1] for p in class_pairs_dict[c]], axis=0)
-                auroc_c, fpr95_c = compute_auroc_fpr95(y_all, s_all)
-                name = class_names[c] if c < len(class_names) else f"class_{c}"
-                metrics[f'{prefix}_AUROC_{name}'] = round(auroc_c * 100, 2)
-                metrics[f'{prefix}_FPR95_{name}'] = round(fpr95_c * 100, 2)
-                if not np.isnan(auroc_c):
-                    auroc_list.append(auroc_c * 100)
-                if not np.isnan(fpr95_c):
-                    fpr95_list.append(fpr95_c * 100)
-            if auroc_list:
-                metrics[f'mAUROC_{prefix}'] = round(float(np.mean(auroc_list)), 2)
-            if fpr95_list:
-                metrics[f'mFPR95_{prefix}'] = round(float(np.mean(fpr95_list)), 2)
+        # Add uncertainty metrics when we have data
+        if pairs_msp or pairs_entropy or ece_conf_acc or nll_probs_gt:
+            if pairs_msp:
+                y_all = np.concatenate([p[0] for p in pairs_msp], axis=0)
+                s_all = np.concatenate([p[1] for p in pairs_msp], axis=0)
+                auroc_msp, fpr95_msp = compute_auroc_fpr95(y_all, s_all)
+                metrics['AUROC_uncertainty_msp'] = round(auroc_msp * 100, 2)
+                metrics['FPR95_uncertainty_msp'] = round(fpr95_msp * 100, 2)
+            if pairs_entropy:
+                y_all = np.concatenate([p[0] for p in pairs_entropy], axis=0)
+                s_all = np.concatenate([p[1] for p in pairs_entropy], axis=0)
+                auroc_ent, fpr95_ent = compute_auroc_fpr95(y_all, s_all)
+                metrics['AUROC_uncertainty_entropy'] = round(auroc_ent * 100, 2)
+                metrics['FPR95_uncertainty_entropy'] = round(fpr95_ent * 100, 2)
 
-        # breakpoint()
-
-        if class_pairs_msp and any(class_pairs_msp[c] for c in range(self.num_classes)):
-            _add_per_class_metrics(class_pairs_msp, 'uncertainty_msp', class_names)
-        if class_pairs_entropy and any(class_pairs_entropy[c] for c in range(self.num_classes)):
-            _add_per_class_metrics(class_pairs_entropy, 'uncertainty_entropy', class_names)
-
-        # Print AUROC/FPR95 summary (same style as distance/height mIoU in occ_metrics.count_miou)
-        _print_auroc_fpr95_summary(metrics, class_names, self.num_classes)
-
-        # ECE and NLL (calibration and likelihood)
-        if ece_conf_acc:
-            conf_all = np.concatenate([p[0] for p in ece_conf_acc], axis=0)
-            acc_all = np.concatenate([p[1] for p in ece_conf_acc], axis=0)
-            ece_val = compute_ece(conf_all, acc_all, n_bins=10)
-            metrics['ECE'] = round(ece_val * 100, 2)
-            ece_list = []
-            for c in range(self.num_classes):
-                if not class_ece[c]:
-                    continue
-                conf_c = np.concatenate([p[0] for p in class_ece[c]], axis=0)
-                acc_c = np.concatenate([p[1] for p in class_ece[c]], axis=0)
-                ece_c = compute_ece(conf_c, acc_c, n_bins=10)
-                name = class_names[c] if c < len(class_names) else f"class_{c}"
-                metrics[f'ECE_{name}'] = round(ece_c * 100, 2)
-                if not np.isnan(ece_c):
-                    ece_list.append(ece_c * 100)
-            if ece_list:
-                metrics['mECE'] = round(float(np.mean(ece_list)), 2)
-        if nll_probs_gt:
-            probs_all = np.concatenate([p[0] for p in nll_probs_gt], axis=0)
-            gt_all = np.concatenate([p[1] for p in nll_probs_gt], axis=0)
-            nll_val = compute_nll(probs_all, gt_all)
-            metrics['NLL'] = round(nll_val, 4)
-            nll_list = []
-            for c in range(self.num_classes):
-                if not class_nll[c]:
-                    continue
-                probs_c = np.concatenate([p[0] for p in class_nll[c]], axis=0)
-                gt_c = np.concatenate([p[1] for p in class_nll[c]], axis=0)
-                nll_c = compute_nll(probs_c, gt_c)
-                name = class_names[c] if c < len(class_names) else f"class_{c}"
-                metrics[f'NLL_{name}'] = round(nll_c, 4)
-                if not np.isnan(nll_c):
-                    nll_list.append(nll_c)
-            if nll_list:
-                metrics['mNLL'] = round(float(np.mean(nll_list)), 4)
-
-        # Print ECE/NLL summary
-        _print_ece_nll_summary(metrics, class_names, self.num_classes)
-
-        # Radius-based AUROC/FPR95/ECE/NLL (same bins as occ_metrics mIoU)
-        for r_key in sorted(radius_bin_pairs_msp.keys(), key=lambda x: float(x.split('-')[0])):
-            if radius_bin_pairs_msp[r_key]:
-                y_all = np.concatenate([p[0] for p in radius_bin_pairs_msp[r_key]], axis=0)
-                s_all = np.concatenate([p[1] for p in radius_bin_pairs_msp[r_key]], axis=0)
-                auroc, fpr95 = compute_auroc_fpr95(y_all, s_all)
-                metrics[f'radius_{r_key}_AUROC_msp'] = round(auroc * 100, 2)
-                metrics[f'radius_{r_key}_FPR95_msp'] = round(fpr95 * 100, 2)
-            if radius_bin_pairs_entropy[r_key]:
-                y_all = np.concatenate([p[0] for p in radius_bin_pairs_entropy[r_key]], axis=0)
-                s_all = np.concatenate([p[1] for p in radius_bin_pairs_entropy[r_key]], axis=0)
-                auroc, fpr95 = compute_auroc_fpr95(y_all, s_all)
-                metrics[f'radius_{r_key}_AUROC_entropy'] = round(auroc * 100, 2)
-                metrics[f'radius_{r_key}_FPR95_entropy'] = round(fpr95 * 100, 2)
-            if radius_bin_ece[r_key]:
-                c_all = np.concatenate([p[0] for p in radius_bin_ece[r_key]], axis=0)
-                a_all = np.concatenate([p[1] for p in radius_bin_ece[r_key]], axis=0)
-                metrics[f'radius_{r_key}_ECE'] = round(compute_ece(c_all, a_all, n_bins=10) * 100, 2)
-            if radius_bin_nll[r_key]:
-                p_all = np.concatenate([x[0] for x in radius_bin_nll[r_key]], axis=0)
-                g_all = np.concatenate([x[1] for x in radius_bin_nll[r_key]], axis=0)
-                metrics[f'radius_{r_key}_NLL'] = round(compute_nll(p_all, g_all), 4)
-            # Per-class for this radius bin
-            for c in range(self.num_classes):
-                cname = class_names[c] if c < len(class_names) else f"class_{c}"
-                if radius_bin_class_msp[r_key][c]:
-                    y_all = np.concatenate([p[0] for p in radius_bin_class_msp[r_key][c]], axis=0)
-                    s_all = np.concatenate([p[1] for p in radius_bin_class_msp[r_key][c]], axis=0)
+            # Per-class AUROC and FPR95 (only for classes with both correct and incorrect voxels)
+            def _add_per_class_metrics(class_pairs_dict, prefix, class_names):
+                auroc_list, fpr95_list = [], []
+                for c in range(self.num_classes):
+                    if not class_pairs_dict[c]:
+                        continue
+                    y_all = np.concatenate([p[0] for p in class_pairs_dict[c]], axis=0)
+                    s_all = np.concatenate([p[1] for p in class_pairs_dict[c]], axis=0)
                     auroc_c, fpr95_c = compute_auroc_fpr95(y_all, s_all)
-                    metrics[f'radius_{r_key}_{cname}_AUROC_msp'] = round(auroc_c * 100, 2)
-                    metrics[f'radius_{r_key}_{cname}_FPR95_msp'] = round(fpr95_c * 100, 2)
-                if radius_bin_class_entropy[r_key][c]:
-                    y_all = np.concatenate([p[0] for p in radius_bin_class_entropy[r_key][c]], axis=0)
-                    s_all = np.concatenate([p[1] for p in radius_bin_class_entropy[r_key][c]], axis=0)
-                    auroc_c, fpr95_c = compute_auroc_fpr95(y_all, s_all)
-                    metrics[f'radius_{r_key}_{cname}_AUROC_entropy'] = round(auroc_c * 100, 2)
-                    metrics[f'radius_{r_key}_{cname}_FPR95_entropy'] = round(fpr95_c * 100, 2)
-                if radius_bin_class_ece[r_key][c]:
-                    c_all = np.concatenate([p[0] for p in radius_bin_class_ece[r_key][c]], axis=0)
-                    a_all = np.concatenate([p[1] for p in radius_bin_class_ece[r_key][c]], axis=0)
-                    metrics[f'radius_{r_key}_{cname}_ECE'] = round(compute_ece(c_all, a_all, n_bins=10) * 100, 2)
-                if radius_bin_class_nll[r_key][c]:
-                    p_all = np.concatenate([x[0] for x in radius_bin_class_nll[r_key][c]], axis=0)
-                    g_all = np.concatenate([x[1] for x in radius_bin_class_nll[r_key][c]], axis=0)
-                    metrics[f'radius_{r_key}_{cname}_NLL'] = round(compute_nll(p_all, g_all), 4)
+                    name = class_names[c] if c < len(class_names) else f"class_{c}"
+                    metrics[f'{prefix}_AUROC_{name}'] = round(auroc_c * 100, 2)
+                    metrics[f'{prefix}_FPR95_{name}'] = round(fpr95_c * 100, 2)
+                    if not np.isnan(auroc_c):
+                        auroc_list.append(auroc_c * 100)
+                    if not np.isnan(fpr95_c):
+                        fpr95_list.append(fpr95_c * 100)
+                if auroc_list:
+                    metrics[f'mAUROC_{prefix}'] = round(float(np.mean(auroc_list)), 2)
+                if fpr95_list:
+                    metrics[f'mFPR95_{prefix}'] = round(float(np.mean(fpr95_list)), 2)
 
-        # Height-based AUROC/FPR95/ECE/NLL
-        for h_key in sorted(height_bin_pairs_msp.keys(), key=lambda x: float(x.split('-')[0])):
-            if height_bin_pairs_msp[h_key]:
-                y_all = np.concatenate([p[0] for p in height_bin_pairs_msp[h_key]], axis=0)
-                s_all = np.concatenate([p[1] for p in height_bin_pairs_msp[h_key]], axis=0)
-                auroc, fpr95 = compute_auroc_fpr95(y_all, s_all)
-                metrics[f'height_{h_key}_AUROC_msp'] = round(auroc * 100, 2)
-                metrics[f'height_{h_key}_FPR95_msp'] = round(fpr95 * 100, 2)
-            if height_bin_pairs_entropy[h_key]:
-                y_all = np.concatenate([p[0] for p in height_bin_pairs_entropy[h_key]], axis=0)
-                s_all = np.concatenate([p[1] for p in height_bin_pairs_entropy[h_key]], axis=0)
-                auroc, fpr95 = compute_auroc_fpr95(y_all, s_all)
-                metrics[f'height_{h_key}_AUROC_entropy'] = round(auroc * 100, 2)
-                metrics[f'height_{h_key}_FPR95_entropy'] = round(fpr95 * 100, 2)
-            if height_bin_ece[h_key]:
-                c_all = np.concatenate([p[0] for p in height_bin_ece[h_key]], axis=0)
-                a_all = np.concatenate([p[1] for p in height_bin_ece[h_key]], axis=0)
-                metrics[f'height_{h_key}_ECE'] = round(compute_ece(c_all, a_all, n_bins=10) * 100, 2)
-            if height_bin_nll[h_key]:
-                p_all = np.concatenate([x[0] for x in height_bin_nll[h_key]], axis=0)
-                g_all = np.concatenate([x[1] for x in height_bin_nll[h_key]], axis=0)
-                metrics[f'height_{h_key}_NLL'] = round(compute_nll(p_all, g_all), 4)
-            # Per-class for this height bin
-            for c in range(self.num_classes):
-                cname = class_names[c] if c < len(class_names) else f"class_{c}"
-                if height_bin_class_msp[h_key][c]:
-                    y_all = np.concatenate([p[0] for p in height_bin_class_msp[h_key][c]], axis=0)
-                    s_all = np.concatenate([p[1] for p in height_bin_class_msp[h_key][c]], axis=0)
-                    auroc_c, fpr95_c = compute_auroc_fpr95(y_all, s_all)
-                    metrics[f'height_{h_key}_{cname}_AUROC_msp'] = round(auroc_c * 100, 2)
-                    metrics[f'height_{h_key}_{cname}_FPR95_msp'] = round(fpr95_c * 100, 2)
-                if height_bin_class_entropy[h_key][c]:
-                    y_all = np.concatenate([p[0] for p in height_bin_class_entropy[h_key][c]], axis=0)
-                    s_all = np.concatenate([p[1] for p in height_bin_class_entropy[h_key][c]], axis=0)
-                    auroc_c, fpr95_c = compute_auroc_fpr95(y_all, s_all)
-                    metrics[f'height_{h_key}_{cname}_AUROC_entropy'] = round(auroc_c * 100, 2)
-                    metrics[f'height_{h_key}_{cname}_FPR95_entropy'] = round(fpr95_c * 100, 2)
-                if height_bin_class_ece[h_key][c]:
-                    c_all = np.concatenate([p[0] for p in height_bin_class_ece[h_key][c]], axis=0)
-                    a_all = np.concatenate([p[1] for p in height_bin_class_ece[h_key][c]], axis=0)
-                    metrics[f'height_{h_key}_{cname}_ECE'] = round(compute_ece(c_all, a_all, n_bins=10) * 100, 2)
-                if height_bin_class_nll[h_key][c]:
-                    p_all = np.concatenate([x[0] for x in height_bin_class_nll[h_key][c]], axis=0)
-                    g_all = np.concatenate([x[1] for x in height_bin_class_nll[h_key][c]], axis=0)
-                    metrics[f'height_{h_key}_{cname}_NLL'] = round(compute_nll(p_all, g_all), 4)
+            if class_pairs_msp and any(class_pairs_msp[c] for c in range(self.num_classes)):
+                _add_per_class_metrics(class_pairs_msp, 'uncertainty_msp', class_names)
+            if class_pairs_entropy and any(class_pairs_entropy[c] for c in range(self.num_classes)):
+                _add_per_class_metrics(class_pairs_entropy, 'uncertainty_entropy', class_names)
 
-        # Print radius/height breakdown (like mIoU in occ_metrics), including per-class
-        _print_radius_height_uncertainty_summary(metrics, class_names, self.num_classes)
+            _print_auroc_fpr95_summary(metrics, class_names, self.num_classes)
+
+            if ece_conf_acc:
+                conf_all = np.concatenate([p[0] for p in ece_conf_acc], axis=0)
+                acc_all = np.concatenate([p[1] for p in ece_conf_acc], axis=0)
+                ece_val = compute_ece(conf_all, acc_all, n_bins=10)
+                metrics['ECE'] = round(ece_val * 100, 2)
+                ece_list = []
+                for c in range(self.num_classes):
+                    if not class_ece[c]:
+                        continue
+                    conf_c = np.concatenate([p[0] for p in class_ece[c]], axis=0)
+                    acc_c = np.concatenate([p[1] for p in class_ece[c]], axis=0)
+                    ece_c = compute_ece(conf_c, acc_c, n_bins=10)
+                    name = class_names[c] if c < len(class_names) else f"class_{c}"
+                    metrics[f'ECE_{name}'] = round(ece_c * 100, 2)
+                    if not np.isnan(ece_c):
+                        ece_list.append(ece_c * 100)
+                if ece_list:
+                    metrics['mECE'] = round(float(np.mean(ece_list)), 2)
+            if nll_probs_gt:
+                probs_all = np.concatenate([p[0] for p in nll_probs_gt], axis=0)
+                gt_all = np.concatenate([p[1] for p in nll_probs_gt], axis=0)
+                nll_val = compute_nll(probs_all, gt_all)
+                metrics['NLL'] = round(nll_val, 4)
+                nll_list = []
+                for c in range(self.num_classes):
+                    if not class_nll[c]:
+                        continue
+                    probs_c = np.concatenate([p[0] for p in class_nll[c]], axis=0)
+                    gt_c = np.concatenate([p[1] for p in class_nll[c]], axis=0)
+                    nll_c = compute_nll(probs_c, gt_c)
+                    name = class_names[c] if c < len(class_names) else f"class_{c}"
+                    metrics[f'NLL_{name}'] = round(nll_c, 4)
+                    if not np.isnan(nll_c):
+                        nll_list.append(nll_c)
+                if nll_list:
+                    metrics['mNLL'] = round(float(np.mean(nll_list)), 4)
+
+            _print_ece_nll_summary(metrics, class_names, self.num_classes)
+
+            for r_key in sorted(radius_bin_pairs_msp.keys(), key=lambda x: float(x.split('-')[0])):
+                if radius_bin_pairs_msp[r_key]:
+                    y_all = np.concatenate([p[0] for p in radius_bin_pairs_msp[r_key]], axis=0)
+                    s_all = np.concatenate([p[1] for p in radius_bin_pairs_msp[r_key]], axis=0)
+                    auroc, fpr95 = compute_auroc_fpr95(y_all, s_all)
+                    metrics[f'radius_{r_key}_AUROC_msp'] = round(auroc * 100, 2)
+                    metrics[f'radius_{r_key}_FPR95_msp'] = round(fpr95 * 100, 2)
+                if radius_bin_pairs_entropy[r_key]:
+                    y_all = np.concatenate([p[0] for p in radius_bin_pairs_entropy[r_key]], axis=0)
+                    s_all = np.concatenate([p[1] for p in radius_bin_pairs_entropy[r_key]], axis=0)
+                    auroc, fpr95 = compute_auroc_fpr95(y_all, s_all)
+                    metrics[f'radius_{r_key}_AUROC_entropy'] = round(auroc * 100, 2)
+                    metrics[f'radius_{r_key}_FPR95_entropy'] = round(fpr95 * 100, 2)
+                if radius_bin_ece[r_key]:
+                    c_all = np.concatenate([p[0] for p in radius_bin_ece[r_key]], axis=0)
+                    a_all = np.concatenate([p[1] for p in radius_bin_ece[r_key]], axis=0)
+                    metrics[f'radius_{r_key}_ECE'] = round(compute_ece(c_all, a_all, n_bins=10) * 100, 2)
+                if radius_bin_nll[r_key]:
+                    p_all = np.concatenate([x[0] for x in radius_bin_nll[r_key]], axis=0)
+                    g_all = np.concatenate([x[1] for x in radius_bin_nll[r_key]], axis=0)
+                    metrics[f'radius_{r_key}_NLL'] = round(compute_nll(p_all, g_all), 4)
+                for c in range(self.num_classes):
+                    cname = class_names[c] if c < len(class_names) else f"class_{c}"
+                    if radius_bin_class_msp[r_key][c]:
+                        y_all = np.concatenate([p[0] for p in radius_bin_class_msp[r_key][c]], axis=0)
+                        s_all = np.concatenate([p[1] for p in radius_bin_class_msp[r_key][c]], axis=0)
+                        auroc_c, fpr95_c = compute_auroc_fpr95(y_all, s_all)
+                        metrics[f'radius_{r_key}_{cname}_AUROC_msp'] = round(auroc_c * 100, 2)
+                        metrics[f'radius_{r_key}_{cname}_FPR95_msp'] = round(fpr95_c * 100, 2)
+                    if radius_bin_class_entropy[r_key][c]:
+                        y_all = np.concatenate([p[0] for p in radius_bin_class_entropy[r_key][c]], axis=0)
+                        s_all = np.concatenate([p[1] for p in radius_bin_class_entropy[r_key][c]], axis=0)
+                        auroc_c, fpr95_c = compute_auroc_fpr95(y_all, s_all)
+                        metrics[f'radius_{r_key}_{cname}_AUROC_entropy'] = round(auroc_c * 100, 2)
+                        metrics[f'radius_{r_key}_{cname}_FPR95_entropy'] = round(fpr95_c * 100, 2)
+                    if radius_bin_class_ece[r_key][c]:
+                        c_all = np.concatenate([p[0] for p in radius_bin_class_ece[r_key][c]], axis=0)
+                        a_all = np.concatenate([p[1] for p in radius_bin_class_ece[r_key][c]], axis=0)
+                        metrics[f'radius_{r_key}_{cname}_ECE'] = round(compute_ece(c_all, a_all, n_bins=10) * 100, 2)
+                    if radius_bin_class_nll[r_key][c]:
+                        p_all = np.concatenate([x[0] for x in radius_bin_class_nll[r_key][c]], axis=0)
+                        g_all = np.concatenate([x[1] for x in radius_bin_class_nll[r_key][c]], axis=0)
+                        metrics[f'radius_{r_key}_{cname}_NLL'] = round(compute_nll(p_all, g_all), 4)
+
+            for h_key in sorted(height_bin_pairs_msp.keys(), key=lambda x: float(x.split('-')[0])):
+                if height_bin_pairs_msp[h_key]:
+                    y_all = np.concatenate([p[0] for p in height_bin_pairs_msp[h_key]], axis=0)
+                    s_all = np.concatenate([p[1] for p in height_bin_pairs_msp[h_key]], axis=0)
+                    auroc, fpr95 = compute_auroc_fpr95(y_all, s_all)
+                    metrics[f'height_{h_key}_AUROC_msp'] = round(auroc * 100, 2)
+                    metrics[f'height_{h_key}_FPR95_msp'] = round(fpr95 * 100, 2)
+                if height_bin_pairs_entropy[h_key]:
+                    y_all = np.concatenate([p[0] for p in height_bin_pairs_entropy[h_key]], axis=0)
+                    s_all = np.concatenate([p[1] for p in height_bin_pairs_entropy[h_key]], axis=0)
+                    auroc, fpr95 = compute_auroc_fpr95(y_all, s_all)
+                    metrics[f'height_{h_key}_AUROC_entropy'] = round(auroc * 100, 2)
+                    metrics[f'height_{h_key}_FPR95_entropy'] = round(fpr95 * 100, 2)
+                if height_bin_ece[h_key]:
+                    c_all = np.concatenate([p[0] for p in height_bin_ece[h_key]], axis=0)
+                    a_all = np.concatenate([p[1] for p in height_bin_ece[h_key]], axis=0)
+                    metrics[f'height_{h_key}_ECE'] = round(compute_ece(c_all, a_all, n_bins=10) * 100, 2)
+                if height_bin_nll[h_key]:
+                    p_all = np.concatenate([x[0] for x in height_bin_nll[h_key]], axis=0)
+                    g_all = np.concatenate([x[1] for x in height_bin_nll[h_key]], axis=0)
+                    metrics[f'height_{h_key}_NLL'] = round(compute_nll(p_all, g_all), 4)
+                for c in range(self.num_classes):
+                    cname = class_names[c] if c < len(class_names) else f"class_{c}"
+                    if height_bin_class_msp[h_key][c]:
+                        y_all = np.concatenate([p[0] for p in height_bin_class_msp[h_key][c]], axis=0)
+                        s_all = np.concatenate([p[1] for p in height_bin_class_msp[h_key][c]], axis=0)
+                        auroc_c, fpr95_c = compute_auroc_fpr95(y_all, s_all)
+                        metrics[f'height_{h_key}_{cname}_AUROC_msp'] = round(auroc_c * 100, 2)
+                        metrics[f'height_{h_key}_{cname}_FPR95_msp'] = round(fpr95_c * 100, 2)
+                    if height_bin_class_entropy[h_key][c]:
+                        y_all = np.concatenate([p[0] for p in height_bin_class_entropy[h_key][c]], axis=0)
+                        s_all = np.concatenate([p[1] for p in height_bin_class_entropy[h_key][c]], axis=0)
+                        auroc_c, fpr95_c = compute_auroc_fpr95(y_all, s_all)
+                        metrics[f'height_{h_key}_{cname}_AUROC_entropy'] = round(auroc_c * 100, 2)
+                        metrics[f'height_{h_key}_{cname}_FPR95_entropy'] = round(fpr95_c * 100, 2)
+                    if height_bin_class_ece[h_key][c]:
+                        c_all = np.concatenate([p[0] for p in height_bin_class_ece[h_key][c]], axis=0)
+                        a_all = np.concatenate([p[1] for p in height_bin_class_ece[h_key][c]], axis=0)
+                        metrics[f'height_{h_key}_{cname}_ECE'] = round(compute_ece(c_all, a_all, n_bins=10) * 100, 2)
+                    if height_bin_class_nll[h_key][c]:
+                        p_all = np.concatenate([x[0] for x in height_bin_class_nll[h_key][c]], axis=0)
+                        g_all = np.concatenate([x[1] for x in height_bin_class_nll[h_key][c]], axis=0)
+                        metrics[f'height_{h_key}_{cname}_NLL'] = round(compute_nll(p_all, g_all), 4)
+
+            _print_radius_height_uncertainty_summary(metrics, class_names, self.num_classes)
 
         return metrics
     
