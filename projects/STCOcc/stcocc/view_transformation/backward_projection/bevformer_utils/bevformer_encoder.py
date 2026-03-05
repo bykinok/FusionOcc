@@ -80,6 +80,10 @@ class OccPredictor(nn.Module):
     def forward(self, bev_query_feats, last_occ_pred=None, layer_num=None):
 
         # required [bs, h*w, c] bev query
+        # bev_conv 가중치는 fp16(model.half())이므로 입력을 weight dtype으로 통일
+        _ld = next(self.bev_conv.parameters()).dtype
+        bev_query_feats = bev_query_feats.to(_ld)
+
         # shape check
         bs, hw, c = bev_query_feats.shape
         assert hw == self.bev_h * self.bev_w
@@ -361,8 +365,16 @@ class BEVFormerEncoder(TransformerLayerSequence):
         inverse_bda = bda_mat.view(1, B, 1, 1, 4, 4).repeat(D, 1, num_cam, num_query, 1, 1)
 
         # change reference_points from ego coordinate to img coordinate
+        # FP16 추론 시 대형 중간 텐서(lidar2img 등)를 reference_points.dtype으로 유지해 메모리 절감.
         eps = 1e-5
-        reference_points_cam = (lidar2img @ ego2lidar @ inverse_bda @ reference_points).squeeze(-1)   # [num_points_in_pillar, bs, num_cam, num_query=h*w, 4]
+        r_dtype = reference_points.dtype
+        lidar2img = lidar2img.to(r_dtype)
+        ego2lidar = ego2lidar.to(r_dtype)
+        inverse_bda = inverse_bda.to(r_dtype)
+        reference_points = reference_points.to(r_dtype)
+        reference_points_cam = (
+            lidar2img @ ego2lidar @ inverse_bda @ reference_points
+        ).squeeze(-1)   # [num_points_in_pillar, bs, num_cam, num_query=h*w, 4]
         reference_points_depth = reference_points_cam[..., 2:3]
         reference_points_cam = reference_points_cam[..., 0:2] / torch.maximum(reference_points_depth, torch.ones_like(reference_points_depth) * eps)
 

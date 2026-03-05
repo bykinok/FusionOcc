@@ -126,6 +126,10 @@ class BEVDetStereoForwardProjection(BaseModule):
 
     def bev_encoder(self, x):
         if self.with_specific_component('img_bev_encoder_backbone'):
+            # img_view_transformer(LSS voxelpooling)의 출력이 fp32일 수 있으므로
+            # img_bev_encoder_backbone의 weight dtype(fp16)으로 캐스팅
+            _ld = next(self.img_bev_encoder_backbone.parameters()).dtype
+            x = x.to(_ld)
             x = self.img_bev_encoder_backbone(x)
         if self.with_specific_component('img_bev_encoder_neck'):
             x = self.img_bev_encoder_neck(x)

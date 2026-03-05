@@ -65,6 +65,10 @@ class OccHead(BaseModule):
     def forward(self, voxel_feats, last_occ_pred=None):
         
         # required [bs, c, z, h, w] voxel feats
+        # occupancy_head 파라미터는 fp16(model.half())이므로 입력을 weight dtype으로 통일
+        _ld = next(self.parameters()).dtype
+        voxel_feats = voxel_feats.to(_ld)
+
         if self.conv_before_predictor:
             pred_voxel_feats = self.voxel_conv(voxel_feats)
         else:

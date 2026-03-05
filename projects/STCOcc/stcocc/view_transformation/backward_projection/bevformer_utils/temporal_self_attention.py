@@ -211,6 +211,14 @@ class OA_TemporalAttention(BaseModule):
             query = query.permute(1, 0, 2)
             value = value.permute(1, 0, 2)
 
+        # 모델 가중치는 fp16이지만 입력은 fp32가 될 수 있으므로 dtype 통일
+        _w_dtype = self.sampling_offsets.weight.dtype
+        query = query.to(_w_dtype)
+        value = value.to(_w_dtype)
+        # identity는 위에서 query(fp32)로 설정될 수 있으므로 함께 캐스팅
+        if isinstance(identity, torch.Tensor):
+            identity = identity.to(_w_dtype)
+
         bs, num_query, embed_dims = query.shape
         _, num_value, embed_dims = value.shape
         assert (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == num_value
@@ -226,7 +234,8 @@ class OA_TemporalAttention(BaseModule):
         value = value.view(bs*self.num_bev_queue, num_value, self.num_heads, -1)
 
         # sampling_offsets: [bs, num_query, num_head, num_bev_queue, num_levels, num_points, 2]
-        nonempty_attention_weights = nonempty_voxel_logits.clone().reshape(bs, num_query, self.num_points)
+        # nonempty_voxel_logits가 fp32로 들어올 수 있으므로 _w_dtype으로 통일
+        nonempty_attention_weights = nonempty_voxel_logits.to(_w_dtype).clone().reshape(bs, num_query, self.num_points)
         bev_nonempty_attention_weights = nonempty_attention_weights.clone().mean(-1)[..., None]
         query_with_weights = torch.cat([query, bev_nonempty_attention_weights], -1)
         sampling_offsets = self.sampling_offsets(query_with_weights).view(bs, num_query, self.num_heads, self.num_bev_queue, self.num_levels, self.num_points, 2)
@@ -256,6 +265,7 @@ class OA_TemporalAttention(BaseModule):
                 f'Last dim of reference_points must be'
                 f' 2 or 4, but get {reference_points.shape[-1]} instead.')
 
+        # @custom_fwd 데코레이터가 dtype 변환을 처리하므로 명시적 .float() 불필요.
         output = MultiScaleDeformableAttnFunction_fp32.apply(
             value,
             spatial_shapes,
@@ -270,7 +280,9 @@ class OA_TemporalAttention(BaseModule):
         output = output.mean(-1)
         output = output.permute(2, 0, 1)
 
-        output = self.output_proj(output)
+        # output_proj weight dtype 에 맞게 캐스팅 (FP32 모드: fp32→fp32 no-op,
+        # FP16 모드: fp16→fp16 no-op, mixed: 안전 보장)
+        output = self.output_proj(output.to(self.output_proj.weight.dtype))
 
         if not self.batch_first:
             # (num_query, bs ,embed_dims)
@@ -303,6 +315,15 @@ class OA_TemporalAttention(BaseModule):
             # change to (bs, num_query ,embed_dims)
             query = query.permute(1, 0, 2)
             value = value.permute(1, 0, 2)
+
+        # identity는 fp32로 들어올 수 있으므로 weight dtype(fp16)으로 통일
+        _w_dtype2 = self.output_proj.weight.dtype
+        query = query.to(_w_dtype2)
+        value = value.to(_w_dtype2)
+        if isinstance(identity, torch.Tensor):
+            identity = identity.to(_w_dtype2)
+        if isinstance(slots, torch.Tensor):
+            slots = slots.to(_w_dtype2)
 
         bs, num_query, embed_dims = query.shape
 
@@ -379,6 +400,7 @@ class OA_TemporalAttention(BaseModule):
                 f'Last dim of reference_points must be'
                 f' 2 or 4, but get {reference_points.shape[-1]} instead.')
 
+        # @custom_fwd 데코레이터가 dtype 변환을 처리하므로 명시적 .float() 불필요.
         output = MultiScaleDeformableAttnFunction_fp32.apply(
             value_rebatch,
             spatial_shapes,
@@ -394,10 +416,12 @@ class OA_TemporalAttention(BaseModule):
 
         for j in range(bs):
             index_query_per_batch = indexes[j][0]
-            slots[j, index_query_per_batch] += output[j, :len(index_query_per_batch)]
+            # slots dtype 에 맞게 캐스팅 (FP32/FP16 모두 안전)
+            slots[j, index_query_per_batch] += output[j, :len(index_query_per_batch)].to(slots.dtype)
 
         # output
-        slots = self.output_proj(slots)
+        # slots dtype 보장 후 output_proj(fp16 weight) 호출
+        slots = self.output_proj(slots.to(self.output_proj.weight.dtype))
 
         return self.dropout(slots) + identity
 

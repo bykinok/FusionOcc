@@ -188,12 +188,13 @@ class LSSViewTransformer(BaseModule):
         # post-transformation
         # B x N x D x H x W x 3
         points = self.frustum.to(sensor2ego) - post_trans.view(B, N, 1, 1, 1, 3)
-        points = torch.inverse(post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
+        orig_dtype = points.dtype
+        points = torch.inverse(post_rots.float()).to(orig_dtype).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
 
         # cam_to_ego
         points = torch.cat((points[..., :2, :] * points[..., 2:3, :], points[..., 2:3, :]), 5)
 
-        combine = sensor2ego[:,:,:3,:3].matmul(torch.inverse(cam2imgs[:, :, :3, :3]))
+        combine = sensor2ego[:,:,:3,:3].matmul(torch.inverse(cam2imgs[:, :, :3, :3].float()).to(orig_dtype))
         points = combine.view(B, N, 1, 1, 1, 3, 3).matmul(points).squeeze(-1)
 
         points += sensor2ego[:,:,:3, 3].view(B, N, 1, 1, 1, 3)

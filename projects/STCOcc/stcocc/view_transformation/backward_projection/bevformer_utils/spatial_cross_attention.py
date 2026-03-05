@@ -217,15 +217,19 @@ class OA_SpatialCrossAttention(BaseModule):
         queries = queries.view(bs, self.num_cams, max_len, self.embed_dims)
 
         # aug the query
+        # deformable_attention의 output은 fp32(_fp32 apply 결과)이므로
+        # fp16인 slots에 += 하기 전에 dtype을 맞춰 auto-promotion 방지
         for j in range(bs):
             for i in range(num_cam):  # Use num_cam from line 156
                 index_query_per_img = indexes[j][i]
-                slots[j, index_query_per_img] += queries[j, i, :len(index_query_per_img)]
+                slots[j, index_query_per_img] += queries[j, i, :len(index_query_per_img)].to(slots.dtype)
 
         # output
         count = bev_mask.sum(-1) > 0
         count = count.permute(1, 2, 0).sum(-1)
-        count = torch.clamp(count, min=1.0)
+        # torch.clamp(int_tensor, min=1.0)은 float scalar로 인해 fp32 반환
+        # slots(fp16)와 나누기 전에 dtype을 맞춰 auto-promotion 방지
+        count = torch.clamp(count, min=1.0).to(slots.dtype)
         slots = slots / count[..., None]
         slots = self.output_proj(slots)
 
@@ -383,6 +387,14 @@ class OA_MSDeformableAttention3D(BaseModule):
             query = query.permute(1, 0, 2)
             value = value.permute(1, 0, 2)
 
+        # 모델 가중치는 fp16이지만 입력(query, value, reference_points_occlusion)이
+        # fp32로 들어올 수 있으므로 dtype 통일
+        _w_dtype = self.sampling_offsets.weight.dtype
+        query = query.to(_w_dtype)
+        value = value.to(_w_dtype)
+        if reference_points_occlusion is not None and isinstance(reference_points_occlusion, torch.Tensor):
+            reference_points_occlusion = reference_points_occlusion.to(_w_dtype)
+
         bs, num_query, _ = query.shape
         bs, num_value, _ = value.shape
         assert (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == num_value
@@ -437,9 +449,17 @@ class OA_MSDeformableAttention3D(BaseModule):
         pred_img_depth = pred_img_depth.unsqueeze(2).contiguous()
 
         # obtain sample point depth pred value
-        depth_output = MultiScaleDeformableAttnFunction_fp32.apply(pred_img_depth, spatial_shapes,level_start_index,depth_reference_points,depth_attention_weights, self.im2col_step)
+        # @custom_fwd 데코레이터가 dtype 변환을 처리하므로 명시적 .float() 불필요.
+        # FP32 모드: 입력이 FP32 → cast_inputs=fp32 no-op
+        # FP16 모드: 입력이 FP16 → cast_inputs=fp16 no-op (fp16 커널 교체 시)
+        depth_output = MultiScaleDeformableAttnFunction_fp32.apply(
+            pred_img_depth, spatial_shapes, level_start_index,
+            depth_reference_points, depth_attention_weights, self.im2col_step)
         depth_output = depth_output.reshape(bs, num_query, num_Z_anchors, -1)   # [bs*num_cam, num_query, num_Z_anchors, C]
-        depth_output = depth_output.softmax(-1).argmax(-1) * depth_bound[2] + depth_bound[0]
+        # argmax()는 int64 반환 → Python float 곱 시 fp32가 됨.
+        # reference_points_depth 등과 dtype을 맞추기 위해 명시적으로 캐스팅
+        ref_depth_dtype = reference_points_depth.dtype
+        depth_output = (depth_output.softmax(-1).argmax(-1).float() * depth_bound[2] + depth_bound[0]).to(ref_depth_dtype)
         depth_weights = torch.exp(
             -torch.square(
                 torch.min(torch.abs(reference_points_depth - (depth_output - depth_bound[2])), torch.abs(reference_points_depth - (depth_output + depth_bound[2])))
@@ -449,7 +469,9 @@ class OA_MSDeformableAttention3D(BaseModule):
         # obtain occlusion weights
         occlusion_weights = depth_weights * reference_points_occlusion
         attention_weights = attention_weights * occlusion_weights[:, :, None, None] # change to multi-head, do not softmax
-        output = MultiScaleDeformableAttnFunction_fp32.apply(value, spatial_shapes, level_start_index, sampling_locations, attention_weights, self.im2col_step)
+        output = MultiScaleDeformableAttnFunction_fp32.apply(
+            value, spatial_shapes, level_start_index,
+            sampling_locations, attention_weights, self.im2col_step)
 
         if not self.batch_first:
             output = output.permute(1, 0, 2)

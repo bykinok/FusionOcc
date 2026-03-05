@@ -39,6 +39,19 @@ class MultiScaleDeformableAttnFunction_fp16(Function):
             Tensor: has shape (bs, num_queries, embed_dims)
         """
         ctx.im2col_step = im2col_step
+        # mmcv CUDA kernel expects all tensor args in Half. @custom_fwd(cast_inputs=...) does
+        # not reliably cast every arg, so cast all floating-point tensors to fp16 explicitly.
+        target_dtype = torch.float16
+        if value.dtype != target_dtype and value.is_floating_point():
+            value = value.to(target_dtype)
+        if value_spatial_shapes.is_floating_point() and value_spatial_shapes.dtype != target_dtype:
+            value_spatial_shapes = value_spatial_shapes.to(target_dtype)
+        if value_level_start_index.is_floating_point() and value_level_start_index.dtype != target_dtype:
+            value_level_start_index = value_level_start_index.to(target_dtype)
+        if sampling_locations.dtype != target_dtype and sampling_locations.is_floating_point():
+            sampling_locations = sampling_locations.to(target_dtype)
+        if attention_weights.dtype != target_dtype and attention_weights.is_floating_point():
+            attention_weights = attention_weights.to(target_dtype)
         output = ext_module.ms_deform_attn_forward(
             value,
             value_spatial_shapes,

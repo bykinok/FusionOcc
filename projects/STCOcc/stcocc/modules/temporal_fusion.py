@@ -73,10 +73,10 @@ class SparseFusion(BaseModule):
         # curr_bev: [bs, c, z, h, w]
         # cam_params: dict, contain bda_mat
         
-        # CRITICAL FIX: Force FP32 precision for temporal fusion (matching original @force_fp32())
-        curr_bev = curr_bev.float()
-        last_occ_pred = last_occ_pred.float()
-        nonempty_prob = nonempty_prob.float()
+        # 입력을 curr_bev.dtype으로 통일 (FP16 추론 시 history_bev 등 대형 버퍼 절반 절감). torch.inverse만 FP32 사용.
+        _dtype = curr_bev.dtype
+        last_occ_pred = last_occ_pred.to(_dtype)
+        nonempty_prob = nonempty_prob.to(_dtype)
 
         # 0、check process voxel or bev features
         voxel_feat = True if len(curr_bev.shape) == 5 else False
@@ -109,7 +109,7 @@ class SparseFusion(BaseModule):
             self.history_sweep_time = curr_bev.new_zeros(curr_bev.shape[0], self.history_num)
 
         self.history_bev = self.history_bev.detach()
-        assert self.history_bev.dtype == torch.float32
+        assert self.history_bev.dtype in (torch.float32, torch.float16), f"history_bev.dtype={self.history_bev.dtype}"
 
         # 3、 Deal with the new sequences
         # Replace all the new sequences' positions in history with the curr_bev information
@@ -130,7 +130,7 @@ class SparseFusion(BaseModule):
         grid = self.generate_grid(curr_bev)
         feat2bev = self.generate_feat2bev(grid, dx, bx)
 
-        rt_flow = (torch.inverse(feat2bev) @ self.history_forward_augs @ curr_to_prev_ego_rt @ torch.inverse(forward_augs) @ feat2bev)
+        rt_flow = (torch.inverse(feat2bev.float()) @ self.history_forward_augs.float() @ curr_to_prev_ego_rt.float() @ torch.inverse(forward_augs.float()) @ feat2bev.float()).to(_dtype)
         grid = rt_flow.view(n, 1, 1, 1, 4, 4) @ grid
 
         normalize_factor = torch.tensor([w - 1.0, h - 1.0, z - 1.0], dtype=curr_bev.dtype, device=curr_bev.device)
@@ -144,7 +144,9 @@ class SparseFusion(BaseModule):
 
         # top_k sampling, sampled foreground and background top_k
         last_occ_pred = last_occ_pred.permute(0, 3, 2, 1, 4).reshape(bs, h*w*z, -1)
-        occ_embed = self.occ_embedding(last_occ_pred).permute(0, 2, 1)  # [bs, occ_embedims, h*w*z]
+        # occ_embedding(Sequential)의 파라미터 dtype 추출 (model.half() 시 fp16)
+        _ld = next(self.occ_embedding.parameters()).dtype
+        occ_embed = self.occ_embedding(last_occ_pred.to(_ld)).to(_dtype).permute(0, 2, 1)  # [bs, occ_embedims, h*w*z]
         nonempty_prob = nonempty_prob.reshape(bs, -1)
         total_number = nonempty_prob.shape[1]
         indices = torch.topk(nonempty_prob, self.top_k, dim=1)[1]                        # foreground indices
@@ -175,8 +177,10 @@ class SparseFusion(BaseModule):
 
         sampled_fusion = torch.cat([sampled_history, sampled_current, sampled_occ_embd], dim=1).permute(0, 2, 1)
         sampled_bg_fusion = torch.cat([sampled_bg_history, sampled_bg_current, sampled_bg_occ_embed], dim=1).permute(0, 2, 1)
-        sampled_fusion = self.history_fusion_linear(sampled_fusion)
-        sampled_bg_fusion = self.history_fusion_bg_linear(sampled_bg_fusion)
+        # history_fusion_linear(Sequential)의 파라미터 dtype 추출 (model.half() 시 fp16)
+        _ld = next(self.history_fusion_linear.parameters()).dtype
+        sampled_fusion = self.history_fusion_linear(sampled_fusion.to(_ld)).to(_dtype)
+        sampled_bg_fusion = self.history_fusion_bg_linear(sampled_bg_fusion.to(_ld)).to(_dtype)
         sampled_fusion = sampled_fusion.permute(0, 2, 1)
         sampled_bg_fusion = sampled_bg_fusion.permute(0, 2, 1)
 
