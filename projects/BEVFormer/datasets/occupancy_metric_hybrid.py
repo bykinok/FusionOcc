@@ -40,8 +40,7 @@ class OccupancyMetricHybrid(BaseMetric):
                  eval_metric: str = 'miou',
                  sort_by_timestamp: bool = True,  # BEVFormer dataset sorts by timestamp (line 100 in nuscenes_occ.py)
                  collect_device='cpu', 
-                 prefix=None,
-                 compute_uncertainty_metrics: bool = False):
+                 prefix=None):
         super().__init__(collect_device=collect_device, prefix=prefix)
         
         self.dataset_name = dataset_name
@@ -49,7 +48,6 @@ class OccupancyMetricHybrid(BaseMetric):
         self.class_names = class_names or []
         self.eval_metric = eval_metric
         self.sort_by_timestamp = sort_by_timestamp
-        self.compute_uncertainty_metrics = compute_uncertainty_metrics
         
         # Import STCOcc metric directly without triggering registry conflicts
         import importlib.util
@@ -106,8 +104,7 @@ class OccupancyMetricHybrid(BaseMetric):
             eval_metric=eval_metric,
             sort_by_timestamp=self.sort_by_timestamp,  # Use config value (default: True for BEVFormer)
             collect_device=collect_device,
-            prefix=prefix,
-            compute_uncertainty_metrics=compute_uncertainty_metrics,
+            prefix=prefix
         )
         
         # CRITICAL: Convert BEVFormer's 'occ_gt_path' to STCOcc's expected 'occ3d_gt_path'
@@ -119,7 +116,7 @@ class OccupancyMetricHybrid(BaseMetric):
                     info['occ3d_gt_path'] = info['occ_gt_path']
         
         print(f"[OccupancyMetricHybrid] Initialized with STCOcc metric for {dataset_name} "
-              f"eval_metric={eval_metric}, sort_by_timestamp={self.sort_by_timestamp}, compute_uncertainty_metrics={self.compute_uncertainty_metrics}")
+              f"with eval_metric={eval_metric}, sort_by_timestamp={self.sort_by_timestamp}")
     
     def reset(self):
         """Reset evaluation metrics."""
@@ -159,8 +156,7 @@ class OccupancyMetricHybrid(BaseMetric):
         
         # CRITICAL: MMEngine gathers this metric's self.results, not stcocc_metric.results.
         # So we must append to self.results here; otherwise compute_metrics receives [].
-        # When compute_uncertainty_metrics=False, do NOT include uncertainty/softmax in pred_dict
-        # to avoid OOM (3023 samples × ~23MB softmax_probs each would be collected on rank0).
+        # Include uncertainty keys so STCOcc metric can compute AUROC/FPR95.
         for data_sample in data_samples:
             occ = data_sample.get('occ_results') if isinstance(data_sample, dict) else getattr(data_sample, 'occ_results', None)
             idx = data_sample.get('index') if isinstance(data_sample, dict) else getattr(data_sample, 'index', None)
@@ -168,16 +164,16 @@ class OccupancyMetricHybrid(BaseMetric):
                 pred_dict = {'occ_results': occ, 'index': idx}
                 if isinstance(data_sample, dict) and 'flow_results' in data_sample:
                     pred_dict['flow_results'] = data_sample['flow_results']
-                if self.compute_uncertainty_metrics and isinstance(data_sample, dict):
-                    if 'uncertainty_msp' in data_sample:
-                        u = data_sample['uncertainty_msp']
-                        pred_dict['uncertainty_msp'] = [u] if not isinstance(u, (list, tuple)) else u
-                    if 'uncertainty_entropy' in data_sample:
-                        u = data_sample['uncertainty_entropy']
-                        pred_dict['uncertainty_entropy'] = [u] if not isinstance(u, (list, tuple)) else u
-                    if 'softmax_probs' in data_sample:
-                        p = data_sample['softmax_probs']
-                        pred_dict['softmax_probs'] = [p] if not isinstance(p, (list, tuple)) else p
+                # STCOcc expects list of arrays (one per sample); BEVFormer often has one sample per batch
+                if isinstance(data_sample, dict) and 'uncertainty_msp' in data_sample:
+                    u = data_sample['uncertainty_msp']
+                    pred_dict['uncertainty_msp'] = [u] if not isinstance(u, (list, tuple)) else u
+                if isinstance(data_sample, dict) and 'uncertainty_entropy' in data_sample:
+                    u = data_sample['uncertainty_entropy']
+                    pred_dict['uncertainty_entropy'] = [u] if not isinstance(u, (list, tuple)) else u
+                if isinstance(data_sample, dict) and 'softmax_probs' in data_sample:
+                    p = data_sample['softmax_probs']
+                    pred_dict['softmax_probs'] = [p] if not isinstance(p, (list, tuple)) else p
                 self.results.append(pred_dict)
     
     def compute_metrics(self, results: list) -> Dict[str, float]:
