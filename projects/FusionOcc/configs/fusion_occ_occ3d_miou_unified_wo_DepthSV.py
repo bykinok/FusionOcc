@@ -283,6 +283,7 @@ optim_wrapper = dict(
     paramwise_cfg=dict(
         custom_keys={
             'img_backbone': dict(lr_mult=0.1),
+            'img_view_transformer': dict(lr_mult=0.1),
         }),
     clip_grad=dict(max_norm=35, norm_type=2),
     accumulative_counts=8)
