@@ -254,6 +254,39 @@ class SSC_RS(MVXTwoStageDetector):
         elif mode == 'predict':
             # Inference mode: return list of data_samples
             result = self.forward_test(**kwargs)
+
+            # export_occ_logits 모드: temperature scaling용 raw logits + GT 반환
+            # output_voxels shape: (B, C, X, Y, Z) — channels-first
+            # export_occ_logits.py 기대 형식:
+            #   occ_logits: (X, Y, Z, C) numpy  ← output_voxels[0] permute(1,2,3,0)
+            #   voxel_semantics: (X, Y, Z) numpy
+            #   mask_camera: (X, Y, Z) bool numpy
+            if getattr(self, 'export_occ_logits', False) and 'output_voxels' in result:
+                output_voxels = result['output_voxels']  # (B, C, X, Y, Z)
+                target = result.get('target_voxels')     # (B, X, Y, Z)
+                img_metas = kwargs.get('img_metas', None)
+
+                export_output = {
+                    'occ_logits': output_voxels[0].permute(1, 2, 3, 0).cpu().numpy(),  # (X, Y, Z, C)
+                }
+                if target is not None:
+                    vs = target[0]
+                    export_output['voxel_semantics'] = (
+                        vs.cpu().numpy() if hasattr(vs, 'cpu') else np.asarray(vs)
+                    )
+                # mask_camera: img_metas[0]['occ_path'] → labels.npz on-the-fly 로드
+                if isinstance(img_metas, list) and len(img_metas) > 0:
+                    meta0 = img_metas[0]
+                    occ_path = meta0.get('occ_path', '') if isinstance(meta0, dict) else ''
+                    if occ_path:
+                        import os
+                        occ_gt_label = os.path.join(occ_path.rstrip('/'), 'labels.npz')
+                        if os.path.exists(occ_gt_label):
+                            occ_labels = np.load(occ_gt_label)
+                            if 'mask_camera' in occ_labels.files:
+                                export_output['mask_camera'] = occ_labels['mask_camera'].astype(bool)
+                return [export_output]
+
             # Convert single result dict to list of data_samples for batch processing
             # Extract batch_size from output_voxels
             if 'output_voxels' in result and result['output_voxels'] is not None:

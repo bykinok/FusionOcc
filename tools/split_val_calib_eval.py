@@ -21,13 +21,42 @@ import os
 from collections import defaultdict
 
 
+def _patch_numpy_compat():
+    """numpy 2.x pkl을 numpy 1.x 환경에서 로드할 수 있도록 sys.modules 패치."""
+    import sys
+    import numpy as np
+    np_ver = tuple(int(x) for x in np.__version__.split('.')[:2])
+    if np_ver < (2, 0):
+        import numpy.core
+        import numpy.core.numeric
+        # numpy 2.x pkl이 참조하는 경로를 numpy 1.x 경로로 매핑
+        aliases = {
+            'numpy._core': numpy.core,
+            'numpy._core.numeric': numpy.core.numeric,
+            'numpy._core.multiarray': numpy.core.multiarray,
+            'numpy._core.umath': numpy.core.umath,
+            'numpy._core.fromnumeric': numpy.core.fromnumeric,
+            'numpy._core.numerictypes': numpy.core.numerictypes,
+            'numpy._core._methods': numpy.core._methods,
+        }
+        for key, mod in aliases.items():
+            if key not in sys.modules:
+                sys.modules[key] = mod
+
+
 def load_pkl(path):
+    import pickle
+    _patch_numpy_compat()
     try:
-        from mmengine.fileio import load
-        return load(path)
-    except ImportError:
-        import mmcv
-        return mmcv.load(path)
+        with open(path, 'rb') as f:
+            return pickle.load(f)
+    except Exception:
+        try:
+            from mmengine.fileio import load
+            return load(path)
+        except Exception:
+            import mmcv
+            return mmcv.load(path)
 
 
 def save_pkl(obj, path):

@@ -647,6 +647,26 @@ class STCOcc(CenterPoint):
         return_dict['occ_results'] = pred_voxel_semantic_cls.cpu().numpy().astype(np.uint8)
         return_dict['flow_results'] = return_pred_voxel_flows.cpu().numpy().astype(np.float16)
         return_dict['index'] = [img_meta.get('index', i) for i, img_meta in enumerate(img_metas)]
+
+        # export_occ_logits 모드: temperature scaling용 raw logits + GT를 return_dict에 추가
+        # pred_voxel_semantic shape: (B, W, H, Z, C) — 이미 channels-last, permute 불필요
+        # GT는 테스트 파이프라인이 로드하지 않으므로 occ_gt_path로 on-the-fly 로드
+        if getattr(self, 'export_occ_logits', False):
+            return_dict['occ_logits'] = pred_voxel_semantic[0].cpu().numpy()  # (W, H, Z, C)
+
+            # occ_gt_path: formating.py meta_keys → img_metas['occ_gt_path']
+            # DataContainer/list 래핑 대응: 리스트이면 첫 번째 원소를 꺼냄
+            occ_gt_path = img_metas[0].get('occ_gt_path') or img_metas[0].get('occ_path')
+            if isinstance(occ_gt_path, (list, tuple)):
+                occ_gt_path = occ_gt_path[0] if len(occ_gt_path) > 0 else None
+            if occ_gt_path is not None:
+                occ_gt_label = os.path.join(occ_gt_path, 'labels.npz')
+                if os.path.exists(occ_gt_label):
+                    occ_labels = np.load(occ_gt_label)
+                    return_dict['voxel_semantics'] = occ_labels['semantics'].astype(np.uint8)
+                    if 'mask_camera' in occ_labels.files:
+                        return_dict['mask_camera'] = occ_labels['mask_camera'].astype(bool)
+
         if self.save_results:
             sample_idx = [img_meta.get('sample_idx', i) for i, img_meta in enumerate(img_metas)]
             scene_name = [img_meta['scene_name'] for img_meta in img_metas]

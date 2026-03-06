@@ -138,6 +138,7 @@ class nuScenesDataset(Dataset):
         use_mask_camera_1_2=False,
         use_mask_camera_1_4=False,
         use_mask_camera_1_8=False,
+        ann_file=None,
     ):
         super().__init__()
         
@@ -196,7 +197,9 @@ class nuScenesDataset(Dataset):
         self.use_mask_camera_1_4 = use_mask_camera_1_4
         self.use_mask_camera_1_8 = use_mask_camera_1_8
 
-        if split == 'train':
+        if ann_file is not None:
+            data_path = ann_file
+        elif split == 'train':
             data_path = os.path.join(data_root, 'nuscenes_occ_infos_train.pkl')
         elif split == 'val':
             data_path = os.path.join(data_root, 'nuscenes_occ_infos_val.pkl')
@@ -865,6 +868,7 @@ class nuScenesDataset(Dataset):
             target_1_8=target_1_8,
             if_scene_useful = if_scene_useful,
             sample_idx = index,  # Add sample index for evaluation
+            occ_path = info.get('occ_path', ''),  # export_occ_logits용: labels.npz 경로
             )
 
         return points, target, meta_dict, img_inputs, radar_pc

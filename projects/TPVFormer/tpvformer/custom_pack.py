@@ -29,7 +29,8 @@ class TPVPack3DDetInputs(Pack3DDetInputs):
             # Extend meta_keys with token, scene_name and scene_token
             if not hasattr(self, 'meta_keys') or self.meta_keys is None:
                 self.meta_keys = ('lidar2img', 'lidar_path', 'sample_idx', 'pts_filename', 
-                                  'img_shape', 'token', 'scene_name', 'scene_token')
+                                  'img_shape', 'token', 'scene_name', 'scene_token',
+                                  'mask_camera')
             else:
                 # Convert to list, add new keys, convert back to tuple
                 meta_keys_list = list(self.meta_keys)
@@ -39,8 +40,13 @@ class TPVPack3DDetInputs(Pack3DDetInputs):
                     meta_keys_list.append('scene_name')
                 if 'scene_token' not in meta_keys_list:
                     meta_keys_list.append('scene_token')
+                if 'mask_camera' not in meta_keys_list:
+                    meta_keys_list.append('mask_camera')
                 self.meta_keys = tuple(meta_keys_list)
         else:
-            # Use provided meta_keys
-            super().__init__(meta_keys=meta_keys, **kwargs)
+            # Use provided meta_keys, but always ensure mask_camera is included
+            meta_keys_list = list(meta_keys)
+            if 'mask_camera' not in meta_keys_list:
+                meta_keys_list.append('mask_camera')
+            super().__init__(meta_keys=tuple(meta_keys_list), **kwargs)
 

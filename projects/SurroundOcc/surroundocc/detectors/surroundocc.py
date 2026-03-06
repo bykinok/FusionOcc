@@ -352,6 +352,29 @@ class SurroundOcc(Base3DDetector):
         if isinstance(output, list) and len(output) > 0 and isinstance(output[0], dict) and 'occ_results' in output[0]:
             # STCOcc format detected - directly store in batch_data_samples
             return_dict = output[0]
+
+            # export_occ_logits 모드: raw logits + GT를 return_dict에 추가하여 반환
+            # export_occ_logits.py 기대 형식:
+            #   occ_logits: (H, W, Z, C) numpy  ← pred_occ (B,C,H,W,Z) permute
+            #   voxel_semantics: (H, W, Z) numpy
+            #   mask_camera: (H, W, Z) bool numpy
+            if getattr(self, 'export_occ_logits', False) and 'occ_logits_raw' in return_dict:
+                occ_logits_raw = return_dict.pop('occ_logits_raw')  # (B, C, H, W, Z) tensor
+                data_sample = batch_data_samples[0]
+                # (C, H, W, Z) → (H, W, Z, C) numpy
+                return_dict['occ_logits'] = (
+                    occ_logits_raw[0].permute(1, 2, 3, 0).cpu().numpy()
+                )
+                # voxel_semantics: formating.py meta_keys → metainfo['voxel_semantics']
+                vsm = data_sample.metainfo.get('voxel_semantics') if hasattr(data_sample, 'metainfo') else None
+                if vsm is not None:
+                    return_dict['voxel_semantics'] = np.asarray(vsm)
+                # mask_camera: loading.py → formating.py meta_keys → metainfo['mask_camera']
+                mc = data_sample.metainfo.get('mask_camera') if hasattr(data_sample, 'metainfo') else None
+                if mc is not None:
+                    return_dict['mask_camera'] = np.asarray(mc).astype(bool)
+                return [return_dict]
+
             occ_results = return_dict['occ_results']  # numpy array (B, H, W, Z)
             indices = return_dict.get('index', list(range(len(batch_data_samples))))
             
@@ -541,11 +564,16 @@ class SurroundOcc(Base3DDetector):
             # Create return dict in STCOcc format
             return_dict = dict()
             return_dict['occ_results'] = pred_occ_np
-            
+
             # Return index list for metric matching
             return_dict['index'] = [img_meta.get('index', i) 
                                     for i, img_meta in enumerate(img_metas)]
-            
+
+            # export_occ_logits 모드: raw logits 보존 (predict()에서 꺼내 씀)
+            # pred_occ shape: (B, C, H, W, Z) — channels-first
+            if getattr(self, 'export_occ_logits', False):
+                return_dict['occ_logits_raw'] = pred_occ
+
             return [return_dict]  # Return as list of dict (STCOcc format)
         
         return output

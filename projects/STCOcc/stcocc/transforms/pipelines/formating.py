@@ -147,7 +147,7 @@ class Collect3D(object):
                    'pcd_scale_factor', 'pcd_rotation', 'pcd_rotation_angle',
                    'pts_filename', 'transformation_3d_flow', 'trans_mat', 'index',
                    'sequence_group_idx', 'curr_to_prev_lidar_rt', 'curr_to_prev_ego_rt', 'start_of_sequence','can_bus', 'scene_name',
-                   'affine_aug')):
+                   'affine_aug', 'occ_gt_path', 'occ_path')):
         self.keys = keys
         self.meta_keys = meta_keys
 

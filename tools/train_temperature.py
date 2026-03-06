@@ -59,7 +59,7 @@ def nll_temperature_minibatch(
 def load_logits_gt_from_npz(path: str):
     """Load logits, gt, and optional mask from a single .npz file."""
     data = np.load(path, allow_pickle=True)
-    logits = data['logits'].astype(np.float64)   # (N, C) or (H,W,Z,C) -> flatten to (N,C)
+    logits = data['logits'].astype(np.float32)   # (N, C) or (H,W,Z,C) -> flatten to (N,C)
     gt = data['gt'].astype(np.int64).ravel()
     if 'mask' in data:
         mask = np.asarray(data['mask']).ravel().astype(bool)

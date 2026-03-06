@@ -1479,6 +1479,28 @@ class FusionOCC(FusionDepthSeg):
             if self.use_predicter:
                 occ_pred = self.predicter(occ_pred)
         
+        # export_occ_logits 모드: temperature scaling용 raw logits + GT 반환
+        # occ_pred shape: (B, W, H, D, C) — channels-last, permute 불필요
+        # export_occ_logits.py 기대 형식:
+        #   occ_logits: (..., C) numpy  ← occ_pred[0] (W, H, D, C)
+        #   voxel_semantics: (W, H, D) numpy
+        #   mask_camera: (W, H, D) bool numpy
+        if getattr(self, 'export_occ_logits', False):
+            export_output = {
+                'occ_logits': occ_pred[0].cpu().numpy(),  # (W, H, D, C)
+            }
+            if voxel_semantics is not None:
+                vs = voxel_semantics[0]
+                export_output['voxel_semantics'] = (
+                    vs.cpu().numpy() if hasattr(vs, 'cpu') else np.asarray(vs)
+                )
+            if mask_camera is not None:
+                mc = mask_camera[0]
+                export_output['mask_camera'] = (
+                    mc.cpu().numpy().astype(bool) if hasattr(mc, 'cpu') else np.asarray(mc).astype(bool)
+                )
+            return [export_output]
+
         # Apply softmax before argmax (like in simple_test)
         occ_score = occ_pred.softmax(-1)  # (B, W, H, D, num_classes)
         

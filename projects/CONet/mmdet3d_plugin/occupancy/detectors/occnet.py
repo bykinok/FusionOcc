@@ -1,3 +1,4 @@
+import os
 import torch
 import collections 
 import torch.nn.functional as F
@@ -820,7 +821,31 @@ class OccNet(BaseModel):
         else:
             gt_occ_np = gt_occ.cpu().numpy()
 
-        # breakpoint()
+        # export_occ_logits 모드: temperature scaling용 raw logits + GT 반환
+        # export_occ_logits.py 기대 형식:
+        #   occ_logits: (H, W, Z, C) numpy  ← pred_interpolated[0] (C,H,W,Z) permute
+        #   voxel_semantics: (H, W, Z) numpy
+        #   mask_camera: (H, W, Z) bool numpy
+        if getattr(self, 'export_occ_logits', False):
+            occ_logits_np = pred_interpolated[0].permute(1, 2, 3, 0).cpu().numpy()
+
+            mask_camera_np = None
+            if img_metas is not None and len(img_metas) > 0:
+                occ_path_meta = img_metas[0].get('occ_path') if isinstance(img_metas[0], dict) else None
+                if occ_path_meta is not None:
+                    occ_gt_label = os.path.join(occ_path_meta, 'labels.npz')
+                    if os.path.exists(occ_gt_label):
+                        occ_labels = np.load(occ_gt_label)
+                        if 'mask_camera' in occ_labels.files:
+                            mask_camera_np = occ_labels['mask_camera'].astype(bool)
+
+            export_output = {
+                'occ_logits': occ_logits_np,
+                'voxel_semantics': gt_occ_np,
+            }
+            if mask_camera_np is not None:
+                export_output['mask_camera'] = mask_camera_np
+            return [export_output]
 
         # Extract integer index from img_metas for tracking (OccupancyMetricHybrid requires 'index')
         idx = 0

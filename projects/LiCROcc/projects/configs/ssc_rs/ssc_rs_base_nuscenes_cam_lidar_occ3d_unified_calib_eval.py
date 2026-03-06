@@ -268,6 +268,7 @@ test_dataloader = dict(
     dataset=dict(
         type=dataset_type,
         split="val",
+        ann_file=data_root + 'nuscenes_occ_infos_val_eval.pkl',
         test_mode=True,
         data_root=data_root,
         occ_root=occ_root,

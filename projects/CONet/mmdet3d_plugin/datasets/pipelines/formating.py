@@ -101,7 +101,7 @@ class Collect3D(BaseTransform):
                            'img_norm_cfg', 'pcd_trans', 'sample_idx',
                            'pcd_scale_factor', 'pcd_rotation', 'pts_filename',
                            'transformation_3d_flow', 'scene_token', 'can_bus',
-                           'lidar_token', 'pc_range', 'occ_size')):
+                           'lidar_token', 'pc_range', 'occ_size', 'occ_path')):
         self.keys = keys
         self.meta_keys = meta_keys
 

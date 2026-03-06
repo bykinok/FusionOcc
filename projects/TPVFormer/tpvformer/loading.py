@@ -935,6 +935,7 @@ class LoadOccupancy(BaseTransform):
             occ_3d = np.load(occ_3d_path)
             occ_3d_semantic = occ_3d['semantics']  # (200, 200, 16)
             occ_3d_cam_mask = occ_3d['mask_camera']
+            results['mask_camera'] = occ_3d_cam_mask.astype(bool)
             
             # ✅ Use Occ3D standard format (same as STCOcc/FusionOcc)
             # Occ3D standard format:

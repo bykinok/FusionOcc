@@ -204,6 +204,7 @@ class LoadOccupancy(BaseTransform):
                 occ_3d = np.load(occ3d_gt_label)
                 occ_3d_semantic = occ_3d['semantics']  # (200, 200, 16), occ3d format: 0=others, 1-16=semantic, 17=free
                 occ_3d_cam_mask = occ_3d['mask_camera']  # (200, 200, 16) boolean mask
+                results['mask_camera'] = occ_3d_cam_mask.astype(bool)
 
                 # gt_occ = occ_3d_semantic.astype(np.int32)               
                 

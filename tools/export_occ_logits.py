@@ -59,6 +59,23 @@ def main():
     if cfg.get('work_dir', None) is None:
         cfg.work_dir = os.path.join('./work_dirs', os.path.splitext(os.path.basename(args.config))[0])
     cfg.load_from = args.checkpoint
+
+    # DistributedSampler는 단일 프로세스에서 init_process_group 없이 동작하지 않으므로
+    # DefaultSampler(shuffle=False)로 교체한다.
+    _DIST_SAMPLER_TYPES = {'DistributedSampler', 'DistributedGroupSampler',
+                           'InfiniteSampler'}
+
+    def _replace_sampler(dl_cfg):
+        if not isinstance(dl_cfg, dict):
+            return
+        sampler = dl_cfg.get('sampler', {})
+        if isinstance(sampler, dict) and sampler.get('type') in _DIST_SAMPLER_TYPES:
+            dl_cfg['sampler'] = dict(type='DefaultSampler', shuffle=False)
+
+    for key in ('test_dataloader', 'val_dataloader'):
+        if hasattr(cfg, key):
+            _replace_sampler(getattr(cfg, key))
+
     runner = Runner.from_cfg(cfg)
     from mmengine.runner import load_checkpoint
     load_checkpoint(runner.model, args.checkpoint, map_location='cpu', strict=False)
