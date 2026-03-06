@@ -62,6 +62,7 @@ model = dict(
     use_grid_mask=use_grid_mask,
     use_semantic=use_semantic,
     dataset_name=dataset_name,
+    temperature=1.9126,  # Temperature scaling (NLL-calibrated on val_calib) — update after tools/train_temperature.py
     img_backbone=dict(
        type='ResNet',
        depth=101,

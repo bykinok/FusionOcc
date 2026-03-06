@@ -257,6 +257,7 @@ model = dict(
     type='TPVFormer',
     dataset_name=dataset_name,  # occ3d 형식 사용 시 predict에서 STCOcc 형식으로 출력
     save_results=False,  # Save prediction results to disk
+    temperature=1.8906,  # Temperature scaling (NLL-calibrated on val_calib) — update after tools/train_temperature.py
     # 원본과 동일한 전처리: data pipeline에서 정규화 수행, preprocessor에서는 수행하지 않음
     data_preprocessor=dict(
         type='TPVFormerDataPreprocessor',

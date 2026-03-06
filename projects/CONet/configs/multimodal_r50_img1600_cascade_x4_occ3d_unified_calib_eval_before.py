@@ -111,6 +111,7 @@ voxel_out_indices = (0, 1, 2, 3)
 # Model configuration
 model = dict(
     type='OccNet',
+    temperature=1.0,  # Temperature scaling (pre-calibration baseline)
     data_preprocessor=dict(
         type='Det3DDataPreprocessor',
         voxel=True,

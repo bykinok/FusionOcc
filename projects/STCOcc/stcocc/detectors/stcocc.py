@@ -49,6 +49,7 @@ class STCOcc(CenterPoint):
                  use_ms_feats=False,
                  train_top_k=None,
                  val_top_k=None,
+                 temperature=None,
                  save_results=False,
                  **kwargs):
         super(STCOcc, self).__init__(**kwargs)
@@ -68,6 +69,7 @@ class STCOcc(CenterPoint):
         self.background_idx = background_idx
         self.train_flow = train_flow
         self.use_ms_feats = use_ms_feats
+        self.temperature = temperature
         self.save_results = save_results
         self.scene_can_bus_info = dict()
         self.scene_loss = dict()
@@ -635,6 +637,8 @@ class STCOcc(CenterPoint):
 
         # ---------------------- forward ------------------------------
         pred_voxel_semantic, pred_voxel_feats = self.occupancy_head(voxel_feat, last_occ_pred=last_occ_pred)
+        if self.temperature is not None and self.temperature != 1.0:
+            pred_voxel_semantic = pred_voxel_semantic / self.temperature
         pred_voxel_semantic_cls = pred_voxel_semantic.softmax(-1).argmax(-1)
         if self.with_specific_component('flow_head'):
             pred_voxel_flows, foreground_mask = self.flow_head(voxel_feat, pred_voxel_semantic)
@@ -647,6 +651,15 @@ class STCOcc(CenterPoint):
         return_dict['occ_results'] = pred_voxel_semantic_cls.cpu().numpy().astype(np.uint8)
         return_dict['flow_results'] = return_pred_voxel_flows.cpu().numpy().astype(np.float16)
         return_dict['index'] = [img_meta.get('index', i) for i, img_meta in enumerate(img_metas)]
+
+        # Uncertainty estimation (always computed, matching BEVFormer behaviour).
+        # pred_voxel_semantic: (B, W, H, Z, C) channels-last, already temperature-scaled.
+        with torch.no_grad():
+            softmax_np = pred_voxel_semantic.float().softmax(-1)[0].cpu().numpy().astype(np.float32)  # (W, H, Z, C)
+            return_dict['uncertainty_msp'] = (1.0 - softmax_np.max(axis=-1)).astype(np.float32)
+            _eps = 1e-8
+            return_dict['uncertainty_entropy'] = (-(softmax_np * np.log(softmax_np + _eps)).sum(axis=-1)).astype(np.float32)
+            return_dict['softmax_probs'] = softmax_np  # (W, H, Z, C)
 
         # export_occ_logits 모드: temperature scaling용 raw logits + GT를 return_dict에 추가
         # pred_voxel_semantic shape: (B, W, H, Z, C) — 이미 channels-last, permute 불필요

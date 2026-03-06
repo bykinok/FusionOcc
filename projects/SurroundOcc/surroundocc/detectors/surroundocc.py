@@ -86,6 +86,7 @@ class SurroundOcc(Base3DDetector):
                  use_semantic: bool = True,
                  is_vis: bool = False,
                  dataset_name: Optional[str] = None,
+                 temperature: Optional[float] = None,
                  init_cfg: Optional[dict] = None,
                  data_preprocessor: Optional[dict] = None,
                  **kwargs):
@@ -149,6 +150,7 @@ class SurroundOcc(Base3DDetector):
         self.use_semantic = use_semantic
         self.is_vis = is_vis
         self.dataset_name = dataset_name
+        self.temperature = temperature
     
     @property
     def with_img_backbone(self):
@@ -387,6 +389,10 @@ class SurroundOcc(Base3DDetector):
                         # Store index from simple_test
                         if i < len(indices):
                             data_sample['index'] = indices[i]
+                        # Transfer uncertainty fields from simple_test return_dict
+                        for _uk in ('uncertainty_msp', 'uncertainty_entropy', 'softmax_probs'):
+                            if _uk in return_dict:
+                                data_sample[_uk] = return_dict[_uk]
                     else:
                         # Keep batch dimension for object type too
                         data_sample.occ_results = np.expand_dims(occ_results[i], axis=0)
@@ -396,6 +402,10 @@ class SurroundOcc(Base3DDetector):
                                 data_sample.metainfo['index'] = indices[i]
                             else:
                                 data_sample.set_metainfo({'index': indices[i]})
+                        # Transfer uncertainty fields as attributes for object-type data_samples
+                        for _uk in ('uncertainty_msp', 'uncertainty_entropy', 'softmax_probs'):
+                            if _uk in return_dict:
+                                setattr(data_sample, _uk, return_dict[_uk])
             
             return batch_data_samples
         
@@ -551,6 +561,10 @@ class SurroundOcc(Base3DDetector):
             else:
                 pred_occ = occ_preds
             
+            # Temperature scaling for calibration (no effect on argmax / mIoU).
+            if getattr(self, 'temperature', None) is not None and self.temperature != 1.0:
+                pred_occ = pred_occ / self.temperature
+
             # Get argmax prediction for semantic occupancy
             if self.use_semantic:
                 pred_softmax = torch.softmax(pred_occ, dim=1)
@@ -568,6 +582,17 @@ class SurroundOcc(Base3DDetector):
             # Return index list for metric matching
             return_dict['index'] = [img_meta.get('index', i) 
                                     for i, img_meta in enumerate(img_metas)]
+
+            # Uncertainty estimation — always computed in occ3d mode.
+            # pred_occ: (B, C, H, W, Z) channels-first, already temperature-scaled.
+            if self.use_semantic:
+                with torch.no_grad():
+                    # (B, C, H, W, Z) → (H, W, Z, C) for [0]
+                    softmax_np = pred_softmax[0].permute(1, 2, 3, 0).cpu().numpy().astype(np.float32)
+                    return_dict['uncertainty_msp'] = (1.0 - softmax_np.max(axis=-1)).astype(np.float32)
+                    _eps = 1e-8
+                    return_dict['uncertainty_entropy'] = (-(softmax_np * np.log(softmax_np + _eps)).sum(axis=-1)).astype(np.float32)
+                    return_dict['softmax_probs'] = softmax_np  # (H, W, Z, C)
 
             # export_occ_logits 모드: raw logits 보존 (predict()에서 꺼내 씀)
             # pred_occ shape: (B, C, H, W, Z) — channels-first

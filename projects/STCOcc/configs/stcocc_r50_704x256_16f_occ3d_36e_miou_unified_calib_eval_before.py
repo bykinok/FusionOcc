@@ -122,6 +122,7 @@ model = dict(
     bev_w=bev_h_,
     bev_h=bev_w_,
     bev_z=bev_z,
+    temperature=1.0,  # Temperature scaling (pre-calibration baseline)
     train_top_k=train_top_k,
     val_top_k=val_top_k,
     class_weights=class_weights,

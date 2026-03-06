@@ -25,6 +25,7 @@ class TPVFormer(Base3DSegmentor):
                  ce_input='voxel',
                  dataset_name=None,  # 'occ3d' or None for traditional GT
                  save_results=False,  # Save prediction results to disk
+                 temperature=None,  # Temperature scaling for calibration (None or 1.0 = no scaling)
                  depth_supervision=None,  # dict(enabled=True, grid_config=..., downsample=..., loss_weight=..., feature_level=...)
                  init_cfg=None):
 
@@ -46,6 +47,7 @@ class TPVFormer(Base3DSegmentor):
         self.ce_loss_func = nn.CrossEntropyLoss(ignore_index=ignore_label)
         self.dataset_name = dataset_name  # Store dataset_name for predict method
         self.save_results = save_results  # Save prediction results to disk
+        self.temperature = temperature  # Temperature scaling for calibration
 
         # Auxiliary depth supervision (ego-frame consistent with TPVFormer lidar2img=ego2img)
         self.depth_supervision = depth_supervision or dict(enabled=False)
@@ -390,7 +392,12 @@ class TPVFormer(Base3DSegmentor):
                 
                 # Get batch size
                 batch_size = logits_vox.shape[0]
-                
+
+                # Temperature scaling for calibration (logits / T → sharper/softer softmax)
+                # Does not affect argmax (mIoU), but calibrates softmax probs / uncertainty metrics.
+                if self.temperature is not None and self.temperature != 1.0:
+                    logits_vox = logits_vox / self.temperature
+
                 # Convert to numpy and get argmax
                 pred_occ = torch.argmax(logits_vox, dim=1)  # (B, W, H, Z)
                 pred_occ_np = pred_occ.cpu().numpy().astype(np.uint8)
@@ -403,14 +410,39 @@ class TPVFormer(Base3DSegmentor):
                     else:
                         img_metas.append({})
                 
-                # Create STCOcc-compatible return format
+                # Create return format matching BEVFormer's test_step output:
+                #   occ_results   : list of per-sample (W,H,Z) uint8 arrays
+                #   index         : list of per-sample integer indices
+                #   uncertainty_* : per-sample (W,H,Z) float32 array  → SavePredictionsEvaluator
+                #                   wraps it as [u], giving pkl shape (W,H,Z) at [0]
+                #   softmax_probs : per-sample (W,H,Z,C) float32 array → wrapped as [p]
+                # This is identical to BEVFormer so compute_metrics_from_file.py works unchanged.
                 return_dict = dict()
-                return_dict['occ_results'] = pred_occ_np  # (B, W, H, Z) numpy array
-                # CRITICAL: Use sample_idx if index is not available
+                return_dict['occ_results'] = list(pred_occ_np)  # [(W,H,Z), …] per-sample list
                 return_dict['index'] = [
                     img_meta.get('index', img_meta.get('sample_idx', i)) if isinstance(img_meta, dict) else i
                     for i, img_meta in enumerate(img_metas)
                 ]
+
+                # Uncertainty estimation — always computed in occ3d mode, matching BEVFormer's
+                # hardcoded return_uncertainty=True in simple_test_pts().
+                # Use --save-predictions-only to avoid accumulating softmax_probs in memory
+                # across the full validation set.
+                # NOTE: batch_size=1 for testing, so [0] indexing is safe.
+                with torch.no_grad():
+                    # (B, C, W, H, Z) → (B, W, H, Z, C) in float32 for numerical stability
+                    softmax_vox = F.softmax(logits_vox.float(), dim=1)
+                    softmax_np = softmax_vox.permute(0, 2, 3, 4, 1).cpu().numpy().astype(np.float32)
+
+                    # Per-sample arrays (squeeze batch dim) — shape (W, H, Z) / (W, H, Z, C)
+                    # SavePredictionsEvaluator wraps scalar arrays as [arr], giving pkl [0].shape
+                    # identical to BEVFormer: uncertainty_msp[0].shape == (W,H,Z)
+                    return_dict['uncertainty_msp'] = (1.0 - softmax_np[0].max(axis=-1)).astype(np.float32)
+                    eps = 1e-8
+                    return_dict['uncertainty_entropy'] = (
+                        -(softmax_np[0] * np.log(softmax_np[0] + eps)).sum(axis=-1)
+                    ).astype(np.float32)
+                    return_dict['softmax_probs'] = softmax_np[0]  # (W, H, Z, C)
                 
                 # Save results to disk (following STCOcc implementation)
                 if self.save_results:
@@ -443,7 +475,35 @@ class TPVFormer(Base3DSegmentor):
                     else:
                         data_sample.pred_logits_vox = logits_vox[i]
                     data_sample.pred_occ_sem_seg = pred_occ[i]
-                
+
+                # export_occ_logits 모드: temperature scaling용 raw logits + GT를 return_dict에 추가
+                # export_occ_logits.py가 기대하는 형식:
+                #   occ_logits: (W, H, Z, C) numpy array  ← logits_vox (B,C,W,H,Z)를 permute
+                #   voxel_semantics: (W, H, Z) numpy array
+                #   mask_camera: (W, H, Z) bool numpy array
+                if getattr(self, 'export_occ_logits', False):
+                    for i, data_sample in enumerate(batch_data_samples):
+                        # logits_vox[i]: (C, W, H, Z) → (W, H, Z, C)
+                        return_dict['occ_logits'] = (
+                            logits_vox[i].permute(1, 2, 3, 0).cpu().numpy()
+                        )
+
+                        # voxel_semantics: gt_pts_seg.voxel_semantic_mask
+                        gt_pts_seg = getattr(data_sample, 'gt_pts_seg', None)
+                        if gt_pts_seg is not None and hasattr(gt_pts_seg, 'voxel_semantic_mask'):
+                            vsm = gt_pts_seg.voxel_semantic_mask
+                            return_dict['voxel_semantics'] = (
+                                vsm.cpu().numpy() if isinstance(vsm, torch.Tensor) else np.asarray(vsm)
+                            )
+
+                        # mask_camera: loading.py → custom_pack.py meta_keys → metainfo
+                        mc = data_sample.metainfo.get('mask_camera') if hasattr(data_sample, 'metainfo') else None
+                        if mc is not None:
+                            return_dict['mask_camera'] = np.asarray(mc).astype(bool)
+
+                        # batch_size=1 eval 기준으로 첫 번째 샘플만 처리
+                        break
+
                 return [return_dict]  # Return list of dict (STCOcc format)
             else:
                 # 기존 형식으로 반환 (traditional GT용)

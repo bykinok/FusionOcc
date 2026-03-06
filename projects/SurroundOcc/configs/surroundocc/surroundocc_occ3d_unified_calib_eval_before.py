@@ -62,6 +62,7 @@ model = dict(
     use_grid_mask=use_grid_mask,
     use_semantic=use_semantic,
     dataset_name=dataset_name,
+    temperature=1.0,  # Temperature scaling (pre-calibration baseline)
     img_backbone=dict(
        type='ResNet',
        depth=101,

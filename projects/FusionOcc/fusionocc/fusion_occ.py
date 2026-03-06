@@ -446,6 +446,7 @@ class FusionOCC(FusionDepthSeg):
                  img_bev_encoder_backbone=None,
                  img_bev_encoder_neck=None,
                  data_preprocessor=None,
+                 temperature=None,
                  **kwargs):
         super(FusionOCC, self).__init__(
             img_bev_encoder_backbone=img_bev_encoder_backbone,
@@ -453,6 +454,7 @@ class FusionOCC(FusionDepthSeg):
             data_preprocessor=data_preprocessor,
             **kwargs)
         
+        self.temperature = temperature
         self.voxel_size = voxel_size
         self.lidar_out_channel = lidar_out_channel
         self.lidar_in_channel = lidar_in_channel
@@ -1501,6 +1503,10 @@ class FusionOCC(FusionDepthSeg):
                 )
             return [export_output]
 
+        # Temperature scaling for calibration (no effect on argmax / mIoU).
+        if self.temperature is not None and self.temperature != 1.0:
+            occ_pred = occ_pred / self.temperature
+
         # Apply softmax before argmax (like in simple_test)
         occ_score = occ_pred.softmax(-1)  # (B, W, H, D, num_classes)
         
@@ -1539,6 +1545,12 @@ class FusionOCC(FusionDepthSeg):
             batch_indices = [self._test_sample_idx + i for i in range(batch_size)]
         self._test_sample_idx += batch_size
 
+        # Uncertainty estimation — always computed, matching BEVFormer behaviour.
+        # occ_score: (B, W, H, D, C) channels-last, already temperature-scaled.
+        with torch.no_grad():
+            softmax_arr = occ_score.cpu().numpy().astype(np.float32)  # (B, W, H, D, C)
+            _eps_f = 1e-8
+
         for i in range(batch_size):
             data_sample = {}
             
@@ -1553,6 +1565,12 @@ class FusionOCC(FusionDepthSeg):
             # index must also be a LIST for consistent iteration; use real batch index from img_metas
             data_sample['occ_results'] = [occ_result]  # List format for STCOcc metric
             data_sample['index'] = [batch_indices[i]]   # Dataset index from batch (0, 1, 2, ...)
+
+            # Per-sample uncertainty (shape (W, H, D)); SavePredictionsEvaluator wraps as [arr]
+            sp_i = softmax_arr[i]  # (W, H, D, C)
+            data_sample['uncertainty_msp'] = (1.0 - sp_i.max(axis=-1)).astype(np.float32)
+            data_sample['uncertainty_entropy'] = (-(sp_i * np.log(sp_i + _eps_f)).sum(axis=-1)).astype(np.float32)
+            data_sample['softmax_probs'] = sp_i  # (W, H, D, C)
             
             # Add ground truth if available
             if voxel_semantics is not None:

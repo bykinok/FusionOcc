@@ -70,6 +70,7 @@ multi_adj_frame_id_cfg_lidar = (1, 7 + 1, 1)
 
 model = dict(
     type='FusionOCC',
+    temperature=1.0,  # Temperature scaling (pre-calibration baseline)
     data_preprocessor=None,  # Disable data_preprocessor - FormatDataSamples already handles data formatting
     lidar_in_channel=5,
     point_cloud_range=point_cloud_range,

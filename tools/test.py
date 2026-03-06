@@ -227,8 +227,19 @@ def main():
 
         # If --save-predictions: add SavePredictionsEvaluator. Optionally skip other metrics to save memory.
         if getattr(args, 'save_predictions', None):
-            import importlib
-            importlib.import_module('projects.BEVFormer.datasets.save_predictions_metric')
+            import importlib.util
+            # Load save_predictions_metric.py directly (bypasses BEVFormer package __init__.py)
+            # to avoid 'LearnedPositionalEncoding already registered' collision when another
+            # project (e.g. TPVFormer) has already registered the same module.
+            _metric_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'projects', 'BEVFormer', 'datasets', 'save_predictions_metric.py')
+            _spec = importlib.util.spec_from_file_location(
+                'projects.BEVFormer.datasets.save_predictions_metric', _metric_path)
+            assert _spec is not None and _spec.loader is not None, \
+                f"Cannot load save_predictions_metric from {_metric_path}"
+            _mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
             save_path = os.path.abspath(args.save_predictions)
             save_only = getattr(args, 'save_predictions_only', False)
             if save_only:

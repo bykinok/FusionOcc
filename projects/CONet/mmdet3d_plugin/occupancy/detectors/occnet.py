@@ -64,6 +64,7 @@ class OccNet(BaseModel):
             img_view_transformer=None,
             # BBox head
             pts_bbox_head=None,
+            temperature=None,
             **kwargs):
         
         super().__init__(**kwargs)
@@ -97,6 +98,7 @@ class OccNet(BaseModel):
         self.with_img_backbone = img_backbone is not None
         self.with_img_neck = img_neck is not None
         self.with_pts_bbox = pts_bbox_head is not None
+        self.temperature = temperature
     
     def image_encoder(self, img):
         """Image encoder (copied from original CONet_ori)."""
@@ -812,6 +814,8 @@ class OccNet(BaseModel):
         
         # Interpolate pred to gt size
         pred_interpolated = F.interpolate(pred_for_eval, size=list(gt_shape), mode='trilinear', align_corners=False).contiguous()
+        if self.temperature is not None and self.temperature != 1.0:
+            pred_interpolated = pred_interpolated / self.temperature
         # Take argmax to get class indices
         pred_occ_np = torch.argmax(pred_interpolated[0], dim=0).cpu().numpy()
         
@@ -855,6 +859,15 @@ class OccNet(BaseModel):
             elif isinstance(img_metas, dict):
                 idx = img_metas.get('index', 0)
 
+        # Uncertainty estimation — always computed, matching BEVFormer behaviour.
+        # pred_interpolated[0]: (C, H, W, D) channels-first, already temperature-scaled.
+        with torch.no_grad():
+            import torch.nn.functional as _F
+            softmax_np = _F.softmax(pred_interpolated[0].float(), dim=0).permute(1, 2, 3, 0).cpu().numpy().astype(np.float32)  # (H, W, D, C)
+            _uq_msp = (1.0 - softmax_np.max(axis=-1)).astype(np.float32)
+            _eps = 1e-8
+            _uq_ent = (-(softmax_np * np.log(softmax_np + _eps)).sum(axis=-1)).astype(np.float32)
+
         # occ_results must be a list of per-sample arrays (H, W, D) so that metric's occ_results[i] is (200,200,16)
         # SurroundOcc passes (B,H,W,Z) and metric uses occ_results[i]; CONet batch=1 so pass [pred_occ_np]
         test_output = {
@@ -866,6 +879,9 @@ class OccNet(BaseModel):
             'occ_results': [pred_occ_np],  # List of (H,W,D) per sample so pr_semantics stays (200,200,16)
             'index': [idx],  # List for STCOcc: data_id[i] pairs with occ_results[i]
             'gt_occ': gt_occ_np,
+            'uncertainty_msp': _uq_msp,
+            'uncertainty_entropy': _uq_ent,
+            'softmax_probs': softmax_np,
         }
 
         if SSC_metric_fine is not None:

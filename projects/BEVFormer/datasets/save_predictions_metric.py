@@ -51,18 +51,24 @@ if ENGINE_METRICS is not None and DET3D_METRICS is not None:
                 if occ is None or idx is None:
                     continue
                 pred_dict = {'occ_results': occ, 'index': idx}
-                if isinstance(data_sample, dict):
-                    if 'flow_results' in data_sample:
-                        pred_dict['flow_results'] = data_sample['flow_results']
-                    if 'uncertainty_msp' in data_sample:
-                        u = data_sample['uncertainty_msp']
-                        pred_dict['uncertainty_msp'] = [u] if not isinstance(u, (list, tuple)) else u
-                    if 'uncertainty_entropy' in data_sample:
-                        u = data_sample['uncertainty_entropy']
-                        pred_dict['uncertainty_entropy'] = [u] if not isinstance(u, (list, tuple)) else u
-                    if 'softmax_probs' in data_sample:
-                        p = data_sample['softmax_probs']
-                        pred_dict['softmax_probs'] = [p] if not isinstance(p, (list, tuple)) else p
+
+                def _get(key):
+                    """Retrieve a field from both dict-type and object-type data_samples."""
+                    if isinstance(data_sample, dict):
+                        return data_sample.get(key)
+                    return getattr(data_sample, key, None)
+
+                flow = _get('flow_results')
+                if flow is not None:
+                    pred_dict['flow_results'] = flow
+                for uk in ('uncertainty_msp', 'uncertainty_entropy'):
+                    u = _get(uk)
+                    if u is not None:
+                        pred_dict[uk] = [u] if not isinstance(u, (list, tuple)) else u
+                sp = _get('softmax_probs')
+                if sp is not None:
+                    pred_dict['softmax_probs'] = [sp] if not isinstance(sp, (list, tuple)) else sp
+
                 pred_dicts.append(pred_dict)
 
             if not pred_dicts:
