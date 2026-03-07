@@ -38,42 +38,52 @@ sys.path.insert(0, os.path.abspath('.'))
 # ──────────────────────────────────────────────────────────────
 # 캡처 훅
 # ──────────────────────────────────────────────────────────────
-_img_encoder_inputs: list[np.ndarray] = []
-_bev_encoder_inputs: list[np.ndarray] = []
+_img_encoder_count: int = 0
+_bev_encoder_count: int = 0
+_img_encoder_shape = None
+_bev_encoder_shape = None
 
 
 def _make_img_encoder_hook(out_dir: str, max_samples: int):
     """img_backbone 직전 입력 텐서를 캡처하는 forward pre-hook."""
+    global _img_encoder_count, _img_encoder_shape
     os.makedirs(os.path.join(out_dir, 'img_encoder'), exist_ok=True)
 
     def hook(module, args):
-        if len(_img_encoder_inputs) >= max_samples:
+        global _img_encoder_count, _img_encoder_shape
+        if _img_encoder_count >= max_samples:
             return
         img = args[0]           # [B*N, 3, H, W]
         arr = img.float().cpu().numpy()
-        idx = len(_img_encoder_inputs)
-        np.save(os.path.join(out_dir, 'img_encoder', f'{idx:05d}.npy'), arr)
-        _img_encoder_inputs.append(arr)
-        if idx % 10 == 0:
-            print(f'  img_encoder samples: {idx+1}/{max_samples}  shape={arr.shape}')
+        np.save(os.path.join(out_dir, 'img_encoder', f'{_img_encoder_count:05d}.npy'), arr)
+        if _img_encoder_shape is None:
+            _img_encoder_shape = arr.shape
+        if _img_encoder_count % 10 == 0:
+            print(f'  img_encoder samples: {_img_encoder_count+1}/{max_samples}  shape={arr.shape}')
+        _img_encoder_count += 1
+        del arr
 
     return hook
 
 
 def _make_bev_encoder_hook(out_dir: str, max_samples: int):
     """img_bev_encoder_backbone 직전 BEV voxel 텐서를 캡처하는 forward pre-hook."""
+    global _bev_encoder_count, _bev_encoder_shape
     os.makedirs(os.path.join(out_dir, 'bev_encoder'), exist_ok=True)
 
     def hook(module, args):
-        if len(_bev_encoder_inputs) >= max_samples:
+        global _bev_encoder_count, _bev_encoder_shape
+        if _bev_encoder_count >= max_samples:
             return
         bev = args[0]           # [B, C, Z, H_bev, W_bev]
         arr = bev.float().cpu().numpy()
-        idx = len(_bev_encoder_inputs)
-        np.save(os.path.join(out_dir, 'bev_encoder', f'{idx:05d}.npy'), arr)
-        _bev_encoder_inputs.append(arr)
-        if idx % 10 == 0:
-            print(f'  bev_encoder samples: {idx+1}/{max_samples}  shape={arr.shape}')
+        np.save(os.path.join(out_dir, 'bev_encoder', f'{_bev_encoder_count:05d}.npy'), arr)
+        if _bev_encoder_shape is None:
+            _bev_encoder_shape = arr.shape
+        if _bev_encoder_count % 10 == 0:
+            print(f'  bev_encoder samples: {_bev_encoder_count+1}/{max_samples}  shape={arr.shape}')
+        _bev_encoder_count += 1
+        del arr
 
     return hook
 
@@ -138,8 +148,8 @@ def main():
 
     with torch.no_grad():
         for batch in dataloader:
-            if (len(_img_encoder_inputs) >= args.num_samples and
-                    len(_bev_encoder_inputs) >= args.num_samples):
+            if (_img_encoder_count >= args.num_samples and
+                    _bev_encoder_count >= args.num_samples):
                 break
             try:
                 model.val_step(batch)
@@ -150,14 +160,14 @@ def main():
     h2.remove()
 
     print(f'\n[STCOcc Calib] 수집 완료')
-    print(f'  img_encoder : {len(_img_encoder_inputs)} 샘플 → {args.out_dir}/img_encoder/')
-    print(f'  bev_encoder : {len(_bev_encoder_inputs)} 샘플 → {args.out_dir}/bev_encoder/')
+    print(f'  img_encoder : {_img_encoder_count} 샘플 → {args.out_dir}/img_encoder/')
+    print(f'  bev_encoder : {_bev_encoder_count} 샘플 → {args.out_dir}/bev_encoder/')
 
     # 수집된 텐서 shape 요약
-    if _img_encoder_inputs:
-        print(f'  img_encoder shape: {_img_encoder_inputs[0].shape}')
-    if _bev_encoder_inputs:
-        print(f'  bev_encoder shape: {_bev_encoder_inputs[0].shape}')
+    if _img_encoder_shape is not None:
+        print(f'  img_encoder shape: {_img_encoder_shape}')
+    if _bev_encoder_shape is not None:
+        print(f'  bev_encoder shape: {_bev_encoder_shape}')
 
 
 if __name__ == '__main__':
