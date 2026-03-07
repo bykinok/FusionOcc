@@ -99,6 +99,10 @@ class TPVAggregator(BaseModule):
             # Process both voxel and point predictions (following tpv04 implementation)
             _, n, _ = points.shape
             
+            # grid_sample은 input(tpv_hw)과 grid(sample_loc)의 dtype이 동일해야 함
+            # fp16 모드에서 points(fp32)를 tpv_hw dtype으로 맞춤
+            points = points.to(dtype=tpv_hw.dtype)
+
             points = points.reshape(bs, 1, n, 3)
             
             # Normalize points to [-1, 1] for grid_sample

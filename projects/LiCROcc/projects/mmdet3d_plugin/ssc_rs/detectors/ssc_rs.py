@@ -399,6 +399,18 @@ class SSC_RS(MVXTwoStageDetector):
         sizes = self.train_cfg.sizes if self.train_cfg is not None else self.test_cfg.sizes
         bev_dense = self.pts_backbone.bev_projection(vw_feature, coord, np.array(sizes, np.int32)[::-1], batch_size) # B, C, H, W
         inputs = torch.cat([occupancy, bev_dense], dim=1)  # B, C, H, W
+        # occupancy(numpy→fp32)와 bev_dense(voxel scatter→fp32)의 dtype이 fp32
+        # pts_bbox_head의 inconv는 BatchNorm2d로 시작: model.half() 후 fp16 weight
+        # → fp32 입력을 pts_bbox_head 파라미터 dtype(fp16)으로 캐스팅
+        _head_param = next(
+            (p for m in self.pts_bbox_head.modules()
+             if not isinstance(m, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d,
+                                   torch.nn.BatchNorm3d))
+             for p in m.parameters(recurse=False)),
+            None
+        )
+        if _head_param is not None and inputs.dtype != _head_param.dtype:
+            inputs = inputs.to(_head_param.dtype)
         x, bev_t_list, _ = self.pts_bbox_head(inputs, ss_out_dict['mss_bev_dense'], sc_out_dict['mss_bev_dense'], img_feats)
         
         return x, ss_out_dict, sc_out_dict, bev_t_list
@@ -427,6 +439,18 @@ class SSC_RS(MVXTwoStageDetector):
         sizes = self.train_cfg.sizes if self.train_cfg is not None else self.test_cfg.sizes
         bev_dense = self.radar_backbone.bev_projection(vw_feature, coord, np.array(sizes, np.int32)[::-1], batch_size) # B, C, H, W
         inputs = torch.cat([occupancy, bev_dense], dim=1)  # B, C, H, W
+        # occupancy(numpy→fp32)와 bev_dense(voxel scatter→fp32)의 dtype이 fp32
+        # radar_bbox_head의 inconv는 BatchNorm2d로 시작: model.half() 후 fp16 weight
+        # → fp32 입력을 radar_bbox_head 파라미터 dtype(fp16)으로 캐스팅
+        _head_param = next(
+            (p for m in self.radar_bbox_head.modules()
+             if not isinstance(m, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d,
+                                   torch.nn.BatchNorm3d))
+             for p in m.parameters(recurse=False)),
+            None
+        )
+        if _head_param is not None and inputs.dtype != _head_param.dtype:
+            inputs = inputs.to(_head_param.dtype)
         x, bev_s_list, bev_s_residue_list = self.radar_bbox_head(inputs, ss_out_dict['mss_bev_dense'], sc_out_dict['mss_bev_dense'], img_feats)
 
         return x, ss_out_dict, sc_out_dict, bev_s_list, bev_s_residue_list
@@ -496,6 +520,11 @@ class SSC_RS(MVXTwoStageDetector):
         Returns:
             x: (B, C', 2*Dy, 2*Dx)
         """
+        # voxel pooling 커스텀 CUDA 연산은 fp32를 반환
+        # img_bev_encoder_backbone(ResNet, fp16) 입력 전 dtype 일치
+        _backbone_params = next(self.img_bev_encoder_backbone.parameters(), None)
+        if _backbone_params is not None and x.dtype != _backbone_params.dtype:
+            x = x.to(_backbone_params.dtype)
         x = self.img_bev_encoder_backbone(x) 
 
         if self.image_occ_loss:

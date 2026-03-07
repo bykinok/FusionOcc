@@ -227,6 +227,9 @@ class TPVFormerEncoder(TransformerLayerSequence):
         lidar2img = np.asarray(lidar2img)
         lidar2img = reference_points.new_tensor(lidar2img)  # (B, N, 4, 4)
         
+        # 원래 dtype 저장: 기하 계산은 fp32로 수행 후 복원
+        ref_dtype = reference_points.dtype
+
         # Get bda_mat (BEV Data Augmentation matrix) from img_metas if available
         # If bda_mat exists, we need to apply inverse_bda to transform reference_points
         # from augmented BEV space back to original ego space
@@ -274,7 +277,8 @@ class TPVFormerEncoder(TransformerLayerSequence):
             # CRITICAL: Compute actual inverse of bda_mat
             # For flip-only augmentation, inverse(flip) = flip (self-inverse)
             # But for rotation/scale, we need the actual inverse: inverse(R) = R^T, inverse(S) = S^-1
-            inverse_bda = torch.inverse(bda_mat)
+            # torch.inverse는 fp16을 지원하지 않으므로 float32로 캐스팅 후 역행렬 계산
+            inverse_bda = torch.inverse(bda_mat.float())
             inverse_bda = inverse_bda.view(1, B, 1, 1, 4, 4).repeat(D, 1, num_cam, num_query, 1, 1)
             # Transform: lidar2img @ inverse_bda @ reference_points
             # This transforms reference_points from augmented BEV space -> original ego space -> image
@@ -308,6 +312,10 @@ class TPVFormerEncoder(TransformerLayerSequence):
 
         reference_points_cam = reference_points_cam.permute(2, 1, 3, 0, 4)
         tpv_mask = tpv_mask.permute(2, 1, 3, 0, 4).squeeze(-1)
+
+        # 기하 계산(fp32) 완료 후 원래 dtype으로 복원
+        # reference_points_cam 값은 정규화된 2D 좌표([0,1])이므로 fp16 정밀도로 충분
+        reference_points_cam = reference_points_cam.to(ref_dtype)
 
         return reference_points_cam, tpv_mask
 

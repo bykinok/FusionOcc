@@ -429,8 +429,10 @@ class ShiftWindowMSA(BaseModule):
                 dims=(1, 2))
 
             # calculate attention mask for SW-MSA
+            # query.dtype에 맞게 생성: dtype 미지정 시 fp32가 되어
+            # fp16 attn + fp32 mask → fp32 승격 → attn @ v(fp16) 불일치 오류 발생
             img_mask = torch.zeros((1, H_pad, W_pad, 1),
-                                   device=query.device)  # 1 H W 1
+                                   device=query.device, dtype=query.dtype)  # 1 H W 1
             h_slices = (slice(0, -self.window_size),
                         slice(-self.window_size,
                               -self.shift_size), slice(-self.shift_size, None))

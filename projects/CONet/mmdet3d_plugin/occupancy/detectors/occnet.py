@@ -153,6 +153,11 @@ class OccNet(BaseModel):
             pts_voxel_feats, pts_feats = self.extract_pts_feat(points)
 
         if self.occ_fuser is not None:
+            # spconv은 fp16 미지원으로 pts_voxel_feats가 fp32일 수 있음
+            # img_voxel_feats(fp16)과 fusion 전 dtype 일치
+            if img_voxel_feats is not None and pts_voxel_feats is not None \
+                    and img_voxel_feats.dtype != pts_voxel_feats.dtype:
+                pts_voxel_feats = pts_voxel_feats.to(dtype=img_voxel_feats.dtype)
             voxel_feats = self.occ_fuser(img_voxel_feats, pts_voxel_feats)
         else:
             assert (img_voxel_feats is None) or (pts_voxel_feats is None)

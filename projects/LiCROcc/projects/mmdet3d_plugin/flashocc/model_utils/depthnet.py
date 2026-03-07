@@ -386,8 +386,13 @@ class DepthNet(nn.Module):
         # print('bn = {}', macs)
         # breakpoint()
         #
+        # BatchNorm은 fp32로 유지 → mlp_input(fp32/fp16 모두)을 BN dtype으로 맞춤
+        if self.bn.weight is not None and mlp_input.dtype != self.bn.weight.dtype:
+            mlp_input = mlp_input.to(self.bn.weight.dtype)
         mlp_input = self.bn(mlp_input.reshape(-1, mlp_input.shape[-1]))     # (B*N_views, 27)
+        # BN 출력(fp32)을 context_mlp/depth_mlp(Linear, fp16) 전달 전 x.dtype(fp16)으로 캐스팅
         x = self.reduce_conv(x)     # (B*N_views, C_mid, fH, fW)
+        mlp_input = mlp_input.to(dtype=x.dtype)
 
         # (B*N_views, 27) --> (B*N_views, C_mid) --> (B*N_views, C_mid, 1, 1)
         context_se = self.context_mlp(mlp_input)[..., None, None]

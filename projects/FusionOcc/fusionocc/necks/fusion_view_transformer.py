@@ -74,6 +74,9 @@ class DepthSegNet(nn.Module):
 
     def forward(self, x, mlp_input):
         mlp_input = self.bn(mlp_input.reshape(-1, mlp_input.shape[-1]))
+        # BatchNorm1d는 fp32로 유지 → 출력 fp32
+        # 이후 seg_mlp/context_mlp/depth_mlp(Linear, fp16)에 전달 전 dtype 일치
+        mlp_input = mlp_input.to(dtype=x.dtype)
         x_c = self.reduce_conv_seg(x)
         x_d = self.reduce_conv_depth(x)
         x_cx = self.reduce_conv_context(x)
@@ -233,6 +236,9 @@ class CrossModalLSS(LSSViewTransformerBEVDepth):
             mask = torch.randint(0, 100, size=[depth_input.shape[0]]) > 50
             depth_input[mask] = depth_input[mask] * 0
         depth_input = depth_input.reshape(B * N, H, W, -1).permute(0, 3, 1, 2)
+        # depth_input은 LiDAR sparse depth 라벨(fp32)에서 생성됨
+        # depth_encoder(Conv2d, fp16) 입력 dtype 일치를 위해 img_input dtype으로 캐스팅
+        depth_input = depth_input.to(dtype=img_input.dtype)
 
         f_c = self.img_reduce_conv(img_input)
         f_d = self.depth_encoder(depth_input)

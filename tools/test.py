@@ -699,7 +699,8 @@ def main():
                         pass
 
                 if not stcocc_patched:
-                    # 다른 모델 (BEVFormer 등): 전체 모델 fp16 변환 (기존 동작).
+                    # 모든 모델 공통: 파라미터 fp16 변환 + BN fp32 유지
+                    # (BEVFormer, TPVFormer, SurroundOcc, CONet, FusionOcc, LiCROcc 등)
                     runner.model.half()
                     for m in runner.model.modules():
                         if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d,
@@ -710,15 +711,79 @@ def main():
                         if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d,
                                           nn.BatchNorm3d))
                     )
-                    _orig_extract = _model.extract_img_feat
-                    def _patched_extract(img, img_metas, len_queue=None):
-                        if isinstance(img, torch.Tensor):
-                            img = img.to(torch.float16)
-                        return _orig_extract(img, img_metas, len_queue=len_queue)
-                    _model.extract_img_feat = _patched_extract
-                    print(f"\n==> FP16 inference enabled: model weights converted to fp16 "
-                          f"({bn_count} BN layers kept in fp32). "
-                          f"img input auto-cast fp32→fp16. autocast active.\n")
+                    # spconv implicit_gemm은 fp16을 지원하지 않으므로
+                    # spconv를 사용하는 LiDAR/레이더 관련 모듈은 fp32로 유지
+                    for _attr in ('pts_voxel_encoder', 'pts_middle_encoder',
+                                  'pts_backbone',
+                                  'radar_voxel_encoder', 'radar_backbone',
+                                  'radar_middle_encoder'):
+                        _mod = getattr(_model, _attr, None)
+                        if _mod is not None:
+                            _mod.float()
+
+                    # ── img_backbone forward_pre_hook: fp32 입력 → fp16 자동 캐스팅 ──
+                    # 원인: model.half()로 backbone 가중치가 fp16이 된 상태에서
+                    # dataloader가 출력하는 fp32 이미지가 그대로 전달되면
+                    # "Input type (FloatTensor) != weight type (HalfTensor)" 오류 발생.
+                    # autocast()는 model.half()로 미리 fp16 변환된 가중치에 대해
+                    # fp32 입력을 자동으로 처리하지 않으므로 hook으로 명시 처리.
+                    # (TPVFormer, SurroundOcc, CONet, FusionOcc, LiCROcc 등 모든 모델 적용)
+                    _hook_handles = []
+                    if hasattr(_model, 'img_backbone') and _model.img_backbone is not None:
+                        def _fp16_bb_hook(module, args):
+                            if args and isinstance(args[0], torch.Tensor) \
+                                    and args[0].is_floating_point():
+                                return (args[0].to(torch.float16),) + tuple(args[1:])
+                            return args
+                        _hook_handles.append(
+                            _model.img_backbone.register_forward_pre_hook(_fp16_bb_hook)
+                        )
+
+                    # ── extract_img_feat 패치: 모델별 시그니처 대응 (이중 안전장치) ──
+                    import inspect as _inspect
+                    _patch_note = (
+                        f' img_backbone fp16 hook 등록 ({len(_hook_handles)}개).'
+                        if _hook_handles else ''
+                    )
+                    if hasattr(_model, 'extract_img_feat'):
+                        _orig_extract = _model.extract_img_feat
+                        _sig_params = list(
+                            _inspect.signature(_orig_extract).parameters.keys()
+                        )
+                        if 'img_metas' in _sig_params:
+                            # BEVFormer/CONet 스타일: (img, img_metas[, len_queue])
+                            _has_lq = 'len_queue' in _sig_params
+                            def _make_fp16_extract_patch(orig, has_lq):
+                                def _patched(img, img_metas=None, len_queue=None):
+                                    if isinstance(img, torch.Tensor):
+                                        img = img.to(torch.float16)
+                                    elif (isinstance(img, (list, tuple))
+                                          and len(img) > 0
+                                          and isinstance(img[0], torch.Tensor)):
+                                        img = [img[0].to(torch.float16)] + list(img[1:])
+                                    if has_lq:
+                                        return orig(img, img_metas, len_queue=len_queue)
+                                    return orig(img, img_metas)
+                                return _patched
+                            _model.extract_img_feat = _make_fp16_extract_patch(
+                                _orig_extract, _has_lq
+                            )
+                        else:
+                            # LiCROcc 스타일: extract_img_feat(img_inputs) - img_inputs는 dict
+                            def _make_fp16_licr_patch(orig):
+                                def _patched(img_inputs):
+                                    if isinstance(img_inputs, dict) and 'imgs' in img_inputs:
+                                        img_inputs = dict(img_inputs)
+                                        img_inputs['imgs'] = img_inputs['imgs'].to(torch.float16)
+                                    return orig(img_inputs)
+                                return _patched
+                            _model.extract_img_feat = _make_fp16_licr_patch(_orig_extract)
+                        _patch_note += ' extract_img_feat fp16 캐스팅 패치 적용.'
+                    _model_name = type(_model).__name__
+                    print(f"\n==> [{_model_name}] FP16 inference enabled: "
+                          f"model weights converted to fp16 "
+                          f"({bn_count} BN layers kept in fp32).{_patch_note}"
+                          f" autocast active.\n")
 
                 # FP16 적용 후 파라미터 메모리 절감량 출력
                 _print_parameter_memory_after_fp16(runner.model, fp32_param_mb)
@@ -759,12 +824,49 @@ def main():
                         if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d,
                                           nn.BatchNorm3d)):
                             m.float()
-                    _orig_extract = _model.extract_img_feat
-                    def _patched_extract(img, img_metas, len_queue=None):
-                        if isinstance(img, torch.Tensor):
-                            img = img.to(torch.float16)
-                        return _orig_extract(img, img_metas, len_queue=len_queue)
-                    _model.extract_img_feat = _patched_extract
+                    # img_backbone forward_pre_hook: fp32 입력 → fp16 자동 캐스팅
+                    if hasattr(_model, 'img_backbone') and _model.img_backbone is not None:
+                        def _fp16_bb_hook_int8(module, args):
+                            if args and isinstance(args[0], torch.Tensor) \
+                                    and args[0].is_floating_point():
+                                return (args[0].to(torch.float16),) + tuple(args[1:])
+                            return args
+                        _model.img_backbone.register_forward_pre_hook(_fp16_bb_hook_int8)
+                    # extract_img_feat가 있는 모델만 패치 (모델별 시그니처 대응)
+                    import inspect as _inspect_int8
+                    if hasattr(_model, 'extract_img_feat'):
+                        _orig_extract_int8 = _model.extract_img_feat
+                        _sig_params_int8 = list(
+                            _inspect_int8.signature(_orig_extract_int8).parameters.keys()
+                        )
+                        if 'img_metas' in _sig_params_int8:
+                            _has_lq_int8 = 'len_queue' in _sig_params_int8
+                            def _make_fp16_int8_patch(orig, has_lq):
+                                def _patched(img, img_metas=None, len_queue=None):
+                                    if isinstance(img, torch.Tensor):
+                                        img = img.to(torch.float16)
+                                    elif (isinstance(img, (list, tuple))
+                                          and len(img) > 0
+                                          and isinstance(img[0], torch.Tensor)):
+                                        img = [img[0].to(torch.float16)] + list(img[1:])
+                                    if has_lq:
+                                        return orig(img, img_metas, len_queue=len_queue)
+                                    return orig(img, img_metas)
+                                return _patched
+                            _model.extract_img_feat = _make_fp16_int8_patch(
+                                _orig_extract_int8, _has_lq_int8
+                            )
+                        else:
+                            def _make_fp16_int8_licr_patch(orig):
+                                def _patched(img_inputs):
+                                    if isinstance(img_inputs, dict) and 'imgs' in img_inputs:
+                                        img_inputs = dict(img_inputs)
+                                        img_inputs['imgs'] = img_inputs['imgs'].to(torch.float16)
+                                    return orig(img_inputs)
+                                return _patched
+                            _model.extract_img_feat = _make_fp16_int8_licr_patch(
+                                _orig_extract_int8
+                            )
                     print(f'\n==> [INT8+FP16] 나머지 모듈 FP16, autocast 사용.\n')
 
                 # 2) inject 전: INT8 대상 모듈 파라미터 수 측정 (TRT 교체 후엔 PyTorch 파라미터가 사라짐)

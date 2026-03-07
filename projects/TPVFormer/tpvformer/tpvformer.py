@@ -75,9 +75,11 @@ class TPVFormer(Base3DSegmentor):
             # 리스트를 스택으로 변환
             img = torch.stack(img, dim=0)
         
-        # 이미지를 float32로 변환
-        if img.dtype != torch.float32:
-            img = img.float()
+        # 이미지 dtype을 backbone 파라미터와 일치시킴 (fp32/fp16 모드 모두 지원)
+        if hasattr(self, 'img_backbone') and self.img_backbone is not None:
+            _bb_params = next(iter(self.img_backbone.parameters()), None)
+            if _bb_params is not None and img.dtype != _bb_params.dtype:
+                img = img.to(_bb_params.dtype)
         
         # breakpoint()
 

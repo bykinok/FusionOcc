@@ -492,11 +492,15 @@ class DepthNet(nn.Module):
         )
 
     def forward(self, x, mlp_input):
-        # Ensure mlp_input is on the same device as the model
+        # Ensure mlp_input is on the same device/dtype as bn (GroupNorm)
         if hasattr(self.bn, 'parameters'):
             bn_params = list(self.bn.parameters())
-            if bn_params and mlp_input.device != bn_params[0].device:
-                mlp_input = mlp_input.to(bn_params[0].device)
+            if bn_params:
+                if mlp_input.device != bn_params[0].device:
+                    mlp_input = mlp_input.to(bn_params[0].device)
+                # GroupNorm weight dtype에 맞게 캐스팅 (fp16 모드에서 카메라 파라미터는 fp32로 들어옴)
+                if mlp_input.dtype != bn_params[0].dtype:
+                    mlp_input = mlp_input.to(bn_params[0].dtype)
         
         mlp_input = self.bn(mlp_input.reshape(-1, mlp_input.shape[-1]))
         x = self.reduce_conv(x)
@@ -874,6 +878,10 @@ class DepthNetStereo(nn.Module):
     def forward(self, x, mlp_input):
         B, _, H, W = x.shape
 
+        # GroupNorm weight dtype에 맞게 캐스팅 (fp16 모드에서 카메라 파라미터는 fp32로 들어옴)
+        if hasattr(self.bn, 'weight') and self.bn.weight is not None \
+                and mlp_input.dtype != self.bn.weight.dtype:
+            mlp_input = mlp_input.to(self.bn.weight.dtype)
         mlp_input = self.bn(mlp_input.reshape(-1, mlp_input.shape[-1]))
         x = self.reduce_conv(x)
         context_se = self.context_mlp(mlp_input)[..., None, None]

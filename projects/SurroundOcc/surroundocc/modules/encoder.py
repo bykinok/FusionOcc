@@ -149,7 +149,7 @@ class OccEncoder(TransformerLayerSequence if TransformerLayerSequence != BaseMod
             # CRITICAL: Compute actual inverse of bda_mat
             # For flip-only augmentation, inverse(flip) = flip (self-inverse)
             # But for rotation/scale, we need the actual inverse: inverse(R) = R^T, inverse(S) = S^-1
-            inverse_bda = torch.inverse(bda_mat)
+            inverse_bda = torch.inverse(bda_mat.float())
             inverse_bda = inverse_bda.view(1, B, 1, 1, 4, 4).repeat(D, 1, num_cam, num_query, 1, 1)
             # Transform: lidar2img @ inverse_bda @ reference_points
             # This transforms reference_points from augmented BEV space -> original ego space -> image

@@ -107,6 +107,12 @@ class BEVFusion(nn.Module):
 
     def forward(self, bev_features, sem_features, com_features, img_features):
         if not self.light:
+            # sem/com_features는 spconv 백본(fp32) 출력, adapter_sem/com은 fp16 Conv2d
+            # → adapter 파라미터 dtype(fp16)으로 캐스팅하여 dtype 불일치 방지
+            _adp_param = next(self.adapter_sem.parameters(), None)
+            if _adp_param is not None and sem_features.dtype != _adp_param.dtype:
+                sem_features = sem_features.to(_adp_param.dtype)
+                com_features = com_features.to(_adp_param.dtype)
             sem_features = self.adapter_sem(sem_features)
             com_features = self.adapter_com(com_features)
             # draw_feat([img_features], 'img_features_before')

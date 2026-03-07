@@ -30,12 +30,17 @@ class VFELayerMinus(nn.Module):
         self.weight_linear = nn.Linear(6, self.units, bias=True)
 
     def forward(self, inputs, bxyz_indx, mean=None, activate=False, gs=None):
+        # 레이더 포인트 클라우드(fp32)를 linear(fp16) 입력 전 dtype 일치
+        if self.linear.weight is not None and inputs.dtype != self.linear.weight.dtype:
+            inputs = inputs.to(self.linear.weight.dtype)
         x = self.linear(inputs)
         if activate:
             x = F.relu(x)
         if gs is not None:
             x = x * gs
         if mean is not None:
+            if self.weight_linear.weight is not None and mean.dtype != self.weight_linear.weight.dtype:
+                mean = mean.to(self.weight_linear.weight.dtype)
             x_weight = self.weight_linear(mean)
             if activate:
                 x_weight = F.relu(x_weight)
@@ -109,8 +114,11 @@ class PcPreprocessor(nn.Module):
             ms_mean_features[scale] = topview_mean
             ms_pc_features.append(pc_feature)
 
-        agg_tpfeature = F.relu(self.aggtopmeanproj(ms_mean_features[self.target_scale])) \
-                        * F.relu(self.aggtopproj(torch.cat(ms_pc_features, dim=1)))
+        # ms_mean_features는 fp32(레이더 포인트 클라우드)에서 계산됨
+        # aggtopmeanproj/aggtopproj(Linear, fp16) 입력 전 dtype 일치
+        _proj_dtype = next(self.aggtopmeanproj.parameters()).dtype
+        agg_tpfeature = F.relu(self.aggtopmeanproj(ms_mean_features[self.target_scale].to(_proj_dtype))) \
+                        * F.relu(self.aggtopproj(torch.cat(ms_pc_features, dim=1).to(_proj_dtype)))
         agg_tpfeature = self.aggfusion(agg_tpfeature)
 
         bxyz_indx_tgt = info[self.target_scale]['bxyz_indx'].long()

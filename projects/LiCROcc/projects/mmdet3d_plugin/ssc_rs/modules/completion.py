@@ -80,6 +80,10 @@ class CompletionBranch(nn.Module):
                 v.requires_grad = False
 
     def forward(self, inputs):
+        # occupancy 볼륨(fp32)을 in_layer(Conv3d, fp16) 입력 전 dtype 일치
+        _layer_dtype = next(self.in_layer.parameters()).dtype
+        if inputs.dtype != _layer_dtype:
+            inputs = inputs.to(_layer_dtype)
         out = F.relu(self.in_layer(inputs))
         res1 = self.block_1(out)  # B, 16, 16, 128, 128
         res2 = self.block_2(res1)  # B, 32, 8, 64, 64

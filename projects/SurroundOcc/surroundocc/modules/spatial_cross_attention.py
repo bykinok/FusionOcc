@@ -218,8 +218,10 @@ class SpatialCrossAttention(BaseModule):
 
         count = bev_mask.sum(-1) > 0
         count = count.permute(1, 2, 0).sum(-1)
-        count = torch.clamp(count, min=1.0)
-        slots = slots / count[..., None]
+        # min=1.0(float)이면 int64 count → fp32 변환, slots(fp16)/count(fp32) → fp32 승격
+        # → output_proj(fp16 weight)에 fp32 입력 전달 시 dtype 불일치 오류
+        count = torch.clamp(count, min=1)
+        slots = slots / count[..., None].to(slots.dtype)
         slots = self.output_proj(slots)
 
         return self.dropout(slots) + inp_residual
@@ -451,6 +453,11 @@ class MSDeformableAttention3D(BaseModule):
         #  sampling_locations.shape: bs, num_query, num_heads, num_levels, num_all_points, 2
         #  attention_weights.shape: bs, num_query, num_heads, num_levels, num_all_points
         #
+
+        # fp16 모드에서 reference_points(fp32)와 sampling_offsets(fp16) 덧셈으로
+        # sampling_locations가 fp32로 승격되어 value(fp16)와 dtype 불일치 발생
+        # → value.dtype에 맞게 캐스팅
+        sampling_locations = sampling_locations.to(value.dtype)
 
         if torch.cuda.is_available() and value.is_cuda:
             if value.dtype == torch.float16:

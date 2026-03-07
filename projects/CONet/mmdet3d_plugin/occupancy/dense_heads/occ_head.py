@@ -237,7 +237,9 @@ class OccHead(nn.Module):
                         this_fine_coord[0, :] = (this_fine_coord[0, :]/(self.final_occ_size[0]-1) - 0.5) * 2
                         this_fine_coord[1, :] = (this_fine_coord[1, :]/(self.final_occ_size[1]-1) - 0.5) * 2
                         this_fine_coord[2, :] = (this_fine_coord[2, :]/(self.final_occ_size[2]-1) - 0.5) * 2
-                        this_fine_coord = this_fine_coord[None,None,None].permute(0,4,1,2,3).float()
+                        # grid_sample은 input과 grid의 dtype이 일치해야 함
+                        # out_voxel_feats(fp16)에 맞게 캐스팅 (fp16 모드에서 .float()→fp32 불일치 방지)
+                        this_fine_coord = this_fine_coord[None,None,None].permute(0,4,1,2,3).to(out_voxel_feats.dtype)
                         # 5D grid_sample input: [B, C, H, W, D]; cor: [B, N, 1, 1, 3]; output: [B, C, N, 1, 1]
                         new_feat = F.grid_sample(out_voxel_feats[b:b+1].permute(0,1,4,3,2), this_fine_coord, mode='bilinear', padding_mode='zeros', align_corners=False)
                         append_feats.append(new_feat[0,:,:,0,0].permute(1,0))
@@ -278,16 +280,19 @@ class OccHead(nn.Module):
                                     pts_range=self.point_cloud_range, W_occ=W_new, H_occ=H_new, D_occ=D_new)  # [n_cam, 1, N, 2], [N, n_cam]
                         for img_feat in img_feats:
                             # img_feat[b]: [n_cam, C, H, W], img_uv: [n_cam, 1, N, 2]
-                            sampled_img_feat = F.grid_sample(img_feat[b].contiguous(), img_uv.contiguous(), align_corners=True, mode='bilinear', padding_mode='zeros')
+                            # fp16 grid_sample + sum(cameras) 시 fp16 오버플로우로 NaN 발생 가능
+                            # → grid_sample 및 카메라 누적은 fp32로 수행
+                            _feat_dtype = img_feat[b].dtype
+                            sampled_img_feat = F.grid_sample(img_feat[b].float().contiguous(), img_uv.float().contiguous(), align_corners=True, mode='bilinear', padding_mode='zeros')
                             # sampled_img_feat: [n_cam, C, 1, N]
                             
                             # img_mask: [B, N, n_cam] -> [n_cam, B, N] -> squeeze to [n_cam, N]
                             img_mask_reshaped = img_mask.permute(2, 0, 1).squeeze(1)  # [n_cam, N]
                             
-                            sampled_img_feat = sampled_img_feat * img_mask_reshaped[:, None, None, :]  # [n_cam, C, 1, N] * [n_cam, 1, 1, N]
-                            sampled_img_feat = sampled_img_feat.sum(0)  # [C, 1, N]
+                            sampled_img_feat = sampled_img_feat * img_mask_reshaped.float()[:, None, None, :]  # [n_cam, C, 1, N]
+                            sampled_img_feat = sampled_img_feat.sum(0)  # [C, 1, N]  fp32 누적으로 오버플로우 방지
                             sampled_img_feat = sampled_img_feat[:, 0, :]  # [C, N]
-                            sampled_img_feat = self.img_mlp(sampled_img_feat.permute(1, 0))  # [N, C]
+                            sampled_img_feat = self.img_mlp(sampled_img_feat.permute(1, 0).to(_feat_dtype))  # [N, C]
                             
                             append_feats.append(sampled_img_feat)  # N C
                             assert torch.isnan(sampled_img_feat).sum().item() == 0

@@ -149,7 +149,10 @@ class FusionDepthSeg(nn.Module):
              mlp_input], input_depth)
                 
         if self.pre_process and self.pre_process_net is not None:
-            img_3d_feat = self.pre_process_net(img_3d_feat)[0]
+            # bev_pool_v2/voxel_pooling_v2 커스텀 CUDA 연산이 fp32를 반환하므로
+            # pre_process_net(3D ResNet, fp16) 입력 전 dtype 일치
+            _net_dtype = next(self.pre_process_net.parameters()).dtype
+            img_3d_feat = self.pre_process_net(img_3d_feat.to(_net_dtype))[0]
         return img_3d_feat, depth, seg
 
     def prepare_inputs(self, inputs, stereo=False):

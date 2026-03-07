@@ -196,6 +196,11 @@ class CustomSparseEncoder(nn.Module):
     @auto_fp16(apply_to=("voxel_features",))
     def encode(self, voxel_features, coors, batch_size, **kwargs):
         coors = coors.int()
+        # scatter_voxelize는 fp32 특징을 반환하지만 conv_input(spconv)은 fp16
+        # → 모델 파라미터 dtype에 맞게 캐스팅
+        _param = next(self.parameters(), None)
+        if _param is not None and voxel_features.dtype != _param.dtype:
+            voxel_features = voxel_features.to(_param.dtype)
         input_sp_tensor = SparseConvTensor(
             voxel_features, coors, self.sparse_shape, batch_size
         )

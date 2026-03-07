@@ -194,8 +194,10 @@ class TPVImageCrossAttention(BaseModule):
             count = count.permute(1, 2, 0).sum(-1)
             # count의 실제 크기 확인
             count = count[:slots[tpv_idx].size(0)]
-            count = torch.clamp(count, min=1.0)
-            slots[tpv_idx] = slots[tpv_idx] / count[..., None]
+            # min=1 (int)을 사용: min=1.0 (float)이면 int64→float32 변환이 발생하고
+            # slots(fp16) / count(float32) → float32 승격으로 output_proj dtype 불일치 오류 유발
+            count = torch.clamp(count, min=1)
+            slots[tpv_idx] = slots[tpv_idx] / count[..., None].to(slots[tpv_idx].dtype)
         
         slots = torch.cat(slots, dim=1)
         slots = self.output_proj(slots)
