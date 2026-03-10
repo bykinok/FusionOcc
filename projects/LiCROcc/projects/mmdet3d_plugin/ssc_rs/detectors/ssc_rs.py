@@ -146,6 +146,7 @@ class SSC_RS(MVXTwoStageDetector):
                 dataset_name='nuscenes_occ',
                 use_semantic=True,
                 temperature=None,
+                compute_uncertainty=False,
                 ):
 
         super(SSC_RS,
@@ -182,6 +183,7 @@ class SSC_RS(MVXTwoStageDetector):
         self.dataset_name = dataset_name
         self.use_semantic = use_semantic
         self.temperature = temperature
+        self.compute_uncertainty = compute_uncertainty
         
         # Validate dataset_name
         valid_datasets = ['occ3d', 'nuscenes_occ']
@@ -325,16 +327,18 @@ class SSC_RS(MVXTwoStageDetector):
                                 _vox_i = _vox_i / self.temperature
                             pred = torch.argmax(_vox_i, dim=1).squeeze(0).cpu().numpy()
 
-                            # Uncertainty estimation — always computed in occ3d mode.
+                            # Uncertainty estimation: only when compute_uncertainty=True.
+                            # softmax_probs 저장 시 샘플당 수 MB × 전체 샘플 수 → OOM 주의.
                             # _vox_i: (1, C, X, Y, Z) channels-first, temperature-scaled.
-                            import torch.nn.functional as _F
-                            import numpy as _np
-                            with torch.no_grad():
-                                sp = _F.softmax(_vox_i[0].float(), dim=0).permute(1, 2, 3, 0).cpu().numpy().astype(_np.float32)  # (X, Y, Z, C)
-                            _eps = 1e-8
-                            sample_dict['uncertainty_msp'] = (1.0 - sp.max(axis=-1)).astype(_np.float32)
-                            sample_dict['uncertainty_entropy'] = (-(sp * _np.log(sp + _eps)).sum(axis=-1)).astype(_np.float32)
-                            sample_dict['softmax_probs'] = sp  # (X, Y, Z, C)
+                            if self.compute_uncertainty:
+                                import torch.nn.functional as _F
+                                import numpy as _np
+                                with torch.no_grad():
+                                    sp = _F.softmax(_vox_i[0].float(), dim=0).permute(1, 2, 3, 0).cpu().numpy().astype(_np.float32)  # (X, Y, Z, C)
+                                _eps = 1e-8
+                                sample_dict['uncertainty_msp'] = (1.0 - sp.max(axis=-1)).astype(_np.float32)
+                                sample_dict['uncertainty_entropy'] = (-(sp * _np.log(sp + _eps)).sum(axis=-1)).astype(_np.float32)
+                                sample_dict['softmax_probs'] = sp  # (X, Y, Z, C)
                         else:
                             pred = output_voxels[i].cpu().numpy()
                         # CRITICAL: Wrap pred in a list so evaluator can index it correctly

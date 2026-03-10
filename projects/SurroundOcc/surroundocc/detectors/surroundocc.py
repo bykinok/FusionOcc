@@ -87,6 +87,7 @@ class SurroundOcc(Base3DDetector):
                  is_vis: bool = False,
                  dataset_name: Optional[str] = None,
                  temperature: Optional[float] = None,
+                 compute_uncertainty: bool = False,
                  init_cfg: Optional[dict] = None,
                  data_preprocessor: Optional[dict] = None,
                  **kwargs):
@@ -151,6 +152,7 @@ class SurroundOcc(Base3DDetector):
         self.is_vis = is_vis
         self.dataset_name = dataset_name
         self.temperature = temperature
+        self.compute_uncertainty = compute_uncertainty
     
     @property
     def with_img_backbone(self):
@@ -583,9 +585,10 @@ class SurroundOcc(Base3DDetector):
             return_dict['index'] = [img_meta.get('index', i) 
                                     for i, img_meta in enumerate(img_metas)]
 
-            # Uncertainty estimation — always computed in occ3d mode.
+            # Uncertainty estimation: only when compute_uncertainty=True.
+            # softmax_probs 저장 시 샘플당 수 MB × 전체 샘플 수 → OOM 주의.
             # pred_occ: (B, C, H, W, Z) channels-first, already temperature-scaled.
-            if self.use_semantic:
+            if self.use_semantic and self.compute_uncertainty:
                 with torch.no_grad():
                     # (B, C, H, W, Z) → (H, W, Z, C) for [0]
                     softmax_np = pred_softmax[0].permute(1, 2, 3, 0).cpu().numpy().astype(np.float32)

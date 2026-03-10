@@ -65,6 +65,7 @@ class OccNet(BaseModel):
             # BBox head
             pts_bbox_head=None,
             temperature=None,
+            compute_uncertainty=False,
             **kwargs):
         
         super().__init__(**kwargs)
@@ -99,6 +100,7 @@ class OccNet(BaseModel):
         self.with_img_neck = img_neck is not None
         self.with_pts_bbox = pts_bbox_head is not None
         self.temperature = temperature
+        self.compute_uncertainty = compute_uncertainty
     
     def image_encoder(self, img):
         """Image encoder (copied from original CONet_ori)."""
@@ -864,14 +866,17 @@ class OccNet(BaseModel):
             elif isinstance(img_metas, dict):
                 idx = img_metas.get('index', 0)
 
-        # Uncertainty estimation — always computed, matching BEVFormer behaviour.
+        # Uncertainty estimation: only when compute_uncertainty=True.
+        # softmax_probs 저장 시 샘플당 수 MB × 전체 샘플 수 → OOM 주의.
         # pred_interpolated[0]: (C, H, W, D) channels-first, already temperature-scaled.
-        with torch.no_grad():
-            import torch.nn.functional as _F
-            softmax_np = _F.softmax(pred_interpolated[0].float(), dim=0).permute(1, 2, 3, 0).cpu().numpy().astype(np.float32)  # (H, W, D, C)
-            _uq_msp = (1.0 - softmax_np.max(axis=-1)).astype(np.float32)
-            _eps = 1e-8
-            _uq_ent = (-(softmax_np * np.log(softmax_np + _eps)).sum(axis=-1)).astype(np.float32)
+        _uq_msp = _uq_ent = softmax_np = None
+        if self.compute_uncertainty:
+            with torch.no_grad():
+                import torch.nn.functional as _F
+                softmax_np = _F.softmax(pred_interpolated[0].float(), dim=0).permute(1, 2, 3, 0).cpu().numpy().astype(np.float32)  # (H, W, D, C)
+                _uq_msp = (1.0 - softmax_np.max(axis=-1)).astype(np.float32)
+                _eps = 1e-8
+                _uq_ent = (-(softmax_np * np.log(softmax_np + _eps)).sum(axis=-1)).astype(np.float32)
 
         # occ_results must be a list of per-sample arrays (H, W, D) so that metric's occ_results[i] is (200,200,16)
         # SurroundOcc passes (B,H,W,Z) and metric uses occ_results[i]; CONet batch=1 so pass [pred_occ_np]
@@ -884,10 +889,11 @@ class OccNet(BaseModel):
             'occ_results': [pred_occ_np],  # List of (H,W,D) per sample so pr_semantics stays (200,200,16)
             'index': [idx],  # List for STCOcc: data_id[i] pairs with occ_results[i]
             'gt_occ': gt_occ_np,
-            'uncertainty_msp': _uq_msp,
-            'uncertainty_entropy': _uq_ent,
-            'softmax_probs': softmax_np,
         }
+        if _uq_msp is not None:
+            test_output['uncertainty_msp'] = _uq_msp
+            test_output['uncertainty_entropy'] = _uq_ent
+            test_output['softmax_probs'] = softmax_np
 
         if SSC_metric_fine is not None:
             test_output['SSC_metric_fine'] = SSC_metric_fine

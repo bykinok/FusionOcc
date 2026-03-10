@@ -77,6 +77,7 @@ class BEVFormerOcc(MVXTwoStageDetector):
                  pretrained=None,
                  video_test_mode=False,
                  depth_supervision=None,
+                 compute_uncertainty=False,
                  ):
 
         super(BEVFormerOcc,
@@ -119,6 +120,8 @@ class BEVFormerOcc(MVXTwoStageDetector):
             )
             self.depth_head = MODELS.build(depth_cfg)
             self._depth_feature_level = depth_supervision.get('feature_level', 1)
+
+        self.compute_uncertainty = compute_uncertainty
 
         # temporal
         self.video_test_mode = video_test_mode
@@ -460,7 +463,7 @@ class BEVFormerOcc(MVXTwoStageDetector):
         outs = self.pts_bbox_head(x, img_metas, prev_bev=prev_bev, test=True)
 
         occ = self.pts_bbox_head.get_occ(
-            outs, img_metas, rescale=rescale, return_uncertainty=True)
+            outs, img_metas, rescale=rescale, return_uncertainty=self.compute_uncertainty)
 
         if getattr(self, 'export_occ_logits', False):
             return outs['bev_embed'], occ, outs['occ']

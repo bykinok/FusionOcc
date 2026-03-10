@@ -26,6 +26,7 @@ class TPVFormer(Base3DSegmentor):
                  dataset_name=None,  # 'occ3d' or None for traditional GT
                  save_results=False,  # Save prediction results to disk
                  temperature=None,  # Temperature scaling for calibration (None or 1.0 = no scaling)
+                 compute_uncertainty=False,
                  depth_supervision=None,  # dict(enabled=True, grid_config=..., downsample=..., loss_weight=..., feature_level=...)
                  init_cfg=None):
 
@@ -48,6 +49,7 @@ class TPVFormer(Base3DSegmentor):
         self.dataset_name = dataset_name  # Store dataset_name for predict method
         self.save_results = save_results  # Save prediction results to disk
         self.temperature = temperature  # Temperature scaling for calibration
+        self.compute_uncertainty = compute_uncertainty
 
         # Auxiliary depth supervision (ego-frame consistent with TPVFormer lidar2img=ego2img)
         self.depth_supervision = depth_supervision or dict(enabled=False)
@@ -426,25 +428,24 @@ class TPVFormer(Base3DSegmentor):
                     for i, img_meta in enumerate(img_metas)
                 ]
 
-                # Uncertainty estimation — always computed in occ3d mode, matching BEVFormer's
-                # hardcoded return_uncertainty=True in simple_test_pts().
-                # Use --save-predictions-only to avoid accumulating softmax_probs in memory
-                # across the full validation set.
+                # Uncertainty estimation: only when compute_uncertainty=True.
+                # softmax_probs 저장 시 샘플당 수 MB × 전체 샘플 수 → OOM 주의.
                 # NOTE: batch_size=1 for testing, so [0] indexing is safe.
-                with torch.no_grad():
-                    # (B, C, W, H, Z) → (B, W, H, Z, C) in float32 for numerical stability
-                    softmax_vox = F.softmax(logits_vox.float(), dim=1)
-                    softmax_np = softmax_vox.permute(0, 2, 3, 4, 1).cpu().numpy().astype(np.float32)
+                if self.compute_uncertainty:
+                    with torch.no_grad():
+                        # (B, C, W, H, Z) → (B, W, H, Z, C) in float32 for numerical stability
+                        softmax_vox = F.softmax(logits_vox.float(), dim=1)
+                        softmax_np = softmax_vox.permute(0, 2, 3, 4, 1).cpu().numpy().astype(np.float32)
 
-                    # Per-sample arrays (squeeze batch dim) — shape (W, H, Z) / (W, H, Z, C)
-                    # SavePredictionsEvaluator wraps scalar arrays as [arr], giving pkl [0].shape
-                    # identical to BEVFormer: uncertainty_msp[0].shape == (W,H,Z)
-                    return_dict['uncertainty_msp'] = (1.0 - softmax_np[0].max(axis=-1)).astype(np.float32)
-                    eps = 1e-8
-                    return_dict['uncertainty_entropy'] = (
-                        -(softmax_np[0] * np.log(softmax_np[0] + eps)).sum(axis=-1)
-                    ).astype(np.float32)
-                    return_dict['softmax_probs'] = softmax_np[0]  # (W, H, Z, C)
+                        # Per-sample arrays (squeeze batch dim) — shape (W, H, Z) / (W, H, Z, C)
+                        # SavePredictionsEvaluator wraps scalar arrays as [arr], giving pkl [0].shape
+                        # identical to BEVFormer: uncertainty_msp[0].shape == (W,H,Z)
+                        return_dict['uncertainty_msp'] = (1.0 - softmax_np[0].max(axis=-1)).astype(np.float32)
+                        eps = 1e-8
+                        return_dict['uncertainty_entropy'] = (
+                            -(softmax_np[0] * np.log(softmax_np[0] + eps)).sum(axis=-1)
+                        ).astype(np.float32)
+                        return_dict['softmax_probs'] = softmax_np[0]  # (W, H, Z, C)
                 
                 # Save results to disk (following STCOcc implementation)
                 if self.save_results:

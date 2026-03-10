@@ -606,22 +606,34 @@ def main():
                 - 첫 번째 배치는 CUDA JIT / cuDNN autotuning 으로 느릴 수 있음.
                 """
                 _times: list = []
+                # 스텝별 순수 활성화 메모리 (baseline 차감) 및 reserved 스냅샷
+                _peak_deltas:     list = []   # max_allocated - baseline (per step)
+                _resrv_snapshots: list = []   # memory_reserved() after each step
                 # 테스트 루프가 호출하는 것은 runner.model.test_step
                 _orig_test_step = runner.model.test_step
 
                 def _timed_test_step(data):
                     if torch.cuda.is_available():
                         torch.cuda.synchronize()
+                        # ── 순수 활성 메모리 측정: 스텝 직전 baseline 저장 후 peak 리셋 ──
+                        baseline_mem = torch.cuda.memory_allocated()
+                        torch.cuda.reset_peak_memory_stats()
                     t0 = time.perf_counter()
                     out = _orig_test_step(data)
                     if torch.cuda.is_available():
                         torch.cuda.synchronize()
+                    # sync 완료 직후 타이머 종료 (메모리 측정 오버헤드 제외)
                     _times.append(time.perf_counter() - t0)
+                    if torch.cuda.is_available():
+                        # 이 스텝에서 baseline 대비 추가 할당된 최대치 (활성화만)
+                        _peak_deltas.append(
+                            torch.cuda.max_memory_allocated() - baseline_mem
+                        )
+                        # reserved 현재값 스냅샷 (누적 최대치 추적용)
+                        _resrv_snapshots.append(torch.cuda.memory_reserved())
                     return out
 
                 runner.model.test_step = _timed_test_step
-                if torch.cuda.is_available():
-                    torch.cuda.reset_peak_memory_stats()
                 _report_gpu_memory(f"before {label}")
 
                 try:
@@ -629,38 +641,65 @@ def main():
                 finally:
                     runner.model.test_step = _orig_test_step
 
+                # warm-up 배치 수 (latency·메모리 stable 기준 공통)
+                _WARMUP = 50
+
                 # ── GPU 메모리 피크 ────────────────────────────────────────
                 _report_gpu_memory(f"after {label}")
                 if torch.cuda.is_available():
-                    peak_alloc = torch.cuda.max_memory_allocated() / 1024 ** 3
-                    peak_resrv = torch.cuda.max_memory_reserved()  / 1024 ** 3
+                    # 순수 활성화 메모리: 스텝별 (peak_in_step - baseline) 통계
+                    if _peak_deltas:
+                        GB = 1024 ** 3
+                        n_d          = len(_peak_deltas)
+                        wu_d         = min(_WARMUP, n_d)
+                        act_max      = max(_peak_deltas)       / GB
+                        act_min      = min(_peak_deltas)       / GB
+                        act_avg      = sum(_peak_deltas) / n_d / GB
+                        act_stable   = (_peak_deltas[wu_d:]
+                                        if n_d > wu_d else _peak_deltas)
+                        act_stbl_avg = sum(act_stable) / len(act_stable) / GB
+                    else:
+                        act_max = act_min = act_avg = act_stbl_avg = float('nan')
+                        wu_d = 0
+                    # reserved 최대치: 스텝별 스냅샷 max (단조 증가이므로 마지막값과 동일)
+                    peak_resrv = (max(_resrv_snapshots) / 1024 ** 3
+                                  if _resrv_snapshots else float('nan'))
                     print(f"==> [GPU Memory Peak] {label}:")
-                    print(f"    peak allocated : {peak_alloc:.3f} GB"
-                          f"  ← 텐서 활성 메모리 최대치")
-                    print(f"    peak reserved  : {peak_resrv:.3f} GB"
+                    print(f"    active allocated  max  : {act_max:.3f} GB"
+                          f"  ← 순수 추론 활성화 메모리 (평가 결과 누적 제외, 스텝별 baseline 차감)")
+                    print(f"    active allocated  min  : {act_min:.3f} GB")
+                    print(f"    active allocated  avg  : {act_avg:.3f} GB  "
+                          f"(stable avg {wu_d+1}th~: {act_stbl_avg:.3f} GB)")
+                    print(f"    peak reserved          : {peak_resrv:.3f} GB"
                           f"  ← CUDA 드라이버 실제 점유 최대치 (nvidia-smi 기준)")
                     if "FP16" in label:
                         print(f"    [참고] Peak이 파라미터만큼(~50%) 줄지 않는 이유: "
                               f"대부분이 활성화(중간 텐서)이며, autocast가 Softmax/LayerNorm 등 "
                               f"FP32 유지 → 해당 구간 활성화도 FP32. 따라서 전체 peak는 10~20% 수준으로만 감소.")
+                    if "INT8" in label:
+                        print(f"    [참고] INT8(TRT) 내부 활성화 버퍼는 PyTorch 할당자 외부에서 관리되므로"
+                              f" active allocated는 TRT 구간 메모리를 과소 측정할 수 있음.")
                     print()
 
                 # ── 추론 Latency (test_step 호출당 시간) ─────────────────────
                 if _times:
                     n     = len(_times)
                     total = sum(_times)
-                    warmup_ms = _times[0] * 1000
-                    stable    = _times[1:] if n > 1 else _times
-                    s_avg = sum(stable) / len(stable) * 1000
-                    s_min = min(stable) * 1000
-                    s_max = max(stable) * 1000
+                    wu    = min(_WARMUP, n)           # 실제 warm-up 배치 수
+                    stable = _times[wu:] if n > wu else []
                     print(f"==> [Inference Latency] {label} (test_step 기준, {n} 배치):")
-                    print(f"    warm-up (1st batch) : {warmup_ms:.1f} ms")
-                    if n > 1:
-                        print(f"    stable  (2nd~)  avg : {s_avg:.1f} ms/batch  (latency)")
-                        print(f"                    min : {s_min:.1f} ms/batch")
-                        print(f"                    max : {s_max:.1f} ms/batch")
-                    print(f"    total (all batches) : {total:.3f} s  ({n} batches)\n")
+                    print(f"    warm-up ({wu} batches) avg : "
+                          f"{sum(_times[:wu]) / wu * 1000:.1f} ms/batch")
+                    if stable:
+                        s_avg = sum(stable) / len(stable) * 1000
+                        s_min = min(stable) * 1000
+                        s_max = max(stable) * 1000
+                        print(f"    stable  ({wu+1}th~)   avg : {s_avg:.1f} ms/batch  (latency)")
+                        print(f"                         min : {s_min:.1f} ms/batch")
+                        print(f"                         max : {s_max:.1f} ms/batch")
+                    else:
+                        print(f"    stable: 배치 수({n})가 warm-up({wu}) 이하 — stable 구간 없음")
+                    print(f"    total (all batches)    : {total:.3f} s  ({n} batches)\n")
                 else:
                     print(f"==> [Inference Latency] {label}: 측정된 배치 없음 (test_step 호출 0회)\n")
 
