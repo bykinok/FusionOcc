@@ -541,12 +541,25 @@ def main():
                 """
                 _model = model.module if hasattr(model, 'module') else model
 
-                # INT8 대상 모듈(backbone/neck/bev_enc_backbone) 내 모든 서브모듈 id 수집
+                # INT8 대상 모듈(backbone/bev_enc_backbone) 내 모든 서브모듈 id 수집
+                # CONet: img_neck(SECONDFPN)은 PyTorch FP16 유지 → INT8 집계 제외
                 int8_submodule_ids = set()
+                _is_conet_cov = (
+                    not hasattr(_model, 'forward_projection')
+                    and hasattr(_model, 'occ_encoder_backbone')
+                    and not hasattr(_model, 'img_bev_encoder_backbone')
+                )
                 if hasattr(_model, 'forward_projection'):
                     _fp = _model.forward_projection
                     for _mod_name in ('img_backbone', 'img_neck', 'img_bev_encoder_backbone'):
                         _submod = getattr(_fp, _mod_name, None)
+                        if _submod is not None:
+                            for m in _submod.modules():
+                                int8_submodule_ids.add(id(m))
+                elif _is_conet_cov:
+                    # CONet: img_backbone + SECONDFPN 은 PyTorch FP16, occ_encoder_backbone 만 INT8
+                    for _mod_name in ('occ_encoder_backbone',):
+                        _submod = getattr(_model, _mod_name, None)
                         if _submod is not None:
                             for m in _submod.modules():
                                 int8_submodule_ids.add(id(m))
@@ -585,15 +598,40 @@ def main():
                 print()
             fp32_param_mb, _ = _print_parameter_memory(runner.model)
 
+            # ── pynvml 초기화 (NVML 기반 드라이버 레벨 전체 GPU 메모리 측정) ──
+            _nvml_handle = None
+            try:
+                import pynvml
+                pynvml.nvmlInit()
+                _gpu_idx = torch.cuda.current_device() if torch.cuda.is_available() else 0
+                _nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(_gpu_idx)
+            except Exception:
+                _nvml_handle = None
+
+            def _nvml_used_mb() -> float:
+                """pynvml로 드라이버 레벨 GPU 사용 메모리(MB) 반환.
+                cudaDeviceSynchronize() 후 호출해야 TRT 내부 버퍼까지 정확히 반영됨.
+                pynvml 미설치 시 NaN 반환.
+                """
+                if _nvml_handle is None:
+                    return float('nan')
+                info = pynvml.nvmlDeviceGetMemoryInfo(_nvml_handle)
+                return int(info.used) / 1024 ** 2  # type: ignore[attr-defined]  # bytes → MB
+
             def _report_gpu_memory(label):
                 if torch.cuda.is_available():
+                    torch.cuda.synchronize()
                     allocated = torch.cuda.memory_allocated() / 1024 ** 3
                     reserved  = torch.cuda.memory_reserved()  / 1024 ** 3
+                    nvml_mb   = _nvml_used_mb()
+                    nvml_str  = (f", nvml={nvml_mb:.0f} MB"
+                                 if not (nvml_mb != nvml_mb) else "")  # NaN guard
                     print(f"\n==> [GPU Memory] {label}: "
-                          f"allocated={allocated:.2f} GB, reserved={reserved:.2f} GB\n")
+                          f"allocated={allocated:.2f} GB, reserved={reserved:.2f} GB"
+                          f"{nvml_str}\n")
 
             def _run_with_metrics(label: str, run_fn):
-                """추론 실행 + GPU 메모리(allocated/reserved 피크) + 추론 Latency 측정.
+                """추론 실행 + GPU 메모리(pynvml 드라이버 레벨 피크 포함) + 추론 Latency 측정.
 
                 측정 대상: test_step(data) 한 번 호출당 시간 (sync → test_step → sync).
                 - Data loading 제외: 루프가 'batch = next(dataloader)' 후 test_step(batch) 호출하므로,
@@ -604,11 +642,30 @@ def main():
                   즉 '순수 forward만'이 아니라 '배치 1개에 대한 추론 스텝 전체' 시간.
                 - torch.cuda.synchronize() 로 GPU 연산 완료 후 측정.
                 - 첫 번째 배치는 CUDA JIT / cuDNN autotuning 으로 느릴 수 있음.
+                - pynvml: cudaDeviceSynchronize() 후 NVML 드라이버 레벨 전체 점유 측정.
+                  PyTorch 할당자 + TRT 내부 버퍼 + cuDNN workspace 모두 포함.
+                  논문 보고용 메모리 수치로 권장 (nvidia-smi 백엔드와 동일).
                 """
                 _times: list = []
-                # 스텝별 순수 활성화 메모리 (baseline 차감) 및 reserved 스냅샷
+                # PyTorch allocator 기반 스텝별 순수 활성화 메모리 (baseline 차감)
                 _peak_deltas:     list = []   # max_allocated - baseline (per step)
                 _resrv_snapshots: list = []   # memory_reserved() after each step
+                # pynvml 기반 드라이버 레벨 전체 GPU 메모리 스냅샷 (스텝 완료 후)
+                _nvml_snapshots:  list = []   # nvmlDeviceGetMemoryInfo().used (MB, per step)
+
+                # ── TRT engine pre-allocated device memory 수집 ──────────
+                # TRT는 create_execution_context() 시점에 활성화 버퍼+workspace를
+                # PyTorch 할당자 외부에서 cudaMalloc한다.
+                # 이 값을 PyTorch activation 측정치에 더해야 "INT8 순수 활성화 메모리"를
+                # 올바르게 구할 수 있다 (TRTModule.device_memory_bytes 속성 이용).
+                _trt_device_mem_bytes: int = 0
+                _search_model = (runner.model.module
+                                 if hasattr(runner.model, 'module')
+                                 else runner.model)
+                for _submod in _search_model.modules():
+                    if hasattr(_submod, 'device_memory_bytes'):
+                        _trt_device_mem_bytes += _submod.device_memory_bytes
+
                 # 테스트 루프가 호출하는 것은 runner.model.test_step
                 _orig_test_step = runner.model.test_step
 
@@ -621,16 +678,19 @@ def main():
                     t0 = time.perf_counter()
                     out = _orig_test_step(data)
                     if torch.cuda.is_available():
-                        torch.cuda.synchronize()
+                        torch.cuda.synchronize()  # TRT 포함 모든 비동기 커널 완료 대기
                     # sync 완료 직후 타이머 종료 (메모리 측정 오버헤드 제외)
                     _times.append(time.perf_counter() - t0)
                     if torch.cuda.is_available():
-                        # 이 스텝에서 baseline 대비 추가 할당된 최대치 (활성화만)
+                        # PyTorch: 이 스텝에서 baseline 대비 추가 할당된 최대치
                         _peak_deltas.append(
                             torch.cuda.max_memory_allocated() - baseline_mem
                         )
-                        # reserved 현재값 스냅샷 (누적 최대치 추적용)
+                        # PyTorch: reserved 현재값 스냅샷
                         _resrv_snapshots.append(torch.cuda.memory_reserved())
+                        # pynvml: cudaDeviceSynchronize() 완료 후 드라이버 레벨 전체 점유
+                        # TRT 내부 활성화 버퍼, cuDNN workspace 모두 포함
+                        _nvml_snapshots.append(_nvml_used_mb())
                     return out
 
                 runner.model.test_step = _timed_test_step
@@ -647,9 +707,11 @@ def main():
                 # ── GPU 메모리 피크 ────────────────────────────────────────
                 _report_gpu_memory(f"after {label}")
                 if torch.cuda.is_available():
-                    # 순수 활성화 메모리: 스텝별 (peak_in_step - baseline) 통계
+                    MB = 1024 ** 2
+                    GB = 1024 ** 3
+
+                    # ── PyTorch allocator 기반 (참고용) ──────────────────
                     if _peak_deltas:
-                        GB = 1024 ** 3
                         n_d          = len(_peak_deltas)
                         wu_d         = min(_WARMUP, n_d)
                         act_max      = max(_peak_deltas)       / GB
@@ -661,24 +723,68 @@ def main():
                     else:
                         act_max = act_min = act_avg = act_stbl_avg = float('nan')
                         wu_d = 0
-                    # reserved 최대치: 스텝별 스냅샷 max (단조 증가이므로 마지막값과 동일)
-                    peak_resrv = (max(_resrv_snapshots) / 1024 ** 3
+                    peak_resrv = (max(_resrv_snapshots) / GB
                                   if _resrv_snapshots else float('nan'))
+
+                    # ── pynvml 기반 드라이버 레벨 (논문 보고용) ──────────
+                    _nvml_valid = [v for v in _nvml_snapshots
+                                   if v == v]  # NaN 제거
+                    if _nvml_valid:
+                        nv_n          = len(_nvml_valid)
+                        nv_wu         = min(_WARMUP, nv_n)
+                        nv_peak       = max(_nvml_valid)
+                        nv_min        = min(_nvml_valid)
+                        nv_avg        = sum(_nvml_valid) / nv_n
+                        nv_stable     = (_nvml_valid[nv_wu:]
+                                         if nv_n > nv_wu else _nvml_valid)
+                        nv_stbl_avg   = sum(nv_stable) / len(nv_stable)
+                        nvml_avail    = True
+                    else:
+                        nv_peak = nv_min = nv_avg = nv_stbl_avg = float('nan')
+                        nv_wu   = 0
+                        nvml_avail = False
+
+                    # ── TRT pre-allocated device memory ──────────────────
+                    trt_mem_mb  = _trt_device_mem_bytes / MB
+                    trt_mem_gb  = _trt_device_mem_bytes / GB
+                    has_trt_mem = _trt_device_mem_bytes > 0
+
                     print(f"==> [GPU Memory Peak] {label}:")
-                    print(f"    active allocated  max  : {act_max:.3f} GB"
-                          f"  ← 순수 추론 활성화 메모리 (평가 결과 누적 제외, 스텝별 baseline 차감)")
-                    print(f"    active allocated  min  : {act_min:.3f} GB")
+
+                    # ① TRT pre-allocated device memory (INT8 전용)
+                    if has_trt_mem:
+                        print(f"    TRT device mem (pre-alloc)  : {trt_mem_mb:.1f} MB  ({trt_mem_gb:.3f} GB)"
+                              f"  ← create_execution_context() 시 cudaMalloc (활성화 버퍼+workspace)")
+
+                    # ② PyTorch activation + TRT 합산 (순수 추론 활성화 메모리)
+                    total_act_max_gb = act_max + trt_mem_gb
+                    total_act_avg_gb = act_avg + trt_mem_gb
+                    total_act_stbl_gb = act_stbl_avg + trt_mem_gb
+                    print(f"    [순수 추론 활성화 메모리] (PyTorch activation + TRT pre-alloc):")
+                    print(f"    total activation  max  : {total_act_max_gb:.3f} GB"
+                          f"  ← 논문 표기 권장 (FP16/INT8 공정 비교 가능)")
+                    print(f"    total activation  avg  : {total_act_avg_gb:.3f} GB  "
+                          f"(stable avg {wu_d+1}th~: {total_act_stbl_gb:.3f} GB)")
+                    if has_trt_mem:
+                        print(f"      └─ PyTorch activation max : {act_max:.3f} GB")
+                        print(f"      └─ TRT pre-alloc          : {trt_mem_gb:.3f} GB")
+
+                    # ③ pynvml 결과 (전체 드라이버 레벨 — 파라미터 포함)
+                    if nvml_avail:
+                        print(f"    [참고] pynvml 전체 GPU 점유 (파라미터 포함):")
+                        print(f"    peak GPU mem  (max)  : {nv_peak:.1f} MB  ({nv_peak/1024:.3f} GB)")
+                        print(f"    peak GPU mem  (avg)  : {nv_avg:.1f} MB  "
+                              f"(stable avg {nv_wu+1}th~: {nv_stbl_avg:.1f} MB)")
+                    else:
+                        print(f"    [참고] pynvml 미설치 — pip install pynvml 후 전체 GPU 점유도 측정 가능")
+
+                    # ④ PyTorch allocator 원본 (참고용)
+                    print(f"    [참고] PyTorch allocator only (TRT 미포함):")
+                    print(f"    active allocated  max  : {act_max:.3f} GB")
                     print(f"    active allocated  avg  : {act_avg:.3f} GB  "
                           f"(stable avg {wu_d+1}th~: {act_stbl_avg:.3f} GB)")
                     print(f"    peak reserved          : {peak_resrv:.3f} GB"
-                          f"  ← CUDA 드라이버 실제 점유 최대치 (nvidia-smi 기준)")
-                    if "FP16" in label:
-                        print(f"    [참고] Peak이 파라미터만큼(~50%) 줄지 않는 이유: "
-                              f"대부분이 활성화(중간 텐서)이며, autocast가 Softmax/LayerNorm 등 "
-                              f"FP32 유지 → 해당 구간 활성화도 FP32. 따라서 전체 peak는 10~20% 수준으로만 감소.")
-                    if "INT8" in label:
-                        print(f"    [참고] INT8(TRT) 내부 활성화 버퍼는 PyTorch 할당자 외부에서 관리되므로"
-                              f" active allocated는 TRT 구간 메모리를 과소 측정할 수 있음.")
+                          f"  ← CUDA 캐싱 할당자 예약 최대치")
                     print()
 
                 # ── 추론 Latency (test_step 호출당 시간) ─────────────────────
@@ -911,23 +1017,90 @@ def main():
                 # 2) inject 전: INT8 대상 모듈 파라미터 수 측정 (TRT 교체 후엔 PyTorch 파라미터가 사라짐)
                 int8_module_params = 0
                 int8_module_info = []
-                if hasattr(_model, 'forward_projection'):
-                    _fp = _model.forward_projection
-                    for _mod_name in ('img_backbone', 'img_neck', 'img_bev_encoder_backbone'):
-                        _submod = getattr(_fp, _mod_name, None)
-                        if _submod is not None:
-                            _n = sum(p.numel() for p in _submod.parameters())
-                            int8_module_params += _n
-                            int8_module_info.append((_mod_name, _n))
+                # STCOcc: forward_projection 하위에 서브모듈이 있음
+                # FusionOcc: img_backbone / img_neck / img_bev_encoder_backbone
+                # CONet: img_backbone / img_neck / occ_encoder_backbone
+                _int8_owner = (
+                    _model.forward_projection if hasattr(_model, 'forward_projection')
+                    else _model
+                )
+                # CONet은 img_bev_encoder_backbone 대신 occ_encoder_backbone 사용
+                _is_conet = (
+                    not hasattr(_model, 'forward_projection')
+                    and hasattr(_model, 'occ_encoder_backbone')
+                    and not hasattr(_model, 'img_bev_encoder_backbone')
+                )
+                _bev_mod_name = 'occ_encoder_backbone' if _is_conet else 'img_bev_encoder_backbone'
+                # CONet: img_backbone + SECONDFPN 모두 PyTorch FP16 유지
+                #        (TRT INT8 cuTENSOR NHWC permutation 버그, 6회 시도 후 불가 판정)
+                #        → occ_encoder_backbone 만 INT8 집계
+                # 기타 모델(STCOcc, FusionOcc): backbone + neck + bev_encoder 모두 INT8
+                _int8_targets = (
+                    (_bev_mod_name,)
+                    if _is_conet
+                    else ('img_backbone', 'img_neck', _bev_mod_name)
+                )
+                for _mod_name in _int8_targets:
+                    _submod = getattr(_int8_owner, _mod_name, None)
+                    if _submod is not None:
+                        _n = sum(p.numel() for p in _submod.parameters())
+                        int8_module_params += _n
+                        int8_module_info.append((_mod_name, _n))
 
                 # 3) INT8 엔진 주입 (TRT 출력을 FP16으로 넘겨 나머지 FP16 모듈과 연결)
-                try:
-                    from projects.STCOcc.stcocc.utils.precision_utils import (
-                        inject_int8_engines,
+                # STCOcc (forward_projection 보유): STCOcc precision_utils 사용.
+                #   단, ``from projects.STCOcc.stcocc.utils.precision_utils import ...``
+                #   구문은 stcocc/__init__.py 를 실행시켜 LSSViewTransformer 를
+                #   MMEngine 레지스트리에 이중 등록하려고 시도한다.
+                #   FusionOcc 와 같이 동일 이름의 클래스가 이미 등록된 환경에서는
+                #   KeyError 가 발생하므로 importlib 로 파일을 직접 로드한다.
+                # FusionOcc (forward_projection 없음): FusionOcc precision_utils 사용.
+                import importlib.util as _ilib_util
+                if hasattr(_model, 'forward_projection'):
+                    # STCOcc: importlib 으로 __init__.py 실행 우회
+                    _pu_file = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)),
+                        '../projects/STCOcc/stcocc/utils/precision_utils.py',
                     )
-                    inject_int8_engines(_model, args.int8_engines, TRTModule, output_fp16=True)
-                except ImportError:
-                    pass
+                    try:
+                        _spec = _ilib_util.spec_from_file_location(
+                            'stcocc_precision_utils', _pu_file)
+                        _pu = _ilib_util.module_from_spec(_spec)  # type: ignore[arg-type]
+                        _spec.loader.exec_module(_pu)             # type: ignore[union-attr]
+                        _pu.inject_int8_engines(
+                            _model, args.int8_engines, TRTModule, output_fp16=True)
+                    except Exception as _e:
+                        print(f'  [경고] STCOcc inject_int8_engines 로드 실패: {_e}')
+                elif _is_conet:
+                    # CONet: occ_encoder_backbone 사용, CONet 전용 주입 함수 사용
+                    _pu_file = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)),
+                        '../projects/CONet/mmdet3d_plugin/utils/precision_utils.py',
+                    )
+                    try:
+                        _spec = _ilib_util.spec_from_file_location(
+                            'conet_precision_utils', _pu_file)
+                        _pu = _ilib_util.module_from_spec(_spec)  # type: ignore[arg-type]
+                        _spec.loader.exec_module(_pu)             # type: ignore[union-attr]
+                        _pu.inject_int8_engines_conet(
+                            _model, args.int8_engines, TRTModule, output_fp16=True)
+                    except Exception as _e:
+                        print(f'  [경고] CONet inject_int8_engines 로드 실패: {_e}')
+                else:
+                    # FusionOcc: FusionOcc 전용 주입 함수 사용
+                    _pu_file = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)),
+                        '../projects/FusionOcc/fusionocc/utils/precision_utils.py',
+                    )
+                    try:
+                        _spec = _ilib_util.spec_from_file_location(
+                            'fusionocc_precision_utils', _pu_file)
+                        _pu = _ilib_util.module_from_spec(_spec)  # type: ignore[arg-type]
+                        _spec.loader.exec_module(_pu)             # type: ignore[union-attr]
+                        _pu.inject_int8_engines_fusionocc(
+                            _model, args.int8_engines, TRTModule, output_fp16=True)
+                    except Exception as _e:
+                        print(f'  [경고] FusionOcc inject_int8_engines 로드 실패: {_e}')
 
                 # INT8+FP16 파라미터 메모리 절감률 출력
                 _print_parameter_memory_after_int8(runner.model, fp32_param_mb, int8_module_params)
@@ -935,7 +1108,11 @@ def main():
                 _print_int8_fp16_fp32_flops_coverage(runner.model, int8_module_params, int8_module_info)
 
                 # 4) autocast 안에서 추론 (나머지 FP16 연산)
-                print('\n==> INT8 TRT + FP16 추론 시작 (img_backbone/neck/bev_encoder_backbone=INT8, 나머지=FP16)\n')
+                if _is_conet:
+                    _int8_desc = 'occ_encoder_backbone=INT8, img_backbone/SECONDFPN/나머지=FP16'
+                else:
+                    _int8_desc = 'img_backbone/neck/bev_encoder_backbone=INT8, 나머지=FP16'
+                print(f'\n==> INT8 TRT + FP16 추론 시작 ({_int8_desc})\n')
                 def _int8_run():
                     with torch.cuda.amp.autocast():  # type: ignore[attr-defined]
                         runner.test()
