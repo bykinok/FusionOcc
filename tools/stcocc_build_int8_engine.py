@@ -83,6 +83,13 @@ class NpyFolderCalibrator(
         return [int(self._buf.data_ptr())]
 
     def read_calibration_cache(self) -> bytes | None:
+        # ONNX 구조가 변경된 경우(dynamic→static 등) 기존 캐시를 그대로 사용하면
+        # 레이어 이름 불일치로 인해 잘못된 스케일이 적용될 수 있다.
+        # 환경변수 TRT_DISCARD_CALIB_CACHE=1 로 캐시 무시를 강제할 수 있도록 지원.
+        import os as _os
+        if _os.environ.get('TRT_DISCARD_CALIB_CACHE', '0') == '1':
+            print('  [TRT_DISCARD_CALIB_CACHE=1] 캐시 무시, 재보정 실행.')
+            return None
         if os.path.exists(self.cache_file):
             print(f'  캐시 로딩: {self.cache_file}')
             with open(self.cache_file, 'rb') as f:
@@ -132,6 +139,36 @@ def build_engine(onnx_path: str,
             workspace_gb * (1 << 30)
         )
 
+        # ── cuTENSOR 전술(tactic) 비활성화 ─────────────────────────────
+        # TRT 10.x 는 INT8 최적화 시 cuTENSOR 기반 커널을 선택할 수 있다.
+        # 이 커널이 대형 입력(예: [6,3,896,1600])에서 내부 workspace 포인터를
+        # 잘못 처리해 'Internal cuTensor permutate execute failed' +
+        # 'illegal memory access' 를 유발하는 알려진 TRT 10.x 버그가 있다.
+        #
+        # 두 가지 방어 조치를 모두 적용:
+        #  1) builder_optimization_level = 2 : 공격적 최적화를 억제해
+        #     cuTENSOR 기반 전술 선택 빈도를 낮춤.
+        #  2) set_tactic_sources(CUBLAS|CUBLAS_LT|CUDNN) :
+        #     cuTENSOR 를 직접 사용하는 소스를 제외하고 cuDNN/cuBLAS 커널만 허용.
+        #
+        # 이 설정으로 빌드한 엔진은 cuDNN/cuBLAS 기반 커널을 사용하므로
+        # 위 버그가 발생하지 않는다. (STCOcc 처럼 해상도가 낮은 경우에는
+        # cuTENSOR 커널도 정상 동작하므로 기존 STCOcc 엔진에는 영향 없음)
+        try:
+            config.builder_optimization_level = 2
+        except AttributeError:
+            pass  # TRT < 8.6: 해당 API 없음 — 무시
+
+        try:
+            config.set_tactic_sources(
+                1 << int(trt.TacticSource.CUBLAS)    |
+                1 << int(trt.TacticSource.CUBLAS_LT) |
+                1 << int(trt.TacticSource.CUDNN)
+            )
+        except (AttributeError, TypeError):
+            pass  # TRT 버전에 따라 TacticSource 가 없을 수 있음 — 무시
+        # ────────────────────────────────────────────────────────────────
+
         # 정밀도 설정
         if precision == 'fp16':
             assert builder.platform_has_fast_fp16, 'fp16 미지원 GPU'
@@ -158,23 +195,73 @@ def build_engine(onnx_path: str,
                     print(f'  ONNX 파싱 오류: {parser.get_error(i)}')
                 raise RuntimeError('ONNX 파싱 실패')
 
+        # ── 전체 텐서 LINEAR(NCHW) 포맷 강제 ──────────────────────────────────
+        # 문제 원인:
+        #   TRT INT8 빌드 시, 대형 입력([6, 3, 896, 1600])에 대해 TRT 가 내부적으로
+        #   NHWC 포맷 변환(NCHW→NHWC) 을 위한 cuTENSOR permutation 연산을 삽입한다.
+        #   이 연산은 'tactic' 이 아닌 TRT 내부 format-transformation layer 로,
+        #   set_tactic_sources(CUBLAS|CUDNN) 로는 제어할 수 없다.
+        #   TRT 10.x 에서 이 cuTENSOR permutation 커널이 workspace 포인터를 잘못
+        #   처리해 'cuTensor permutate execute failed' + 'illegal memory access' 를 유발.
+        #
+        # 해결:
+        #   파싱 직후, 네트워크의 모든 ITensor 에 allowed_formats = LINEAR 를 설정.
+        #   TRT 가 NHWC 포맷으로 변환할 수 없게 되므로 cuTENSOR permutation 자체가
+        #   선택되지 않는다. cuDNN 은 NCHW 모드 INT8 conv 커널을 제공하므로
+        #   빌드는 계속 가능하다. (STCOcc 처럼 해상도가 낮은 경우엔 NHWC 가 더 빠르지만,
+        #   CONet 처럼 [6, 3, 896, 1600] 대형 입력에선 이 설정이 안정성을 우선한다.)
+        try:
+            _linear_fmt = 1 << int(trt.TensorFormat.LINEAR)
+            for _i in range(network.num_inputs):
+                network.get_input(_i).allowed_formats = _linear_fmt
+            for _i in range(network.num_outputs):
+                network.get_output(_i).allowed_formats = _linear_fmt
+            for _i in range(network.num_layers):
+                _lyr = network.get_layer(_i)
+                for _j in range(_lyr.num_outputs):
+                    _lyr.get_output(_j).allowed_formats = _linear_fmt
+            print('  [NCHW 강제] 전체 텐서 → LINEAR(NCHW) 포맷으로 제한'
+                  ' (cuTENSOR NHWC permutation 방지)')
+        except Exception as _fe:
+            print(f'  [경고] NCHW 강제 설정 실패 (무시): {_fe}')
+        # ──────────────────────────────────────────────────────────────────────
+
         # dynamic shape profile 설정
         # bev_encoder는 고정 shape(dynamic_axes=None으로 export) → profile 불필요.
-        # img_encoder는 batch_ncam이 dynamic(-1) → profile 필요.
+        # STCOcc img_encoder: batch_ncam이 dynamic(-1) → profile 필요.
+        # FusionOcc img_encoder: SwinTransformer window_reverse 내부에서
+        #   B = int(windows.shape[0] / (H*W/ws/ws)) 가 tracing 시 B=6 으로 상수화됨.
+        #   따라서 dynamic_axes=None 으로 재export 해야 하지만, 혹시 과거 dynamic 버전의
+        #   ONNX 가 남아 있는 경우를 대비해 input_shape[0]==-1 이어도 min=opt=max=6 으로
+        #   profile 을 고정한다. STCOcc 는 N_cam 이 진정 가변이므로 기존 범위(1~12)를 유지.
         input_tensor = network.get_input(0)
         input_name   = input_tensor.name
         input_shape  = input_tensor.shape  # dynamic dim은 -1로 표시됨
 
         if input_shape[0] == -1:
-            # img_encoder: batch_ncam 가변
             profile = builder.create_optimization_profile()
-            min_sh  = (1,)  + tuple(input_shape[1:])
-            opt_sh  = (6,)  + tuple(input_shape[1:])   # 6 카메라가 기본
-            max_sh  = (12,) + tuple(input_shape[1:])
+            # SwinTransformer 기반 img_encoder (FusionOcc)는 내부에서 B=6 상수화.
+            # 캘리브레이션 데이터 파일명(calib_dir)으로 모델 종류를 추정한다.
+            _calib_dir_str = str(calib_dir) if calib_dir else ''
+            _is_swin_encoder = ('fusion' in _calib_dir_str.lower() or
+                                'fusionocc' in _calib_dir_str.lower())
+            if _is_swin_encoder:
+                # SwinTransformer: window_reverse B=6 상수화 → profile 고정
+                _ncam = int(input_shape[1]) if input_shape[0] == -1 else input_shape[0]
+                _ncam = 6  # FusionOcc 고정 카메라 수
+                min_sh = (_ncam,) + tuple(input_shape[1:])
+                opt_sh = (_ncam,) + tuple(input_shape[1:])
+                max_sh = (_ncam,) + tuple(input_shape[1:])
+                print(f'  [FusionOcc] SwinTransformer 내부 B=6 상수 → profile 고정: {opt_sh}')
+            else:
+                # STCOcc 등 ResNet 계열: batch_ncam 진정 가변
+                min_sh  = (1,)  + tuple(input_shape[1:])
+                opt_sh  = (6,)  + tuple(input_shape[1:])   # 6 카메라가 기본
+                max_sh  = (12,) + tuple(input_shape[1:])
             profile.set_shape(input_name, min=min_sh, opt=opt_sh, max=max_sh)
             config.add_optimization_profile(profile)
         else:
-            # bev_encoder: 고정 shape - optimization profile 불필요
+            # 고정 shape (bev_encoder, 또는 dynamic_axes=None 으로 export된 img_encoder)
             # IInt8EntropyCalibrator2 + 5D(3D Conv) + dynamic shape 조합이
             # calibrator::add에서 illegal memory access를 유발하므로 static shape 사용.
             pass
@@ -220,6 +307,15 @@ class TRTModule(torch.nn.Module):
         self.context = self.engine.create_execution_context()
         self.engine_path = engine_path
 
+        # TRT 전용 non-default CUDA 스트림.
+        # torch.cuda.current_stream().cuda_stream 이 fresh 프로세스에서 0
+        # (CUDA null/default stream)을 반환하는 경우, TRT 는 내부적으로 추가
+        # cudaStreamSynchronize(0) 을 삽입한다. default stream 은 CUDA 전역
+        # 동기화 의미(all-stream barrier)를 가지므로 autocast 가 같은 스트림에
+        # 올린 FP16 커널과 충돌하여 cuTENSOR permutate execute failed 가 발생한다.
+        # 전용 스트림을 사용하면 이 문제가 해결된다.
+        self._trt_stream = torch.cuda.Stream()
+
         # 입출력 바인딩 이름 수집
         self.input_names  = []
         self.output_names = []
@@ -230,36 +326,61 @@ class TRTModule(torch.nn.Module):
             else:
                 self.output_names.append(name)
 
+        # TRT 실행 시 필요한 device memory 크기
+        # (활성화 버퍼 + cuDNN/cuBLAS workspace — create_execution_context() 시점에 pre-allocate)
+        # PyTorch 할당자 외부에서 관리되므로 torch.cuda.memory_allocated()에 미반영.
+        # 논문 보고용 "순수 활성화 메모리"를 구하려면 이 값을 PyTorch 측 측정치에 더해야 함.
+        try:
+            self.device_memory_bytes: int = self.engine.device_memory_size
+        except AttributeError:
+            # TRT 버전에 따라 API 이름이 다를 수 있음 — 0으로 폴백
+            self.device_memory_bytes = 0
+
         print(f'[TRTModule] 로딩: {engine_path}')
         print(f'  inputs : {self.input_names}')
         print(f'  outputs: {self.output_names}')
+        print(f'  TRT device memory (pre-alloc): {self.device_memory_bytes / 1024**2:.1f} MB'
+              f'  ← 활성화 버퍼+workspace (PyTorch 외부 관리)')
 
     def forward(self, *inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
         assert len(inputs) == len(self.input_names)
 
-        # 입력 shape 설정 (dynamic axes 처리)
-        for name, tensor in zip(self.input_names, inputs):
-            self.context.set_input_shape(name, tuple(tensor.shape))
-            self.context.set_tensor_address(name, tensor.data_ptr())
+        current_stream = torch.cuda.current_stream()
 
-        # 출력 버퍼 할당
-        output_tensors = []
-        for name in self.output_names:
-            shape = tuple(self.context.get_tensor_shape(name))
-            dtype = trt.nptype(self.engine.get_tensor_dtype(name))
-            pt_dtype = {
-                np.float32: torch.float32,
-                np.float16: torch.float16,
-                np.int32:   torch.int32,
-            }.get(dtype, torch.float32)
-            out = torch.empty(shape, dtype=pt_dtype, device='cuda')
-            self.context.set_tensor_address(name, out.data_ptr())
-            output_tensors.append(out)
+        # TRT 전용 스트림이 PyTorch current stream의 작업이 모두 완료된 후 실행되도록 대기.
+        # (입력 텐서가 current stream에서 준비된 후 TRT가 읽어야 하므로 필수)
+        self._trt_stream.wait_stream(current_stream)
 
-        # 실행
-        self.context.execute_async_v3(
-            stream_handle=torch.cuda.current_stream().cuda_stream
-        )
+        with torch.cuda.stream(self._trt_stream):
+            # 입력 shape 설정 (static 또는 dynamic axes 처리)
+            for name, tensor in zip(self.input_names, inputs):
+                self.context.set_input_shape(name, tuple(tensor.shape))
+                self.context.set_tensor_address(name, tensor.data_ptr())
+
+            # 출력 버퍼 할당
+            output_tensors = []
+            for name in self.output_names:
+                shape = tuple(self.context.get_tensor_shape(name))
+                dtype = trt.nptype(self.engine.get_tensor_dtype(name))
+                pt_dtype = {
+                    np.float32: torch.float32,
+                    np.float16: torch.float16,
+                    np.int32:   torch.int32,
+                }.get(dtype, torch.float32)
+                out = torch.empty(shape, dtype=pt_dtype, device='cuda')
+                self.context.set_tensor_address(name, out.data_ptr())
+                output_tensors.append(out)
+
+            # 전용 스트림으로 비동기 실행.
+            # non-default 스트림이므로 TRT 내부의 추가 cudaStreamSynchronize(0) 삽입이
+            # 발생하지 않아 cuTENSOR permutate 충돌을 방지한다.
+            self.context.execute_async_v3(
+                stream_handle=self._trt_stream.cuda_stream
+            )
+
+        # PyTorch current stream이 TRT 스트림 완료 후에 출력 텐서를 사용하도록 대기.
+        # (TRT 완료 전에 .half() 등을 호출하면 illegal memory access 발생)
+        current_stream.wait_stream(self._trt_stream)
 
         return tuple(output_tensors)
 

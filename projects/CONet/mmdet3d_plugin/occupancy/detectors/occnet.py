@@ -110,10 +110,14 @@ class OccNet(BaseModel):
         imgs_flat = imgs.view(B * N, C, imH, imW)
     
         # Ensure images are on the same device as the model
+        # TRT 교체 모듈(_TRTBackbone)은 파라미터가 없으므로 StopIteration 처리
         if hasattr(self.img_backbone, 'parameters'):
-            device = next(self.img_backbone.parameters()).device
-            if imgs_flat.device != device:
-                imgs_flat = imgs_flat.to(device)
+            try:
+                device = next(self.img_backbone.parameters()).device
+                if imgs_flat.device != device:
+                    imgs_flat = imgs_flat.to(device)
+            except StopIteration:
+                pass  # TRT 모듈: 파라미터 없음 → 입력은 이미 cuda에 있으므로 무시
         
         backbone_feats = self.img_backbone(imgs_flat)
         if self.with_img_neck:
