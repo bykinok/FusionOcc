@@ -751,14 +751,27 @@ def main():
                                           nn.BatchNorm3d))
                     )
                     # spconv implicit_gemm은 fp16을 지원하지 않으므로
-                    # spconv를 사용하는 LiDAR/레이더 관련 모듈은 fp32로 유지
+                    # spconv를 사용하는 LiDAR/레이더 관련 모듈만 fp32로 유지.
+                    # pts_backbone 등 일반 ResNet(BEVFormer 등)은 spconv 미사용이므로
+                    # FP16 변환 대상 → spconv 레이어 존재 여부를 확인 후 조건부 FP32 유지.
+                    def _has_spconv(mod):
+                        """모듈 내 spconv 레이어 포함 여부 반환."""
+                        for m in mod.modules():
+                            mod_cls = type(m)
+                            if 'spconv' in mod_cls.__module__:
+                                return True
+                        return False
+
                     for _attr in ('pts_voxel_encoder', 'pts_middle_encoder',
                                   'pts_backbone',
                                   'radar_voxel_encoder', 'radar_backbone',
                                   'radar_middle_encoder'):
                         _mod = getattr(_model, _attr, None)
                         if _mod is not None:
-                            _mod.float()
+                            if _has_spconv(_mod):
+                                _mod.float()
+                            # spconv 없는 모듈(BEVFormer pts_backbone 등 일반 ResNet)은
+                            # model.half()로 이미 FP16 변환됐으므로 그대로 유지
 
                     # ── img_backbone forward_pre_hook: fp32 입력 → fp16 자동 캐스팅 ──
                     # 원인: model.half()로 backbone 가중치가 fp16이 된 상태에서
