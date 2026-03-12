@@ -15,6 +15,11 @@ STCOcc 대비 주요 변경:
   - img input : [6, 3, 512, 1408]  (STCOcc: [6, 3, 256, 704])
   - bev input : [1, 96, 16, 200, 200] (STCOcc: [1, 160, 8, 100, 100])
 
+[설계 결정] img_encoder ONNX 출력은 neck_feat 1개만 내보낸다.
+  FusionOcc 추론은 항상 stereo=False 로 호출(fusion_occ.py:145)되므로
+  stereo_feat 은 사용되지 않는다. 1출력으로 단순화함으로써
+  TRT 엔진 출력 수와 precision_utils.py 의 기대값을 일관되게 유지한다.
+
 사용법:
     python tools/fusionocc_export_onnx.py \\
         --config     projects/FusionOcc/configs/fusion_occ_occ3d_miou_unified.py \\
@@ -53,8 +58,11 @@ class FusionOccImageEncoderWrapper(nn.Module):
         x = cat(stage2_up2x, stage3) → conv → [B*N, 256, H/16, W/16]  (single tensor)
 
     ONNX 출력:
-        neck_feat   [B*N, 256, H/16, W/16]   (img_view_transformer 입력)
-        stereo_feat [B*N, 128, H/4,  W/4 ]   (depth 추정에는 미사용이나 보존)
+        neck_feat [B*N, 256, H/16, W/16]   (img_view_transformer 입력)
+
+    stereo_feat 은 ONNX 출력에서 제외한다.
+    FusionOcc 는 항상 stereo=False 로 추론하므로 stereo_feat 이 불필요하며,
+    1출력으로 단순화해 TRT 엔진 및 precision_utils.py 와 일관성을 유지한다.
     """
 
     def __init__(self, backbone: nn.Module, neck: nn.Module):
@@ -65,7 +73,7 @@ class FusionOccImageEncoderWrapper(nn.Module):
     def forward(self, img: torch.Tensor):
         # SwinTransformer: [stage0, stage2, stage3] (return_stereo_feat=True)
         x = self.backbone(img)
-        stereo_feat = x[0]          # stage0: [B*N, 128, H/4, W/4]
+        # x[0] = stage0 (stereo_feat) → stereo=False 이므로 사용 안 함, 그래프에서 제외
         neck_in = x[1:]             # (stage2, stage3)
 
         # FPN_LSS.forward(feats): feats[input_feature_index[0]], feats[input_feature_index[1]]
@@ -76,7 +84,7 @@ class FusionOccImageEncoderWrapper(nn.Module):
         else:
             neck_feat = neck_out    # [B*N, 256, H/16, W/16]
 
-        return neck_feat, stereo_feat
+        return neck_feat            # 단일 출력: stereo=False 전용
 
 
 class FusionOccBEVEncoderWrapper(nn.Module):
@@ -198,15 +206,15 @@ def export_img_encoder(model, out_path: str, opset: int = 17):
             out_path,
             opset_version=opset,
             input_names=['img'],
-            output_names=['neck_feat', 'stereo_feat'],
-            dynamic_axes=None,      # 고정 shape: SwinTransformer B=6 상수화 문제 회피
+            output_names=['neck_feat'],     # stereo=False 전용: 1출력으로 단순화
+            dynamic_axes=None,              # 고정 shape: SwinTransformer B=6 상수화 문제 회피
             do_constant_folding=True,
         )
 
     size_mb = os.path.getsize(out_path) / 1e6
     print(f'  저장: {out_path}  ({size_mb:.1f} MB)')
 
-    _verify_onnx(out_path, dummy, wrapper, ['neck_feat', 'stereo_feat'])
+    _verify_onnx(out_path, dummy, wrapper, ['neck_feat'])
 
 
 def export_bev_encoder(model, out_path: str, opset: int = 17):

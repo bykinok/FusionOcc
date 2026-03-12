@@ -57,16 +57,25 @@ def inject_int8_engines_fusionocc(model: nn.Module, eng_dir: str, TRTModule,
             TRT 엔진 I/O:
               input : img [B*N, 3, 512, 1408]  (static, B*N=6)
               output0: neck_feat  [B*N, C, H, W]
-              output1: stereo_feat [B*N, C2, H2, W2]
+              output1: stereo_feat [B*N, C2, H2, W2]  ← 엔진에 따라 없을 수 있음
 
-            반환값: [stereo_feat, None, None]
-              x[0]  = stereo_feat → image_encoder 가 stereo=True 일 때 사용
+            반환값: [stereo_feat_or_None, None, None]
+              x[0]  = stereo_feat → image_encoder 가 stereo=True 일 때만 사용.
+                      엔진 출력이 1개(stereo=False 전용)이면 None 반환.
               x[1:] = [None, None] → img_neck 에 전달되나 무시됨
             """
             def forward(self, imgs: torch.Tensor):
-                neck_feat, stereo_feat = trt_img(imgs.float())
+                outputs = trt_img(imgs.float())
+                # TRT 엔진이 Tensor 단일 반환이면 튜플로 통일
+                if isinstance(outputs, torch.Tensor):
+                    outputs = (outputs,)
+                neck_feat = outputs[0]
+                # stereo_feat 은 출력이 2개일 때만 존재.
+                # stereo=False 전용으로 빌드된 엔진은 1개만 출력.
+                stereo_feat = outputs[1] if len(outputs) > 1 else None
                 _cache['neck_feat'] = _to_out(neck_feat)
-                return [_to_out(stereo_feat), None, None]
+                return [_to_out(stereo_feat) if stereo_feat is not None else None,
+                        None, None]
 
         class _TRTNeck(nn.Module):
             """img_neck 을 캐시 반환으로 교체.
