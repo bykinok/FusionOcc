@@ -469,7 +469,7 @@ class BEVFormerOcc(MVXTwoStageDetector):
             return outs['bev_embed'], occ, outs['occ']
         return outs['bev_embed'], occ
 
-    def simple_test(self, img_metas, img=None, prev_bev=None, rescale=False):
+    def simple_test(self, img_metas, img=None, prev_bev=None, rescale=False, gt_depth=None, **kwargs):
         """Test function without augmentaiton."""
         # breakpoint()
         img_feats = self.extract_feat(img=img, img_metas=img_metas)
