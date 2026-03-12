@@ -3,6 +3,12 @@
 
 Uses LiDAR-derived gt_depth in ego frame (same as TPVFormer lidar2img=ego2img).
 BCE loss on depth bins; only used at training. Inference does not use this head.
+
+Loss normalization follows the per-element mean convention:
+  sum(BCE) / (num_fg_pixels × D)
+which gives loss values comparable in scale to the occupancy CE/Lovász losses.
+This differs from the raw BEVDet-style formula (sum / num_fg only), which
+produces D×-inflated loss values requiring a very small loss_weight to compensate.
 """
 import torch
 import torch.nn as nn
@@ -23,6 +29,10 @@ class AuxiliaryDepthHead(BaseModule):
 
     Predicts per-pixel depth distribution (bins) from one FPN level;
     supervised by LiDAR-derived gt_depth (ego-frame) with BCE.
+
+    The BCE loss is normalized per element (num_fg × D), so loss_weight
+    controls what fraction of the total occupancy loss the depth term contributes.
+    With loss_weight=0.5 the depth term is approximately half the occupancy loss.
     """
 
     def __init__(self,
@@ -89,8 +99,13 @@ class AuxiliaryDepthHead(BaseModule):
         return gt_depths.float()
 
     def get_depth_loss(self, depth_labels, depth_preds):
-        """BCE loss between one-hot gt depth bins and predicted depth distribution."""
-        # GT grid size (same as in get_downsampled_gt_depth)
+        """BCE loss between one-hot gt depth bins and predicted depth distribution.
+
+        Normalization: sum(BCE) / (num_fg_pixels × D)
+        This is equivalent to reduction='mean' over foreground elements only,
+        giving a per-element average BCE that is directly comparable in scale
+        to the occupancy CE/Lovász losses.
+        """
         if isinstance(depth_labels, (list, tuple)):
             depth_labels = torch.stack([t if torch.is_tensor(t) else torch.as_tensor(t) for t in depth_labels])
         B, N, H, W = depth_labels.shape
@@ -113,12 +128,14 @@ class AuxiliaryDepthHead(BaseModule):
         if fg_mask.sum() == 0:
             return depth_preds.sum() * 0.0
         # depth_preds are logits; use BCEWithLogits (expects logits, not [0,1])
+        # Normalize by num_fg × D (per-element mean) so that loss_weight has an
+        # intuitive scale relative to the occupancy losses.
         with torch.amp.autocast('cuda', enabled=False):
             depth_loss = F.binary_cross_entropy_with_logits(
                 depth_preds.float(),
                 depth_labels,
                 reduction='none',
-            ).sum() / max(1.0, fg_mask.sum().float())
+            ).sum() / max(1.0, fg_mask.sum().float() * self.D)
         return self.loss_weight * depth_loss
 
     def forward(self, x):

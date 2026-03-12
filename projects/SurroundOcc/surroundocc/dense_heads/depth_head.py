@@ -3,6 +3,10 @@
 
 Uses LiDAR-derived gt_depth in ego frame (from SurroundOccPointToMultiViewDepth).
 SurroundOcc FPN has out_channels=512, so in_channels=512 by default.
+
+Loss normalization follows the per-element mean convention:
+  sum(BCE) / (num_fg_pixels × D)
+which gives loss values comparable in scale to the occupancy losses.
 """
 import torch
 import torch.nn as nn
@@ -20,7 +24,12 @@ def _get_num_depth_bins(grid_config_depth):
 @DET3D_MODELS.register_module()
 @ENGINE_MODELS.register_module()
 class AuxiliaryDepthHead(BaseModule):
-    """Auxiliary depth prediction head (SurroundOcc: in_channels=512)."""
+    """Auxiliary depth prediction head (SurroundOcc: in_channels=512).
+
+    The BCE loss is normalized per element (num_fg × D), so loss_weight
+    controls what fraction of the total occupancy loss the depth term contributes.
+    With loss_weight=0.5 the depth term is approximately half the occupancy loss.
+    """
 
     def __init__(self,
                  in_channels=512,
@@ -77,6 +86,13 @@ class AuxiliaryDepthHead(BaseModule):
         return gt_depths.float()
 
     def get_depth_loss(self, depth_labels, depth_preds):
+        """BCE loss between one-hot gt depth bins and predicted depth distribution.
+
+        Normalization: sum(BCE) / (num_fg_pixels × D)
+        This is equivalent to reduction='mean' over foreground elements only,
+        giving a per-element average BCE that is directly comparable in scale
+        to the occupancy CE/Lovász losses.
+        """
         if isinstance(depth_labels, (list, tuple)):
             depth_labels = torch.stack([t if torch.is_tensor(t) else torch.as_tensor(t) for t in depth_labels])
         B, N, H, W = depth_labels.shape
@@ -96,12 +112,14 @@ class AuxiliaryDepthHead(BaseModule):
         depth_preds = depth_preds[fg_mask]
         if fg_mask.sum() == 0:
             return depth_preds.sum() * 0.0
+        # Normalize by num_fg × D (per-element mean) so that loss_weight has an
+        # intuitive scale relative to the occupancy losses.
         with torch.amp.autocast('cuda', enabled=False):
             depth_loss = F.binary_cross_entropy_with_logits(
                 depth_preds.float(),
                 depth_labels,
                 reduction='none',
-            ).sum() / max(1.0, fg_mask.sum().float())
+            ).sum() / max(1.0, fg_mask.sum().float() * self.D)
         return self.loss_weight * depth_loss
 
     def forward(self, x):
