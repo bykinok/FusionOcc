@@ -112,12 +112,14 @@ class BEVFormerOcc(MVXTwoStageDetector):
         if depth_supervision and depth_supervision.get('enabled'):
             from mmdet3d.registry import MODELS
             depth_cfg = dict(
-                type='AuxiliaryDepthHead',
-                in_channels=256,
+                type=depth_supervision.get('type', 'AuxiliaryDepthHead'),
+                in_channels=depth_supervision.get('in_channels', 256),
                 grid_config=depth_supervision['grid_config'],
                 downsample=depth_supervision['downsample'],
                 loss_weight=depth_supervision.get('loss_weight', 0.5),
             )
+            if depth_supervision.get('mid_channels') is not None:
+                depth_cfg['mid_channels'] = depth_supervision['mid_channels']
             self.depth_head = MODELS.build(depth_cfg)
             self._depth_feature_level = depth_supervision.get('feature_level', 1)
 

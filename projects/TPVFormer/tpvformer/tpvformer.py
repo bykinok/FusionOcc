@@ -57,12 +57,14 @@ class TPVFormer(Base3DSegmentor):
         self._depth_feature_level = 1
         if self.depth_supervision.get('enabled'):
             depth_cfg = dict(
-                type='AuxiliaryDepthHead',
-                in_channels=256,  # FPN out_channels
+                type=self.depth_supervision.get('type', 'AuxiliaryDepthHead'),
+                in_channels=self.depth_supervision.get('in_channels', 256),
                 grid_config=self.depth_supervision['grid_config'],
                 downsample=self.depth_supervision['downsample'],
                 loss_weight=self.depth_supervision.get('loss_weight', 0.5),
             )
+            if self.depth_supervision.get('mid_channels') is not None:
+                depth_cfg['mid_channels'] = self.depth_supervision['mid_channels']
             self.depth_head = MODELS.build(depth_cfg)
             self._depth_feature_level = self.depth_supervision.get('feature_level', 1)
 

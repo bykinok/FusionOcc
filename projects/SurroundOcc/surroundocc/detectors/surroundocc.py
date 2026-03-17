@@ -133,12 +133,14 @@ class SurroundOcc(Base3DDetector):
         self._depth_feature_level = 1
         if depth_supervision and depth_supervision.get('enabled'):
             depth_cfg = dict(
-                type='AuxiliaryDepthHead',
-                in_channels=512,
+                type=depth_supervision.get('type', 'AuxiliaryDepthHead'),
+                in_channels=depth_supervision.get('in_channels', 512),
                 grid_config=depth_supervision['grid_config'],
                 downsample=depth_supervision['downsample'],
                 loss_weight=depth_supervision.get('loss_weight', 0.5),
             )
+            if depth_supervision.get('mid_channels') is not None:
+                depth_cfg['mid_channels'] = depth_supervision['mid_channels']
             self.depth_head = ENGINE_MODELS.build(depth_cfg)
             self._depth_feature_level = depth_supervision.get('feature_level', 1)
         

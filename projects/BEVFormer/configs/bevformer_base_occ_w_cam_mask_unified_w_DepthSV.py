@@ -78,6 +78,9 @@ model = dict(
     # Auxiliary depth supervision (ego-frame gt_depth from BEVFormerPointToMultiViewDepth)
     depth_supervision=dict(
         enabled=True,
+        type='BEVDetStyleAuxDepthHead',
+        in_channels=256,
+        mid_channels=256,
         grid_config=depth_grid_config,
         downsample=depth_downsample,
         loss_weight=0.5,

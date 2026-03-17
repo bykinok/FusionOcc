@@ -15,6 +15,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from mmengine.model import BaseModule
 from mmdet3d.registry import MODELS
+from mmdet.models.backbones.resnet import BasicBlock
+from mmcv.cnn import build_conv_layer, build_norm_layer
 
 
 def _get_num_depth_bins(grid_config_depth):
@@ -142,5 +144,124 @@ class AuxiliaryDepthHead(BaseModule):
         """x: [B, N, C, H, W] -> [B, N, D, H, W] logits."""
         B, N, C, H, W = x.shape
         x = x.view(B * N, C, H, W)
+        logits = self.depth_conv(x)
+        return logits.view(B, N, self.D, H, W)
+
+
+# ---------------------------------------------------------------------------
+# BEVDet-style Depth Auxiliary Head
+# Ref: BEVDepth (Li et al., AAAI 2023) — depth branch only, no camera conditioning
+# ---------------------------------------------------------------------------
+
+class _ASPPModule(nn.Module):
+    """Atrous convolution block used inside ASPP."""
+
+    def __init__(self, inplanes, planes, kernel_size, padding, dilation, norm_cfg):
+        super().__init__()
+        self.atrous_conv = nn.Conv2d(
+            inplanes, planes, kernel_size=kernel_size,
+            stride=1, padding=padding, dilation=dilation, bias=False)
+        self.bn = build_norm_layer(norm_cfg, planes)[1]
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        return self.relu(self.bn(self.atrous_conv(x)))
+
+
+class _ASPP(nn.Module):
+    """Atrous Spatial Pyramid Pooling for multi-scale depth context."""
+
+    def __init__(self, inplanes, mid_channels, norm_cfg=None):
+        super().__init__()
+        if norm_cfg is None:
+            norm_cfg = dict(type='BN2d', eps=1e-3, momentum=0.01)
+        self.aspp1 = _ASPPModule(inplanes, mid_channels, 1,  padding=0,  dilation=1,  norm_cfg=norm_cfg)
+        self.aspp2 = _ASPPModule(inplanes, mid_channels, 3,  padding=6,  dilation=6,  norm_cfg=norm_cfg)
+        self.aspp3 = _ASPPModule(inplanes, mid_channels, 3,  padding=12, dilation=12, norm_cfg=norm_cfg)
+        self.aspp4 = _ASPPModule(inplanes, mid_channels, 3,  padding=18, dilation=18, norm_cfg=norm_cfg)
+        self.global_avg_pool = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Conv2d(inplanes, mid_channels, 1, bias=False),
+            build_norm_layer(norm_cfg, mid_channels)[1],
+            nn.ReLU(inplace=True),
+        )
+        self.conv1 = nn.Conv2d(mid_channels * 5, mid_channels, 1, bias=False)
+        self.bn1 = build_norm_layer(norm_cfg, mid_channels)[1]
+        self.relu = nn.ReLU(inplace=True)
+        self.dropout = nn.Dropout(0.5)
+
+    def forward(self, x):
+        x1 = self.aspp1(x)
+        x2 = self.aspp2(x)
+        x3 = self.aspp3(x)
+        x4 = self.aspp4(x)
+        x5 = F.interpolate(
+            self.global_avg_pool(x), size=x4.shape[2:],
+            mode='bilinear', align_corners=True)
+        x = torch.cat([x1, x2, x3, x4, x5], dim=1)
+        return self.dropout(self.relu(self.bn1(self.conv1(x))))
+
+
+@MODELS.register_module()
+class BEVDetStyleAuxDepthHead(AuxiliaryDepthHead):
+    """BEVDet-style auxiliary depth head (no camera conditioning).
+
+    Architecture: reduce_conv(3×3,BN,ReLU) → 3×BasicBlock → ASPP → DCN → depth_conv(1×1)
+
+    Compared with AuxiliaryDepthHead (single 1×1 conv), this provides:
+      - Larger receptive field via stacked BasicBlocks
+      - Multi-scale atrous context via ASPP (dilation 1/6/12/18)
+      - Deformable spatial attention via DCN
+
+    Loss computation (get_downsampled_gt_depth, get_depth_loss) is fully inherited
+    from AuxiliaryDepthHead; only the feature extraction network is upgraded.
+
+    Args:
+        in_channels (int): FPN output channels (BEVFormer/TPVFormer: 256).
+        mid_channels (int): Internal channel width (default 256).
+        grid_config / downsample / loss_weight: forwarded to AuxiliaryDepthHead.
+        norm_cfg (dict): Normalisation for BN layers (default BN2d).
+    """
+
+    def __init__(self,
+                 in_channels=256,
+                 mid_channels=256,
+                 grid_config=None,
+                 downsample=16,
+                 loss_weight=0.5,
+                 norm_cfg=None,
+                 init_cfg=None):
+        super().__init__(
+            in_channels=in_channels,
+            grid_config=grid_config,
+            downsample=downsample,
+            loss_weight=loss_weight,
+            init_cfg=init_cfg,
+        )
+        if norm_cfg is None:
+            norm_cfg = dict(type='BN2d', eps=1e-3, momentum=0.01)
+
+        self.reduce_conv = nn.Sequential(
+            nn.Conv2d(in_channels, mid_channels, kernel_size=3, stride=1, padding=1),
+            build_norm_layer(norm_cfg, mid_channels)[1],
+            nn.ReLU(inplace=True),
+        )
+        # Override the simple 1×1 depth_conv from AuxiliaryDepthHead
+        self.depth_conv = nn.Sequential(
+            BasicBlock(mid_channels, mid_channels, norm_cfg=norm_cfg),
+            BasicBlock(mid_channels, mid_channels, norm_cfg=norm_cfg),
+            BasicBlock(mid_channels, mid_channels, norm_cfg=norm_cfg),
+            _ASPP(mid_channels, mid_channels, norm_cfg=norm_cfg),
+            build_conv_layer(
+                cfg=dict(type='DCN', in_channels=mid_channels, out_channels=mid_channels,
+                         kernel_size=3, padding=1, groups=4, im2col_step=128)),
+            nn.Conv2d(mid_channels, self.D, kernel_size=1, stride=1, padding=0),
+        )
+
+    def forward(self, x):
+        """x: [B, N, C, H, W] -> [B, N, D, H, W] logits."""
+        B, N, C, H, W = x.shape
+        x = x.view(B * N, C, H, W)
+        x = self.reduce_conv(x)
         logits = self.depth_conv(x)
         return logits.view(B, N, self.D, H, W)
