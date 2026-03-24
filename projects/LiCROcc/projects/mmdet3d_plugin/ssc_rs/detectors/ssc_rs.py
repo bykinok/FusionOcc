@@ -147,6 +147,7 @@ class SSC_RS(MVXTwoStageDetector):
                 use_semantic=True,
                 temperature=None,
                 compute_uncertainty=False,
+                save_results=False,
                 ):
 
         super(SSC_RS,
@@ -184,7 +185,8 @@ class SSC_RS(MVXTwoStageDetector):
         self.use_semantic = use_semantic
         self.temperature = temperature
         self.compute_uncertainty = compute_uncertainty
-        
+        self.save_results = save_results
+
         # Validate dataset_name
         valid_datasets = ['occ3d', 'nuscenes_occ']
         if dataset_name not in valid_datasets:
@@ -985,6 +987,18 @@ class SSC_RS(MVXTwoStageDetector):
                 outs, _, _,_,_ = self.radar_step(radar_pc, img_metas, img_feats)
         elif self.use_lidar:
             outs, _, _,_ = self.step(points, img_metas, img_feats)
+
+        if self.save_results and img_metas is not None:
+            import os
+            _metas = img_metas if isinstance(img_metas, list) else [img_metas]
+            # outs: (B, C, X, Y, Z) raw logits → argmax over channel dim
+            _pred = torch.argmax(outs, dim=1).cpu().numpy()  # (B, X, Y, Z)
+            for i, _meta in enumerate(_metas):
+                _token = _meta.get('token', _meta.get('sample_idx', i)) if isinstance(_meta, dict) else i
+                _scene = _meta.get('scene_name', _meta.get('scene_token', 'unknown')) if isinstance(_meta, dict) else 'unknown'
+                _save_dir = f'results/LiCROcc/{_scene}'
+                os.makedirs(_save_dir, exist_ok=True)
+                np.savez(f'{_save_dir}/{_token}.npz', semantics=_pred[i])
 
         result = dict()
         result['output_voxels'] = outs

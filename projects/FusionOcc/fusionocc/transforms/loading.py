@@ -800,11 +800,11 @@ class FormatDataSamples(object):
                            'sensor2sensorego', 'sensorego2global', 'sensorego2sensor', 'global2sensorego', 
                            'cam2img', 'depth2img', 'pad_shape', 'scale_factor', 'flip',
                            'pcd_horizontal_flip', 'pcd_vertical_flip', 'box_mode_3d',
-                           'box_type_3d', 'img_norm_cfg', 'pcd_trans', 'sample_idx',
+                           'box_type_3d', 'img_norm_cfg', 'pcd_trans', 'sample_idx', 'token',
                            'pcd_scale_factor', 'pcd_rotation', 'pcd_rotation_angle',
                            'pts_filename', 'transformation_3d_flow', 'trans_mat', 'index',
                            'sequence_group_idx', 'curr_to_prev_lidar_rt', 'curr_to_prev_ego_rt', 
-                           'start_of_sequence', 'can_bus', 'scene_name', 'affine_aug')):
+                           'start_of_sequence', 'can_bus', 'scene_name', 'scene_token', 'affine_aug')):
         self.keys = keys
         self.meta_keys = meta_keys
     

@@ -78,6 +78,7 @@ class BEVFormerOcc(MVXTwoStageDetector):
                  video_test_mode=False,
                  depth_supervision=None,
                  compute_uncertainty=False,
+                 save_results=False,
                  ):
 
         super(BEVFormerOcc,
@@ -124,6 +125,7 @@ class BEVFormerOcc(MVXTwoStageDetector):
             self._depth_feature_level = depth_supervision.get('feature_level', 1)
 
         self.compute_uncertainty = compute_uncertainty
+        self.save_results = save_results
 
         # temporal
         self.video_test_mode = video_test_mode
@@ -579,6 +581,22 @@ class BEVFormerOcc(MVXTwoStageDetector):
                 pred_occ = p.squeeze(dim=0).cpu().numpy().astype(np.uint8)
             else:
                 pred_occ = np.asarray(p, dtype=np.uint8)
+
+        if self.save_results:
+            import os
+            _metas_raw = unwrapped_data.get('img_metas', [])
+            # img_metas가 [[dict]] 형태로 변환됐을 수 있으므로 원소 추출
+            if isinstance(_metas_raw, list) and len(_metas_raw) > 0:
+                _meta0 = _metas_raw[0]
+                if isinstance(_meta0, list) and len(_meta0) > 0:
+                    _meta0 = _meta0[0]
+            else:
+                _meta0 = {}
+            _token = _meta0.get('token', _meta0.get('sample_idx', sample_idx)) if isinstance(_meta0, dict) else sample_idx
+            _scene = _meta0.get('scene_name', _meta0.get('scene_token', 'unknown')) if isinstance(_meta0, dict) else 'unknown'
+            _save_dir = f'results/BEVFormer/{_scene}'
+            os.makedirs(_save_dir, exist_ok=True)
+            np.savez(f'{_save_dir}/{_token}.npz', semantics=pred_occ)
 
         # Format as data_sample for OccupancyMetric and OccupancyMetricHybrid
         # Use both 'pred_occ' (original BEVFormer) and 'occ_results' (STCOcc metric) for compatibility

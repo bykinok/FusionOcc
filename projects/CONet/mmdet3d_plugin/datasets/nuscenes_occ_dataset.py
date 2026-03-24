@@ -146,9 +146,19 @@ class NuscOCCDataset(NuScenesDataset):
             
         info = self.data_list[index]
         
+        # Extract scene_name from occ_path (e.g. .../gts/scene-0003/<token>/labels.npz)
+        scene_name = info.get('scene_name', 'unknown')
+        for _path_key in ('occ_path', 'occ_gt_path'):
+            if scene_name == 'unknown' and _path_key in info and info[_path_key]:
+                for _part in str(info[_path_key]).replace('\\', '/').split('/'):
+                    if _part.startswith('scene-'):
+                        scene_name = _part
+                        break
+
         # standard protocal modified from SECOND.Pytorch
         input_dict = dict(
             sample_idx=info['token'],
+            token=info['token'],
             index=index,  # 정수 인덱스 추가 (메트릭용)
             pts_filename=info['lidar_path'],
             lidar_points=dict(lidar_path=info['lidar_path']),
@@ -160,6 +170,7 @@ class NuscOCCDataset(NuScenesDataset):
             prev_idx=info['prev'],
             next_idx=info['next'],
             scene_token=info['scene_token'],
+            scene_name=scene_name,
             can_bus=info['can_bus'],
             # frame_idx=info['frame_idx'],
             timestamp=info['timestamp'] / 1e6,

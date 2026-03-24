@@ -464,7 +464,17 @@ class NuScenesDatasetOccpancy(NuScenesDataset):
         # Scene token
         if 'scene_token' in info:
             input_dict['scene_token'] = info['scene_token']
-        
+
+        # Extract scene_name from occ_gt_path (e.g. .../gts/scene-0003/<token>/labels.npz)
+        scene_name = info.get('scene_name', 'unknown')
+        for _path_key in ('occ_gt_path', 'occ_path'):
+            if scene_name == 'unknown' and _path_key in info and info[_path_key]:
+                for _part in str(info[_path_key]).replace('\\', '/').split('/'):
+                    if _part.startswith('scene-'):
+                        scene_name = _part
+                        break
+        input_dict['scene_name'] = scene_name
+
         return input_dict
         
     def parse_data_info(self, info: dict) -> dict:

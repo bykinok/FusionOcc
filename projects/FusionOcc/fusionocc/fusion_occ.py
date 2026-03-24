@@ -451,6 +451,7 @@ class FusionOCC(FusionDepthSeg):
                  data_preprocessor=None,
                  temperature=None,
                  compute_uncertainty=False,
+                 save_results=False,
                  **kwargs):
         super(FusionOCC, self).__init__(
             img_bev_encoder_backbone=img_bev_encoder_backbone,
@@ -460,6 +461,7 @@ class FusionOCC(FusionDepthSeg):
         
         self.temperature = temperature
         self.compute_uncertainty = compute_uncertainty
+        self.save_results = save_results
         self.voxel_size = voxel_size
         self.lidar_out_channel = lidar_out_channel
         self.lidar_in_channel = lidar_in_channel
@@ -1567,7 +1569,25 @@ class FusionOCC(FusionDepthSeg):
             
             # Add prediction (now should be shape (200, 200, 16))
             data_sample['occ_pred'] = occ_result
-            
+
+            if self.save_results:
+                import os
+                _raw_metas = data.get('img_metas', [])
+                # img_metas는 list of dicts, plain dict, dict of lists 등 다양한 형태일 수 있음
+                if isinstance(_raw_metas, list) and i < len(_raw_metas) and isinstance(_raw_metas[i], dict):
+                    _meta_i = _raw_metas[i]
+                elif isinstance(_raw_metas, dict):
+                    # dict of lists(collated) 또는 plain dict(single sample) 통일 처리
+                    _meta_i = {k: (v[i] if isinstance(v, (list, tuple)) and len(v) > i else v)
+                               for k, v in _raw_metas.items()}
+                else:
+                    _meta_i = {}
+                _token = _meta_i.get('token', _meta_i.get('sample_idx', batch_indices[i]))
+                _scene = _meta_i.get('scene_name', 'unknown')
+                _save_dir = f'results/FusionOcc/{_scene}'
+                os.makedirs(_save_dir, exist_ok=True)
+                np.savez(f'{_save_dir}/{_token}.npz', semantics=occ_result)
+
             # CRITICAL: Add occ_results and index for STCOcc-based OccupancyMetricHybrid
             # occ_results must be a LIST (occupancy_metric.py line 233-236 iterates over it)
             # index must also be a LIST for consistent iteration; use real batch index from img_metas

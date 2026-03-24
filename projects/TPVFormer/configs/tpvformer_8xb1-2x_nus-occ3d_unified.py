@@ -182,7 +182,7 @@ val_evaluator = dict(
     ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_val.pkl',
     data_root='data/nuscenes/',
     eval_metric='miou',
-    sort_by_timestamp=False)  # TPVFormer does NOT sort dataset by timestamp
+    sort_by_timestamp=True)  # Dataset sorts by timestamp
 
 test_evaluator = val_evaluator
 

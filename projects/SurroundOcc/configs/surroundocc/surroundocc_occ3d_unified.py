@@ -62,6 +62,7 @@ model = dict(
     use_grid_mask=use_grid_mask,
     use_semantic=use_semantic,
     dataset_name=dataset_name,
+    save_results=False,  # Save prediction results to disk
     img_backbone=dict(
        type='ResNet',
        depth=101,
@@ -277,7 +278,7 @@ val_evaluator = dict(
     data_root='data/nuscenes',
     class_names=class_names,
     eval_metric='miou',
-    sort_by_timestamp=False)  # Dataset does NOT sort by timestamp (matching original SurroundOcc)
+    sort_by_timestamp=True)  # Dataset sorts by timestamp
 
 test_evaluator = val_evaluator
 load_from = 'projects/SurroundOcc/pretrain/r101_dcn_fcos3d_pretrain.pth'

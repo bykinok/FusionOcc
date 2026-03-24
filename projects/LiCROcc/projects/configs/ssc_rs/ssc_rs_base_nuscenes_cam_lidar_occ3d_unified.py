@@ -88,6 +88,7 @@ model = dict(
     type='SSC_RS',
     use_semantic=use_semantic,
     dataset_name=dataset_name,
+    save_results=False,  # Save prediction results to disk
     img_backbone=dict(
         type='mmdet.ResNet',
         depth=50,
@@ -303,7 +304,7 @@ val_evaluator = [
         data_root=data_root,
         class_names=class_names,
         eval_metric='miou',
-        sort_by_timestamp=False,
+        sort_by_timestamp=True,
     )
 ]
 test_evaluator = [
@@ -317,7 +318,7 @@ test_evaluator = [
         data_root=data_root,
         class_names=class_names,
         eval_metric='miou',
-        sort_by_timestamp=False,
+        sort_by_timestamp=True,
     )
 ]
 

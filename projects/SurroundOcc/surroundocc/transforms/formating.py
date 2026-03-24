@@ -29,8 +29,8 @@ class OccDefaultFormatBundle3D(Pack3DDetInputs):
                             'depth2img', 'cam2img', 'pad_shape', 'lidar2cam',
                             'scale_factor', 'flip', 'pcd_horizontal_flip',
                             'pcd_vertical_flip', 'box_mode_3d', 'box_type_3d',
-                            'img_norm_cfg', 'sample_idx', 'prev_idx', 'next_idx',
-                            'scene_token', 'pc_range', 'occ_size', 'occ_path', 'occ3d_gt_path',
+                            'img_norm_cfg', 'sample_idx', 'token', 'prev_idx', 'next_idx',
+                            'scene_token', 'scene_name', 'pc_range', 'occ_size', 'occ_path', 'occ3d_gt_path',
                             'voxel_semantics', 'voxel_semantics_1_2', 'voxel_semantics_1_4', 'voxel_semantics_1_8',
                             'mask_camera', 'bda_mat', 'index')):
         # Initialize keys

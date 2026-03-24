@@ -71,6 +71,7 @@ model = dict(
     type='mmdet3d.BEVFormerOcc',
     use_grid_mask=True,
     video_test_mode=True,  # 원본과 동일하게 temporal 정보 사용
+    save_results=False,  # Save prediction results to disk
     img_backbone=dict(
         type='mmdet.ResNet',
         depth=101,

@@ -98,9 +98,9 @@ class Collect3D(BaseTransform):
                            'depth2img', 'cam2img', 'pad_shape',
                            'scale_factor', 'flip', 'pcd_horizontal_flip',
                            'pcd_vertical_flip', 'box_mode_3d', 'box_type_3d',
-                           'img_norm_cfg', 'pcd_trans', 'sample_idx',
+                           'img_norm_cfg', 'pcd_trans', 'sample_idx', 'token',
                            'pcd_scale_factor', 'pcd_rotation', 'pts_filename',
-                           'transformation_3d_flow', 'scene_token', 'can_bus',
+                           'transformation_3d_flow', 'scene_token', 'scene_name', 'can_bus',
                            'lidar_token', 'pc_range', 'occ_size', 'occ_path')):
         self.keys = keys
         self.meta_keys = meta_keys

@@ -97,7 +97,7 @@ class CustomNuScenesOccDataset(NuScenesDataset):
         # Load data directly without parent class filtering
         self._load_data_list_direct()
         
-        # self.data_list = list(sorted(self.data_list, key=lambda e: e.get('timestamp', 0)))
+        self.data_list = list(sorted(self.data_list, key=lambda e: e.get('timestamp', 0)))
         # Use load_interval if available, otherwise default to 1
         load_interval = getattr(self, 'load_interval', 1)
         self.data_list = self.data_list[::load_interval]
@@ -407,9 +407,19 @@ class CustomNuScenesOccDataset(NuScenesDataset):
             
         info = self.data_list[index]
         
+        # Extract scene_name from occ_path (e.g. .../gts/scene-0003/<token>/labels.npz)
+        scene_name = info.get('scene_name', 'unknown')
+        for _path_key in ('occ_path', 'occ3d_gt_path', 'occ_gt_path'):
+            if scene_name == 'unknown' and _path_key in info and info[_path_key]:
+                for _part in str(info[_path_key]).replace('\\', '/').split('/'):
+                    if _part.startswith('scene-'):
+                        scene_name = _part
+                        break
+
         # standard protocal modified from SECOND.Pytorch
         input_dict = dict(
             sample_idx=info['token'],
+            token=info['token'],
             pts_filename=info['lidar_path'],
             lidar_points=dict(lidar_path=info['lidar_path']),
             sweeps=info['sweeps'],
@@ -420,6 +430,7 @@ class CustomNuScenesOccDataset(NuScenesDataset):
             prev_idx=info['prev'],
             next_idx=info['next'],
             scene_token=info['scene_token'],
+            scene_name=scene_name,
             can_bus=info['can_bus'],
             timestamp=info['timestamp'] / 1e6,
             occ_size=np.array(self.occ_size),

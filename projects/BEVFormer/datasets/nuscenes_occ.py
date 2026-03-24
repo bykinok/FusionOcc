@@ -254,8 +254,17 @@ class NuSceneOcc(NuScenesDataset):
         # Use data_list (mmengine) instead of data_infos (old mmdet3d)
         info = self.data_list[index]
         # standard protocal modified from SECOND.Pytorch
+        # Extract scene_name from occ_gt_path (e.g. .../gts/scene-0003/<token>/labels.npz)
+        scene_name = info.get('scene_name', 'unknown')
+        if scene_name == 'unknown' and 'occ_gt_path' in info:
+            for part in info['occ_gt_path'].replace('\\', '/').split('/'):
+                if part.startswith('scene-'):
+                    scene_name = part
+                    break
+
         input_dict = dict(
             sample_idx=info['token'],
+            token=info['token'],
             pts_filename=info['lidar_path'],
             sweeps=info['sweeps'],
             ego2global_translation=info['ego2global_translation'],
@@ -263,6 +272,7 @@ class NuSceneOcc(NuScenesDataset):
             prev_idx=info['prev'],
             next_idx=info['next'],
             scene_token=info['scene_token'],
+            scene_name=scene_name,
             can_bus=info['can_bus'],
             frame_idx=info['frame_idx'],
             timestamp=info['timestamp'] / 1e6,

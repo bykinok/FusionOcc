@@ -206,6 +206,8 @@ class nuScenesDataset(Dataset):
         with open(data_path, 'rb') as f:
             data = pickle.load(f)
         self.nusc_infos = data['infos']
+        if self.nusc_infos and 'timestamp' in self.nusc_infos[0]:
+            self.nusc_infos = list(sorted(self.nusc_infos, key=lambda e: e['timestamp']))
 
         self.lims = lims
         self.sizes = sizes
@@ -857,9 +859,20 @@ class nuScenesDataset(Dataset):
             radar_pc = augmentation_random_flip(radar_pc, flip_type, is_scan=True)
             radar_occupancy = augmentation_random_flip(radar_occupancy, flip_type)
 
+        # Extract scene_name from occ_path (e.g. .../gts/scene-0003/<token>/labels.npz)
+        _scene_name = info.get('scene_name', 'unknown')
+        if _scene_name == 'unknown':
+            _occ_path = info.get('occ_path', '')
+            if _occ_path:
+                for _part in str(_occ_path).replace('\\', '/').split('/'):
+                    if _part.startswith('scene-'):
+                        _scene_name = _part
+                        break
+
         meta_dict = dict(
-            points_paths = [points_path],   
-            scene_token = str(info['scene_token']), 
+            points_paths = [points_path],
+            scene_token = str(info['scene_token']),
+            scene_name = _scene_name,
             token = str(info['token']), 
             occupancy=occupancy.astype(np.float32),
             radar_occ = radar_occupancy.astype((np.float32)),

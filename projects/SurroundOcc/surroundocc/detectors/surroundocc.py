@@ -88,6 +88,7 @@ class SurroundOcc(Base3DDetector):
                  dataset_name: Optional[str] = None,
                  temperature: Optional[float] = None,
                  compute_uncertainty: bool = False,
+                 save_results: bool = False,
                  init_cfg: Optional[dict] = None,
                  data_preprocessor: Optional[dict] = None,
                  **kwargs):
@@ -155,6 +156,7 @@ class SurroundOcc(Base3DDetector):
         self.dataset_name = dataset_name
         self.temperature = temperature
         self.compute_uncertainty = compute_uncertainty
+        self.save_results = save_results
     
     @property
     def with_img_backbone(self):
@@ -603,6 +605,15 @@ class SurroundOcc(Base3DDetector):
             # pred_occ shape: (B, C, H, W, Z) — channels-first
             if getattr(self, 'export_occ_logits', False):
                 return_dict['occ_logits_raw'] = pred_occ
+
+            if self.save_results:
+                import os
+                for i, img_meta in enumerate(img_metas):
+                    _token = img_meta.get('token', img_meta.get('sample_idx', i)) if isinstance(img_meta, dict) else i
+                    _scene = img_meta.get('scene_name', 'unknown') if isinstance(img_meta, dict) else 'unknown'
+                    _save_dir = f'results/SurroundOcc/{_scene}'
+                    os.makedirs(_save_dir, exist_ok=True)
+                    np.savez(f'{_save_dir}/{_token}.npz', semantics=pred_occ_np[i])
 
             return [return_dict]  # Return as list of dict (STCOcc format)
         

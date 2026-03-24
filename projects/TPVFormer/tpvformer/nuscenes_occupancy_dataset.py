@@ -78,6 +78,13 @@ class NuScenesOccupancyDataset(BaseDataset):
             test_mode=test_mode,
             **kwargs)
 
+    def load_data_list(self) -> List[dict]:
+        """Load and sort data list by timestamp (matching BEVFormer/STCOcc behavior)."""
+        data_list = super().load_data_list()
+        if data_list and 'timestamp' in data_list[0]:
+            data_list = list(sorted(data_list, key=lambda e: e['timestamp']))
+        return data_list
+
     def parse_data_info(self, info: dict) -> Union[List[dict], dict]:
         """Process the raw data info.
 

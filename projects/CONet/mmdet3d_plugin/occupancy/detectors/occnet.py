@@ -66,6 +66,7 @@ class OccNet(BaseModel):
             pts_bbox_head=None,
             temperature=None,
             compute_uncertainty=False,
+            save_results=False,
             **kwargs):
         
         super().__init__(**kwargs)
@@ -101,6 +102,7 @@ class OccNet(BaseModel):
         self.with_pts_bbox = pts_bbox_head is not None
         self.temperature = temperature
         self.compute_uncertainty = compute_uncertainty
+        self.save_results = save_results
     
     def image_encoder(self, img):
         """Image encoder (copied from original CONet_ori)."""
@@ -835,6 +837,14 @@ class OccNet(BaseModel):
             gt_occ_np = gt_occ[0].cpu().numpy()
         else:
             gt_occ_np = gt_occ.cpu().numpy()
+
+        if self.save_results and img_metas is not None:
+            for i, img_meta in enumerate(img_metas):
+                _token = img_meta.get('token', img_meta.get('sample_idx', i)) if isinstance(img_meta, dict) else i
+                _scene = img_meta.get('scene_name', 'unknown') if isinstance(img_meta, dict) else 'unknown'
+                _save_dir = f'results/CONet/{_scene}'
+                os.makedirs(_save_dir, exist_ok=True)
+                np.savez(f'{_save_dir}/{_token}.npz', semantics=pred_occ_np)
 
         # export_occ_logits 모드: temperature scaling용 raw logits + GT 반환
         # export_occ_logits.py 기대 형식:
