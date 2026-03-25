@@ -56,6 +56,40 @@ openocc_colors_map = np.array(
     ]
 )
 
+# nuScenes-Occupancy (CONet) color map
+# index 0: free/unoccupied (white, ignored in vis), 1-16: semantic classes
+# class ordering: 0=free, 1=barrier, 2=bicycle, 3=bus, 4=car, 5=construction_vehicle,
+#                 6=motorcycle, 7=pedestrian, 8=traffic_cone, 9=trailer, 10=truck,
+#                 11=driveable_surface, 12=other_flat, 13=sidewalk, 14=terrain,
+#                 15=manmade, 16=vegetation
+_npy_semantic_colors = np.array(
+    [
+        [255, 255, 255],    # 0  free              white   (ignored)
+        [255, 120, 50],     # 1  barrier            orange
+        [255, 192, 203],    # 2  bicycle            pink
+        [255, 255, 0],      # 3  bus                yellow
+        [0, 150, 245],      # 4  car                blue
+        [0, 255, 255],      # 5  construction_veh   cyan
+        [255, 127, 0],      # 6  motorcycle         dark orange
+        [255, 0, 0],        # 7  pedestrian         red
+        [255, 240, 150],    # 8  traffic_cone       light yellow
+        [135, 60, 0],       # 9  trailer            brown
+        [160, 32, 240],     # 10 truck              purple
+        [255, 0, 255],      # 11 driveable_surface  dark pink
+        [139, 137, 137],    # 12 other_flat         gray
+        [75, 0, 75],        # 13 sidewalk           dark purple
+        [150, 240, 80],     # 14 terrain            light green
+        [230, 230, 250],    # 15 manmade            light lavender
+        [0, 175, 0],        # 16 vegetation         green
+    ]
+)
+# CONet nuScenes-Occupancy: col order [z, y, x, cls], grid 512x512x40, range [-51.2,51.2]
+nusc_occ_colors_map = _npy_semantic_colors[:, ::-1].copy()
+
+# SurroundOcc color map (same class ordering as nusc_occ)
+# col order [x, y, z, cls], grid 200x200x16, range [-50,50,-50,50,-5,3]
+surroundocc_colors_map = _npy_semantic_colors[:, ::-1].copy()
+
 foreground_idx = [0, 1, 2, 3, 4, 5, 6, 7]
 
 
@@ -64,14 +98,32 @@ def parse_args():
     parse.add_argument('--pkl-file', type=str, default='data/nuscenes/stcocc-nuscenes_infos_val.pkl', help='path of pkl for the nuScenes dataset')
     parse.add_argument('--data-path', type=str, default='data/nuscenes', help='path of the nuScenes dataset')
     parse.add_argument('--data-version', type=str, default='v1.0-trainval', help='version of the nuScenes dataset')
-    parse.add_argument('--dataset-type', type=str, default='occ3d', help='dataset type, occ3d or openocc')
+    parse.add_argument('--dataset-type', type=str, default='occ3d', help='dataset type: occ3d, openocc, or nusc_occ')
     parse.add_argument('--pred-path', type=str, default='results/scene-0003', help='path of the prediction data, dir')
     parse.add_argument('--vis-scene', type=list, default=['scene-0003'], help='visualize scene list')
     parse.add_argument('--vis-path', type=str, default='demo_out', help='path of saving the visualization images')
     parse.add_argument('--car-model', type=str, default='visualizer/3d_model.obj', help='car_model path')
-    parse.add_argument('--vis-single-data', type=str, default='results/scene-0107/84c24cd1d7914f72bb2fa17a6c5c41e5.npz',help='single path of the visualization data')
+    parse.add_argument('--vis-single-data', type=str, default='results/scene-0107/84c24cd1d7914f72bb2fa17a6c5c41e5.npz',help='single path of the visualization data (.npz for occ3d/openocc, .npy for nusc_occ)')
     parse.add_argument('--gt-path', type=str, default=None, help='path to GT data for loading camera_mask (e.g., data/nuscenes/gts/scene-0003/token/labels.npz)')
     parse.add_argument('--use-camera-mask', action='store_true', help='only visualize voxels visible from camera (camera_mask=True)')
+    # nuScenes-Occupancy (CONet) specific args
+    parse.add_argument('--nusc-occ-path', type=str, default=None,
+                       help='[nusc_occ] path to nuScenes-Occupancy .npy file '
+                            '(e.g., data/nuScenes-Occupancy/scene_<token>/occupancy/<lidar_token>.npy)')
+    parse.add_argument('--nusc-occ-pc-range', type=float, nargs=6,
+                       default=[-51.2, -51.2, -5.0, 51.2, 51.2, 3.0],
+                       help='[nusc_occ] point cloud range: xmin ymin zmin xmax ymax zmax')
+    parse.add_argument('--nusc-occ-grid-size', type=int, nargs=3, default=[512, 512, 40],
+                       help='[nusc_occ] voxel grid size: x y z')
+    # SurroundOcc specific args
+    parse.add_argument('--surroundocc-path', type=str, default=None,
+                       help='[surroundocc] path to SurroundOcc .npy GT file '
+                            '(e.g., data/nuscenes_occ/samples/<lidar_filename>.npy)')
+    parse.add_argument('--surroundocc-pc-range', type=float, nargs=6,
+                       default=[-50.0, -50.0, -5.0, 50.0, 50.0, 3.0],
+                       help='[surroundocc] point cloud range: xmin ymin zmin xmax ymax zmax')
+    parse.add_argument('--surroundocc-grid-size', type=int, nargs=3, default=[200, 200, 16],
+                       help='[surroundocc] voxel grid size: x y z')
     args = parse.parse_args()
     return args
 
@@ -354,6 +406,117 @@ def vis_occ_single_on_3d(data_path,
 
     occ_visualizer.o3d_vis.destroy_window()
 
+
+def vis_occ_npy_on_3d(data_path,
+                      pc_range=(-51.2, -51.2, -5.0, 51.2, 51.2, 3.0),
+                      grid_size=(512, 512, 40),
+                      xyz_order='zyx',
+                      color_map=None,
+                      car_model=None,
+                      background_color=(255, 255, 255),
+                      ):
+    """
+    sparse .npy GT 시각화 함수 (CONet nuScenes-Occupancy / SurroundOcc 공용).
+
+    .npy 파일 포맷: (N, 4) sparse 배열
+      - xyz_order='zyx' (nusc_occ/CONet) : 각 행 = [z_idx, y_idx, x_idx, cls]
+      - xyz_order='xyz' (surroundocc)    : 각 행 = [x_idx, y_idx, z_idx, cls]
+
+    label 규칙:
+      - label 0  → noise (255로 변환, ignore)
+      - label 1-16 → semantic classes
+      - sparse 미포함 voxel → 0 (free, ignore)
+
+    클래스 정의 (1-16):
+      1:barrier, 2:bicycle, 3:bus, 4:car, 5:construction_vehicle,
+      6:motorcycle, 7:pedestrian, 8:traffic_cone, 9:trailer, 10:truck,
+      11:driveable_surface, 12:other_flat, 13:sidewalk, 14:terrain,
+      15:manmade, 16:vegetation
+    """
+    pc_range = list(pc_range)
+    grid_size = list(grid_size)
+
+    if color_map is None:
+        color_map = nusc_occ_colors_map
+
+    # load car model
+    if car_model is not None:
+        car_model_mesh = o3d.io.read_triangle_mesh(car_model)
+        angle = np.pi / 2
+        R = car_model_mesh.get_rotation_matrix_from_axis_angle(np.array([angle, 0, 0]))
+        car_model_mesh.rotate(R, center=car_model_mesh.get_center())
+        car_model_mesh.scale(0.25, center=car_model_mesh.get_center())
+        current_center = car_model_mesh.get_center()
+        new_center = np.array([0, 0, 0.5])
+        translation = new_center - current_center
+        car_model_mesh.translate(translation)
+        car_model_mesh.compute_vertex_normals()
+    else:
+        car_model_mesh = None
+
+    # load sparse .npy  →  dense voxel grid [x, y, z]
+    pcd = np.load(data_path)  # (N, 4)
+    if xyz_order == 'zyx':
+        # CONet/nusc_occ: col order [z, y, x, cls]
+        x_idx = pcd[:, 2].astype(np.int32)
+        y_idx = pcd[:, 1].astype(np.int32)
+        z_idx = pcd[:, 0].astype(np.int32)
+    else:
+        # SurroundOcc: col order [x, y, z, cls]
+        x_idx = pcd[:, 0].astype(np.int32)
+        y_idx = pcd[:, 1].astype(np.int32)
+        z_idx = pcd[:, 2].astype(np.int32)
+    cls = pcd[:, 3].astype(np.int32)
+
+    # noise label (0 in file) → 255 (ignore)
+    cls[cls == 0] = 255
+
+    # clip to valid range
+    valid = (
+        (x_idx >= 0) & (x_idx < grid_size[0]) &
+        (y_idx >= 0) & (y_idx < grid_size[1]) &
+        (z_idx >= 0) & (z_idx < grid_size[2])
+    )
+    x_idx, y_idx, z_idx, cls = x_idx[valid], y_idx[valid], z_idx[valid], cls[valid]
+
+    # initialize dense grid with 0 (free)
+    occ_semantics = np.zeros(grid_size, dtype=np.uint8)
+    occ_semantics[x_idx, y_idx, z_idx] = cls.astype(np.uint8)
+
+    voxel_size = (
+        (pc_range[3] - pc_range[0]) / grid_size[0],
+        (pc_range[4] - pc_range[1]) / grid_size[1],
+        (pc_range[5] - pc_range[2]) / grid_size[2],
+    )
+
+    occ_visualizer = OccupancyVisualizer(
+        color_map=color_map,
+        background_color=background_color,
+    )
+
+    if os.path.exists('view.json'):
+        param = o3d.io.read_pinhole_camera_parameters('view.json')
+    else:
+        param = None
+
+    # free=0, noise=255 → ignore
+    occ_visualizer.vis_occ(
+        occ_semantics,
+        occ_flow=None,
+        ignore_labels=[0, 255],
+        voxelSize=voxel_size,
+        range=pc_range,
+        save_path=None,
+        wait_time=-1,
+        view_json=param,
+        car_model_mesh=car_model_mesh,
+    )
+
+    param = occ_visualizer.o3d_vis.get_view_control().convert_to_pinhole_camera_parameters()
+    o3d.io.write_pinhole_camera_parameters('view.json', param)
+    occ_visualizer.o3d_vis.destroy_window()
+
+
 def flow_to_color(vx, vy, max_magnitude=None):
     magnitude = np.sqrt(vx ** 2 + vy ** 2)
     angle = np.arctan2(vy, vx)
@@ -394,21 +557,47 @@ def create_legend_circle(radius=1, resolution=500):
 if __name__ == '__main__':
     print('open3d version: {}, if you want to use viewcontrol, make sure using 0.16.0 version!!'.format(o3d.__version__))
     args = parse_args()
-    # check vis path
-    mmengine.mkdir_or_exist(args.vis_path)
-    pkl_data = mmengine.load(args.pkl_file)
-    nusc = NuScenes(args.data_version, args.data_path)
-    vis_scenes_infos = arange_according_to_scene(pkl_data['infos'], nusc, args.vis_scene)
-    # GT visualization
-    # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, dataset_type=args.dataset_type, vis_gt=True, car_model=args.car_model)
-    # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, load_camera_mask=False, dataset_type=args.dataset_type, vis_gt=True, car_model=args.car_model)
-    # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, load_camera_mask=True, dataset_type=args.dataset_type, vis_gt=True, car_model=args.car_model)
-    # Pred visualization (without camera mask)
-    # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, load_camera_mask=False, dataset_type=args.dataset_type, vis_gt=False, car_model=args.car_model)
-    # Pred visualization (with camera mask from GT)
-    # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, load_camera_mask=True, dataset_type=args.dataset_type, vis_gt=False, car_model=args.car_model)
-    # # Single data visualization
-    vis_occ_single_on_3d(args.vis_single_data, dataset_type=args.dataset_type, car_model=args.car_model, vis_flow=False, use_camera_mask=args.use_camera_mask, gt_path=args.gt_path)
+
+    # ── nuScenes-Occupancy (CONet) ──────────────────────────────────────────
+    if args.dataset_type == 'nusc_occ':
+        npy_path = args.nusc_occ_path if args.nusc_occ_path else args.vis_single_data
+        print(f'[nusc_occ] visualizing: {npy_path}')
+        vis_occ_npy_on_3d(
+            data_path=npy_path,
+            pc_range=args.nusc_occ_pc_range,
+            grid_size=args.nusc_occ_grid_size,
+            xyz_order='zyx',
+            color_map=nusc_occ_colors_map,
+            car_model=args.car_model,
+        )
+    # ── SurroundOcc ─────────────────────────────────────────────────────────
+    elif args.dataset_type == 'surroundocc':
+        npy_path = args.surroundocc_path if args.surroundocc_path else args.vis_single_data
+        print(f'[surroundocc] visualizing: {npy_path}')
+        vis_occ_npy_on_3d(
+            data_path=npy_path,
+            pc_range=args.surroundocc_pc_range,
+            grid_size=args.surroundocc_grid_size,
+            xyz_order='xyz',
+            color_map=surroundocc_colors_map,
+            car_model=args.car_model,
+        )
+    # ── occ3d / openocc ────────────────────────────────────────────────────
+    else:
+        mmengine.mkdir_or_exist(args.vis_path)
+        pkl_data = mmengine.load(args.pkl_file)
+        nusc = NuScenes(args.data_version, args.data_path)
+        vis_scenes_infos = arange_according_to_scene(pkl_data['infos'], nusc, args.vis_scene)
+        # GT visualization
+        # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, dataset_type=args.dataset_type, vis_gt=True, car_model=args.car_model)
+        # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, load_camera_mask=False, dataset_type=args.dataset_type, vis_gt=True, car_model=args.car_model)
+        # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, load_camera_mask=True, dataset_type=args.dataset_type, vis_gt=True, car_model=args.car_model)
+        # Pred visualization (without camera mask)
+        # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, load_camera_mask=False, dataset_type=args.dataset_type, vis_gt=False, car_model=args.car_model)
+        # Pred visualization (with camera mask from GT)
+        # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, load_camera_mask=True, dataset_type=args.dataset_type, vis_gt=False, car_model=args.car_model)
+        # # Single data visualization
+        vis_occ_single_on_3d(args.vis_single_data, dataset_type=args.dataset_type, car_model=args.car_model, vis_flow=False, use_camera_mask=args.use_camera_mask, gt_path=args.gt_path)
     # # GT Flow visualization
     # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, dataset_type=args.dataset_type, vis_gt=True, vis_flow=True, car_model=args.car_model)
     # # Pred Flow visualization (without camera mask)
@@ -417,4 +606,122 @@ if __name__ == '__main__':
     # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, load_camera_mask=True, dataset_type=args.dataset_type, vis_gt=False, vis_flow=True, car_model=args.car_model)
     # # Single Flow data visualization
     # vis_occ_single_on_3d(args.vis_single_data, dataset_type=args.dataset_type, car_model=args.car_model, vis_flow=True, use_camera_mask=args.use_camera_mask, gt_path=args.gt_path)
+
+
+# =============================================================================
+# 사용법 예시 (Usage Examples)
+# =============================================================================
+#
+# [인자 설명]
+#   --pkl-file        : nuScenes 데이터셋 pkl 파일 경로 (default: data/nuscenes/stcocc-nuscenes_infos_val.pkl)
+#   --data-path       : nuScenes 데이터셋 루트 경로 (default: data/nuscenes)
+#   --data-version    : nuScenes 버전 (default: v1.0-trainval)
+#   --dataset-type    : 데이터셋 타입, occ3d 또는 openocc (default: occ3d)
+#   --pred-path       : 예측 결과 디렉토리 경로 (default: results/scene-0003)
+#   --vis-scene       : 시각화할 씬 이름 (default: scene-0003)
+#   --vis-path        : 결과 이미지/비디오 저장 경로 (default: demo_out)
+#   --car-model       : 차량 3D 모델(.obj) 경로 (default: visualizer/3d_model.obj)
+#   --vis-single-data    : 단일 .npz 파일 경로 (occ3d/openocc) 또는 .npy 파일 경로 (nusc_occ)
+#   --gt-path            : GT labels.npz 경로 (카메라 마스크 로딩용)
+#   --use-camera-mask    : 카메라에서 보이는 복셀만 시각화 (flag)
+#   --nusc-occ-path        : [nusc_occ] .npy 파일 경로 (--vis-single-data 대체 가능)
+#   --nusc-occ-pc-range    : [nusc_occ] point cloud range 6개 값 (default: -51.2 -51.2 -5.0 51.2 51.2 3.0)
+#   --nusc-occ-grid-size   : [nusc_occ] voxel grid 크기 3개 값 (default: 512 512 40)
+#   --surroundocc-path     : [surroundocc] .npy 파일 경로 (--vis-single-data 대체 가능)
+#   --surroundocc-pc-range : [surroundocc] point cloud range 6개 값 (default: -50 -50 -5.0 50 50 3.0)
+#   --surroundocc-grid-size: [surroundocc] voxel grid 크기 3개 값 (default: 200 200 16)
+#
+# --------------------------------------------------------------------------
+# 1. 단일 npz 파일 시각화 (occ3d 기본 동작)
+#
+#   python tools/vis_results.py \
+#       --vis-single-data results/scene-0107/84c24cd1d7914f72bb2fa17a6c5c41e5.npz \
+#       --dataset-type occ3d \
+#       --car-model visualizer/3d_model.obj
+#
+# --------------------------------------------------------------------------
+# 2. 단일 파일 + 카메라 마스크 적용
+#
+#   python tools/vis_results.py \
+#       --vis-single-data results/scene-0107/84c24cd1d7914f72bb2fa17a6c5c41e5.npz \
+#       --use-camera-mask \
+#       --gt-path data/nuscenes/gts/scene-0107/<token>/labels.npz
+#
+# --------------------------------------------------------------------------
+# 3. 씬 전체 예측 결과 시각화 (비디오 저장)
+#    __main__ 블록에서 vis_occ_scene_on_3d(vis_gt=False) 호출 주석 해제 후 실행
+#    결과: demo_out/pred-occ_scene-0003.avi
+#
+#   python tools/vis_results.py \
+#       --pkl-file data/nuscenes/stcocc-nuscenes_infos_val.pkl \
+#       --data-path data/nuscenes \
+#       --pred-path results/scene-0003 \
+#       --vis-scene scene-0003 \
+#       --vis-path demo_out \
+#       --dataset-type occ3d
+#
+# --------------------------------------------------------------------------
+# 4. GT 시각화 (씬 전체)
+#    __main__ 블록에서 vis_occ_scene_on_3d(vis_gt=True) 호출 주석 해제 후 실행
+#    결과: demo_out/gt-occ_scene-0003.avi
+#
+#   python tools/vis_results.py \
+#       --pkl-file data/nuscenes/stcocc-nuscenes_infos_val.pkl \
+#       --data-path data/nuscenes \
+#       --vis-path demo_out \
+#       --dataset-type occ3d
+#
+# --------------------------------------------------------------------------
+# 5. OpenOCC 데이터셋으로 단일 파일 시각화
+#
+#   python tools/vis_results.py \
+#       --vis-single-data results/scene-0003/<token>.npz \
+#       --dataset-type openocc \
+#       --car-model visualizer/3d_model.obj
+#
+# --------------------------------------------------------------------------
+# 6. nuScenes-Occupancy (CONet) GT .npy 파일 시각화
+#    - sparse [z, y, x, cls] 포맷, grid 512x512x40, range [-51.2~51.2, -51.2~51.2, -5~3]
+#    - label 0(noise)→무시, 1-16: semantic, 0(free, 미포함 voxel)→무시
+#
+#   python tools/vis_results.py \
+#       --dataset-type nusc_occ \
+#       --nusc-occ-path data/nuScenes-Occupancy/scene_<scene_token>/occupancy/<lidar_token>.npy \
+#       --car-model visualizer/3d_model.obj
+#
+#   # --vis-single-data로도 지정 가능 (--nusc-occ-path 미지정 시 사용)
+#   python tools/vis_results.py \
+#       --dataset-type nusc_occ \
+#       --vis-single-data data/nuScenes-Occupancy/scene_c3ab8ee2c1a54068a72d7eb4cf22e43d/occupancy/3f30536943fa4fc6a63cf8377433a9c8.npy
+#
+# --------------------------------------------------------------------------
+# 7. SurroundOcc GT .npy 파일 시각화
+#    - sparse [x, y, z, cls] 포맷, grid 200x200x16, range [-50~50, -50~50, -5~3]
+#    - label 0(noise)→무시, 1-16: semantic, 0(free, 미포함 voxel)→무시
+#
+#   python tools/vis_results.py \
+#       --dataset-type surroundocc \
+#       --surroundocc-path data/nuscenes_occ/samples/<lidar_filename>.npy \
+#       --car-model visualizer/3d_model.obj
+#
+#   # --vis-single-data로도 지정 가능 (--surroundocc-path 미지정 시 사용)
+#   python tools/vis_results.py \
+#       --dataset-type surroundocc \
+#       --vis-single-data "data/nuscenes_occ/samples/n015-2018-07-11-11-54-16+0800__LIDAR_TOP__1531281441800080.pcd.bin.npy"
+#
+# --------------------------------------------------------------------------
+# [포맷 비교 요약]
+#   dataset_type  | 파일 형식  | col 순서    | grid          | pc_range
+#   --------------|-----------|------------|---------------|------------------------
+#   occ3d         | .npz      | dense      | 200x200x16    | [-40,40,-40,40,-1,5.4]
+#   openocc       | .npz      | dense      | 200x200x16    | [-40,40,-40,40,-1,5.4]
+#   nusc_occ      | .npy      | [z,y,x,cls]| 512x512x40    | [-51.2,51.2,-5,3]
+#   surroundocc   | .npy      | [x,y,z,cls]| 200x200x16    | [-50,50,-50,50,-5,3]
+#
+# --------------------------------------------------------------------------
+# [동작 방식]
+#   - 시각화 창이 열리면 Q 키 또는 우측 상단 X를 눌러 다음 프레임으로 이동합니다.
+#   - 뷰 조정 후 view.json이 자동 저장되어 다음 실행 시 동일한 카메라 시점이 적용됩니다.
+#   - --use-camera-mask 옵션 사용 시 카메라에 실제로 보이는 복셀만 렌더링합니다.
+# =============================================================================
 
