@@ -21,10 +21,12 @@ from .transforms import LoadOccupancy
 from .evaluation import OccupancyMetric
 from .evaluation.occupancy_metric_hybrid import OccupancyMetricHybrid
 from .loss import multiscale_supervision, geo_scal_loss, sem_scal_loss
+from .hooks import DepthLossAnnealingHook
 
 __all__ = [
     'SurroundOcc', 'OccHead', 'PerceptionTransformer', 'SpatialCrossAttention', 
     'MSDeformableAttention3D', 'OccEncoder', 'OccLayer', 'CustomNuScenesOccDataset',
     'LoadOccupancy', 'OccupancyMetric', 'OccupancyMetricHybrid', 
-    'multiscale_supervision', 'geo_scal_loss', 'sem_scal_loss'
+    'multiscale_supervision', 'geo_scal_loss', 'sem_scal_loss',
+    'DepthLossAnnealingHook',
 ]

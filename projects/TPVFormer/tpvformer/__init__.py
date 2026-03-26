@@ -17,6 +17,7 @@ from .metrics_hybrid import OccupancyMetricHybrid
 from .transforms import MultiViewImageNormalize
 from .grid_mask import GridMask
 from .depth_head import AuxiliaryDepthHead
+from .hooks import DepthLossAnnealingHook
 
 __all__ = [
     'TPVCrossViewHybridAttention', 'TPVImageCrossAttention',
@@ -26,5 +27,6 @@ __all__ = [
     'LoadOccupancyAnnotations', 'LoadOccupancy', 'GridMask', 'PadMultiViewImage', 'SegLabelMapping',
     'TPVPack3DDetInputs', 'TPVFormerPointToMultiViewDepth', 'AuxiliaryDepthHead',
     'TPVFormerDecoder', 'TPVFormerHead', 'TPVAggregator', 'TPVFormerDataPreprocessor',
-    'OccupancyMetric', 'OccupancyMetricHybrid', 'MultiViewImageNormalize', 'GridMask'
+    'OccupancyMetric', 'OccupancyMetricHybrid', 'MultiViewImageNormalize', 'GridMask',
+    'DepthLossAnnealingHook',
 ]

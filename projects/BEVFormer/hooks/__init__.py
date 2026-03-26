@@ -1,4 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from .custom_hooks import *  # noqa: F401, F403
+from .custom_hooks import TransferWeight, DepthLossAnnealingHook  # noqa: F401
 
-__all__ = []
+__all__ = ['TransferWeight', 'DepthLossAnnealingHook']
