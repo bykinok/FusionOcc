@@ -245,6 +245,7 @@ class OccupancyVisualizer(Visualizer):
         if show_color:
             voxelGrid = o3d.geometry.VoxelGrid.create_from_point_cloud(pcd, voxel_size=voxel_size)
             self.o3d_vis.add_geometry(voxelGrid)
+            self._last_voxel_grid = voxelGrid  # offscreen 렌더링용으로 보관
 
         line_sets = o3d.geometry.LineSet()
         line_sets.points = o3d.open3d.utility.Vector3dVector(bbox_corners.reshape((-1, 3)))
@@ -262,6 +263,64 @@ class OccupancyVisualizer(Visualizer):
             self.o3d_vis.add_geometry(pcd)
             self.pcd = pcd
             self.points_colors = points_colors
+
+    def vis_occ_pseudo_color(self,
+                             pts_xyz: np.ndarray,
+                             colors_bgr: np.ndarray,
+                             voxel_size: float = 0.4,
+                             view_json=None,
+                             save_path: Optional[str] = None,
+                             wait_time: int = -1,
+                             car_model_mesh=None) -> None:
+        """클래스 색상맵 없이 per-voxel BGR 색상으로 직접 시각화.
+
+        pseudo-color, error map 등 임의의 색상을 voxel에 적용할 때 사용.
+
+        Args:
+            pts_xyz:    (N, 3) float, world 좌표 XYZ
+            colors_bgr: (N, 3) uint8/float, BGR 색상 0-255
+            voxel_size: 복셀 한 변의 길이 (m)
+        """
+        import torch
+
+        seg_color = np.concatenate(
+            [pts_xyz, colors_bgr.astype(np.float64)], axis=1)  # (N, 6) xyz+BGR
+
+        # render_offscreen 에서 사용할 캐시
+        self._last_seg_color  = seg_color
+        self._last_voxel_size = voxel_size
+        if hasattr(self, '_rgba_override'):
+            del self._rgba_override   # pseudo-color 모드에서는 RGBA override 제거
+
+        pts_t = torch.tensor(pts_xyz, dtype=torch.float32)
+        vs    = (voxel_size, voxel_size, voxel_size)
+
+        bboxes         = self._voxel_profile(pts_t, voxel_size=vs)
+        bboxes_corners = self._my_compute_box_3d(
+            bboxes[:, 0:3], bboxes[:, 3:6], bboxes[:, 6:7])
+        bases_ = torch.arange(0, bboxes_corners.shape[0] * 8, 8)
+        edges  = torch.tensor([[0,1],[1,2],[2,3],[3,0],
+                                [4,5],[5,6],[6,7],[7,4],
+                                [0,4],[1,5],[2,6],[3,7]])
+        edges  = edges.reshape((1, 12, 2)).repeat(bboxes_corners.shape[0], 1, 1)
+        edges  = edges + bases_[:, None, None]
+
+        self.voxellizer_points(
+            points=seg_color,
+            voxel_size=voxel_size,
+            ego_points=None,
+            bbox_corners=bboxes_corners.numpy(),
+            linesets=edges.numpy(),
+            mode='xyzrgb',
+            vis_mode='add',
+            show_color=True,
+            car_model_mesh=car_model_mesh,
+        )
+
+        if save_path is not None:
+            self.render_offscreen(save_path, view_json=view_json)
+
+        self.show(save_path=None, wait_time=wait_time, view_json=view_json)
 
     def vis_occ(self,
                 occ_seg,
@@ -292,6 +351,8 @@ class OccupancyVisualizer(Visualizer):
             vy = occ_flow[..., 1]
             pts_color = self.flow_to_color(vx, vy)
         seg_color = np.concatenate([points[:, :3], pts_color], axis=1)
+        self._last_seg_color = seg_color       # perspective render용
+        self._last_voxel_size = voxelSize[0]   # perspective render용
         if use_car_model:
             if car_model_mesh is None:
                 ego_points = self._generate_the_ego_car()
@@ -327,11 +388,128 @@ class OccupancyVisualizer(Visualizer):
             line_set.lines = o3d.utility.Vector2iVector(lines)
             self.o3d_vis.add_geometry(line_set)
 
+        # WSL에서 capture_screen_image()는 항상 빈 이미지를 반환하므로
+        # EGL 기반 OffscreenRenderer로 먼저 저장한 뒤 인터랙티브 창을 띄운다.
+        if save_path is not None:
+            self.render_offscreen(save_path, view_json=view_json)
+
         self.show(
-            save_path,
+            save_path=None,
             wait_time=wait_time,
             view_json=view_json
         )
+
+    def render_offscreen(self,
+                         save_path: str,
+                         width: int = 1920,
+                         height: int = 1080,
+                         view_json=None) -> None:
+        """view.json 카메라로 perspective projection 후 matplotlib 2D scatter로 저장.
+
+        - 시점: view.json intrinsic/extrinsic 으로 정확한 perspective projection
+        - 품질: matplotlib anti-aliased 원형 마커 (블록 아티팩트 없음)
+        - 호환: WSL/headless에서도 동작 (OpenGL 불필요)
+        """
+        # _rgba_override: (N,7) = xyz + RGBA([0,1])  ← vis_occ_diff_on_3d에서 설정
+        use_rgba = hasattr(self, '_rgba_override')
+        if not use_rgba and not hasattr(self, '_last_seg_color'):
+            print("Warning: render_offscreen() called but no point data is available.")
+            return
+
+        if not (save_path.endswith('.png') or save_path.endswith('.jpg')):
+            save_path += '.png'
+
+        if use_rgba:
+            data = self._rgba_override
+            pts_world  = data[:, :3]
+            colors_plot = data[:, 3:7]          # (N,4) RGBA [0,1], 그대로 matplotlib에 전달
+        else:
+            seg = self._last_seg_color
+            pts_world  = seg[:, :3]
+            colors_bgr = seg[:, 3:6].astype(np.float32)    # (N,3) BGR 0-255
+        voxel_size = getattr(self, '_last_voxel_size', 0.4)
+
+        # ── 카메라 파라미터 ────────────────────────────────────────────────
+        if view_json is not None:
+            ext = np.array(view_json.extrinsic)
+            R, t = ext[:3, :3], ext[:3, 3]
+            fx, fy = view_json.intrinsic.get_focal_length()
+            cx, cy = view_json.intrinsic.get_principal_point()
+            img_w = view_json.intrinsic.width
+            img_h = view_json.intrinsic.height
+        else:
+            img_w, img_h = width, height
+            fov_rad = np.radians(60)
+            fx = fy = img_w / (2.0 * np.tan(fov_rad / 2))
+            cx, cy = img_w / 2.0, img_h / 2.0
+            eye    = np.array([0.0, 50.0, 30.0])
+            target = np.array([0.0,  0.0,  2.0])
+            up     = np.array([0.0,  0.0,  1.0])
+            fwd   = target - eye;  fwd   /= np.linalg.norm(fwd)
+            right = np.cross(fwd, up);  right /= np.linalg.norm(right)
+            up2   = np.cross(right, fwd)
+            R = np.array([right, -up2, fwd])
+            t = -R @ eye
+
+        # ── world → camera → screen ────────────────────────────────────────
+        pts_cam = (R @ pts_world.T).T + t              # (N,3)
+        valid   = pts_cam[:, 2] > 0.1
+        pts_cam = pts_cam[valid]
+        if use_rgba:
+            colors_plot = colors_plot[valid]
+        else:
+            colors_bgr = colors_bgr[valid]
+
+        depths = pts_cam[:, 2]
+        x_s = fx * pts_cam[:, 0] / depths + cx        # 이미지 픽셀 좌표
+        y_s = fy * pts_cam[:, 1] / depths + cy
+
+        # 화면 범위 내 포인트만
+        in_bounds = (x_s >= 0) & (x_s < img_w) & (y_s >= 0) & (y_s < img_h)
+        if use_rgba:
+            x_s, y_s, depths, colors_plot = x_s[in_bounds], y_s[in_bounds], depths[in_bounds], colors_plot[in_bounds]
+        else:
+            x_s, y_s, depths, colors_bgr = x_s[in_bounds], y_s[in_bounds], depths[in_bounds], colors_bgr[in_bounds]
+
+        # Z-sort: 먼 것부터 그려 가까운 것이 위에 오도록
+        order  = np.argsort(-depths)
+        x_s    = x_s[order]
+        y_s    = y_s[order]
+        depths = depths[order]
+        if use_rgba:
+            colors_plot = colors_plot[order]          # (N,4) RGBA [0,1]
+        else:
+            colors_plot = colors_bgr[order][:, [2, 1, 0]] / 255.0  # BGR→RGB [0,1]
+
+        # scatter 마커 크기 (points²): 깊이에 따른 voxel 투영 크기에 맞춤
+        # 1 pixel = 72/dpi points; 지름 d pixels → s = (d * 72/dpi)²
+        dpi = 100
+        px_diam = np.clip(fx * voxel_size / depths, 2.0, 40.0)
+        marker_s = (px_diam * 72.0 / dpi) ** 2
+
+        # ── matplotlib 2D scatter 렌더링 ───────────────────────────────────
+        bg = np.array(self.background_color, dtype=float)
+        if bg.max() > 1.0:
+            bg = bg / 255.0
+        bg_rgb = bg[[2, 1, 0]]   # BGR → RGB
+
+        fig = plt.figure(figsize=(img_w / dpi, img_h / dpi), dpi=dpi)
+        ax  = fig.add_axes([0, 0, 1, 1])   # axes = 전체 figure, 여백 없음
+        ax.set_facecolor(bg_rgb)
+        fig.patch.set_facecolor(bg_rgb)
+
+        ax.scatter(x_s, y_s, c=colors_plot, s=marker_s,
+                   linewidths=0, rasterized=True)
+
+        # 이미지 좌표계: x 오른쪽, y 아래쪽
+        ax.set_xlim(0, img_w)
+        ax.set_ylim(img_h, 0)
+        ax.set_aspect('equal')
+        ax.axis('off')
+
+        plt.savefig(save_path, dpi=dpi, pad_inches=0)
+        plt.close(fig)
+        print(f"Saved render to {save_path} ({img_w}×{img_h}, {len(x_s)} voxels)")
 
     def show(self,
              save_path: Optional[str] = None,
@@ -372,11 +550,6 @@ class OccupancyVisualizer(Visualizer):
                 del self.pcd
             except (KeyError, AttributeError):
                 pass
-            if save_path is not None:
-                if not (save_path.endswith('.png')
-                        or save_path.endswith('.jpg')):
-                    save_path += '.png'
-                self.o3d_vis.capture_screen_image(save_path)
 
             param = self.o3d_vis.get_view_control().convert_to_pinhole_camera_parameters()
             o3d.io.write_pinhole_camera_parameters('view.json', param)

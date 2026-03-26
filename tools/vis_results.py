@@ -106,6 +106,8 @@ def parse_args():
     parse.add_argument('--vis-single-data', type=str, default='results/scene-0107/84c24cd1d7914f72bb2fa17a6c5c41e5.npz',help='single path of the visualization data (.npz for occ3d/openocc, .npy for nusc_occ)')
     parse.add_argument('--gt-path', type=str, default=None, help='path to GT data for loading camera_mask (e.g., data/nuscenes/gts/scene-0003/token/labels.npz)')
     parse.add_argument('--use-camera-mask', action='store_true', help='only visualize voxels visible from camera (camera_mask=True)')
+    parse.add_argument('--save-path', type=str, default=None, help='output image path for single data visualization (extension .png is appended automatically, e.g. demo_out/result)')
+    parse.add_argument('--vis-diff', action='store_true', help='compare pred(--vis-single-data) vs GT(--gt-path) and highlight errors in density-based red')
     # nuScenes-Occupancy (CONet) specific args
     parse.add_argument('--nusc-occ-path', type=str, default=None,
                        help='[nusc_occ] path to nuScenes-Occupancy .npy file '
@@ -268,8 +270,8 @@ def vis_occ_scene_on_3d(vis_scenes_infos,
                 ignore_labels=[free_cls, 255],
                 voxelSize=voxel_size,
                 range=[-40.0, -40.0, -1.0, 40.0, 40.0, 5.4],
-                save_path=save_path,
-                wait_time=-1,  # 1s, -1 means wait until press q
+        save_path=save_path,
+        wait_time=-1,  # -1 means wait until press q
                 view_json=param,
                 car_model_mesh=car_model_mesh,
             )
@@ -314,6 +316,7 @@ def vis_occ_single_on_3d(data_path,
                         use_camera_mask=False,
                         gt_path=None,
                         background_color=(255, 255, 255),
+                        save_path=None,
                         ):
     # define free_cls
     free_cls = 16 if dataset_type == 'openocc' else 17
@@ -388,17 +391,19 @@ def vis_occ_single_on_3d(data_path,
     else:
         param = None
 
+    if save_path is not None:
+        mmengine.mkdir_or_exist(os.path.dirname(os.path.abspath(save_path)))
+
     occ_visualizer.vis_occ(
         occ_semantics,
         occ_flow=occ_flow,
         ignore_labels=[free_cls, 255],
         voxelSize=voxel_size,
         range=[-40.0, -40.0, -1.0, 40.0, 40.0, 5.4],
-        save_path=None,
-        wait_time=-1,  # 1s, -1 means wait until press q
+        save_path=save_path,
+        wait_time=-1,  # -1 means wait until press q
         view_json=param,
         car_model_mesh=car_model_mesh,
-
     )
     # press top-right x to close the windows
     param = occ_visualizer.o3d_vis.get_view_control().convert_to_pinhole_camera_parameters()
@@ -517,6 +522,118 @@ def vis_occ_npy_on_3d(data_path,
     occ_visualizer.o3d_vis.destroy_window()
 
 
+def vis_occ_diff_on_3d(pred_path,
+                        gt_path,
+                        dataset_type='occ3d',
+                        voxel_size=(0.4, 0.4, 0.4),
+                        car_model=None,
+                        use_camera_mask=False,
+                        save_path=None,
+                        background_color=(255, 255, 255)):
+    """GT vs Pred 비교 → 이웃 정확도 비율을 RdBu pseudo-color로 표현.
+
+    모든 occupied voxel에 대해 26-이웃 중 정확한 voxel 비율(accuracy_ratio)을 계산하고
+    matplotlib RdBu 색상맵(0=빨강, 1=파랑)으로 색칠한다.
+
+    - 이웃 중 맞은 것이 많을수록 → 파란색
+    - 이웃 중 틀린 것이 많을수록 → 붉은색
+    - 이웃이 없는 고립 voxel    → 자신의 정답 여부(파랑/빨강)
+    """
+    from scipy.ndimage import convolve as nd_convolve
+    import matplotlib.cm as cm_mpl
+
+    free_cls   = 16 if dataset_type == 'openocc' else 17
+    ignore_set = {free_cls, 255}
+    pc_range   = [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]
+
+    # ── 데이터 로드 ────────────────────────────────────────────────────────
+    pred_label = np.load(pred_path)
+    pred_sem   = pred_label['semantics'].astype(np.int32)
+    gt_label   = np.load(gt_path)
+    gt_sem     = gt_label['semantics'].astype(np.int32)
+
+    if use_camera_mask and 'mask_camera' in gt_label:
+        mask = gt_label['mask_camera']
+        pred_sem[mask == 0] = 255
+        gt_sem[mask  == 0]  = 255
+
+    # ── 정확/오차 마스크 ───────────────────────────────────────────────────
+    valid_pred   = ~np.isin(pred_sem, list(ignore_set))
+    valid_gt     = ~np.isin(gt_sem,   list(ignore_set))
+    occupied     = valid_gt | valid_pred
+    correct_mask = valid_gt & valid_pred & (pred_sem == gt_sem)
+    error_mask   = occupied & ~correct_mask
+
+    # ── 26-이웃 정확도 비율 계산 ───────────────────────────────────────────
+    kernel = np.ones((3, 3, 3), dtype=np.float32)
+    kernel[1, 1, 1] = 0
+
+    correct_nbr = nd_convolve(correct_mask.astype(np.float32), kernel,
+                               mode='constant', cval=0)
+    error_nbr   = nd_convolve(error_mask.astype(np.float32),   kernel,
+                               mode='constant', cval=0)
+    total_nbr = correct_nbr + error_nbr
+
+    # 이웃이 없으면 자기 자신의 정확도(1.0 / 0.0)로 fallback
+    own_acc       = correct_mask.astype(np.float32)
+    accuracy_ratio = np.where(total_nbr > 0,
+                               correct_nbr / total_nbr,
+                               own_acc)
+
+    # ── occupied voxel 좌표 & pseudo-color 계산 ───────────────────────────
+    occ_idx = np.where(occupied)
+    xs = occ_idx[0] * voxel_size[0] + voxel_size[0] / 2 + pc_range[0]
+    ys = occ_idx[1] * voxel_size[1] + voxel_size[1] / 2 + pc_range[1]
+    zs = occ_idx[2] * voxel_size[2] + voxel_size[2] / 2 + pc_range[2]
+    pts_xyz = np.column_stack([xs, ys, zs]).astype(np.float32)
+
+    ratios      = accuracy_ratio[occ_idx]                       # [0,1]
+    rgba_cmap   = cm_mpl.viridis(1.0 - ratios)                   # (N,4) RGBA [0,1], 반전: 틀림→노랑, 맞음→보라
+    colors_bgr  = (rgba_cmap[:, [2, 1, 0]] * 255).astype(np.uint8)  # BGR 0-255
+
+    print(f'[vis_diff] occupied: {len(pts_xyz)}, '
+          f'correct: {correct_mask.sum()}, error: {error_mask.sum()}, '
+          f'accuracy: {correct_mask.sum()/max(1,occupied.sum())*100:.1f}%')
+
+    # ── 카메라 모델 로드 ──────────────────────────────────────────────────
+    if car_model is not None:
+        car_model_mesh = o3d.io.read_triangle_mesh(car_model)
+        angle = np.pi / 2
+        R_mat = car_model_mesh.get_rotation_matrix_from_axis_angle(np.array([angle, 0, 0]))
+        car_model_mesh.rotate(R_mat, center=car_model_mesh.get_center())
+        car_model_mesh.scale(0.25, center=car_model_mesh.get_center())
+        car_model_mesh.translate(np.array([0, 0, 0.5]) - car_model_mesh.get_center())
+        car_model_mesh.compute_vertex_normals()
+    else:
+        car_model_mesh = None
+
+    # ── 시각화 ────────────────────────────────────────────────────────────
+    dummy_cmap = np.zeros((18, 3), dtype=np.uint8)  # vis_occ_pseudo_color에서 미사용
+    occ_visualizer = OccupancyVisualizer(color_map=dummy_cmap,
+                                         background_color=background_color)
+    if os.path.exists('view.json'):
+        param = o3d.io.read_pinhole_camera_parameters('view.json')
+    else:
+        param = None
+
+    if save_path is not None:
+        mmengine.mkdir_or_exist(os.path.dirname(os.path.abspath(save_path)))
+
+    occ_visualizer.vis_occ_pseudo_color(
+        pts_xyz=pts_xyz,
+        colors_bgr=colors_bgr,
+        voxel_size=voxel_size[0],
+        view_json=param,
+        save_path=save_path,
+        wait_time=-1,
+        car_model_mesh=car_model_mesh,
+    )
+
+    param = occ_visualizer.o3d_vis.get_view_control().convert_to_pinhole_camera_parameters()
+    o3d.io.write_pinhole_camera_parameters('view.json', param)
+    occ_visualizer.o3d_vis.destroy_window()
+
+
 def flow_to_color(vx, vy, max_magnitude=None):
     magnitude = np.sqrt(vx ** 2 + vy ** 2)
     angle = np.arctan2(vy, vx)
@@ -584,10 +701,26 @@ if __name__ == '__main__':
         )
     # ── occ3d / openocc ────────────────────────────────────────────────────
     else:
-        mmengine.mkdir_or_exist(args.vis_path)
-        pkl_data = mmengine.load(args.pkl_file)
-        nusc = NuScenes(args.data_version, args.data_path)
-        vis_scenes_infos = arange_according_to_scene(pkl_data['infos'], nusc, args.vis_scene)
+        if args.vis_diff:
+            # GT vs Pred 오차 시각화
+            if args.gt_path is None:
+                raise ValueError('--vis-diff requires --gt-path')
+            vis_occ_diff_on_3d(
+                pred_path=args.vis_single_data,
+                gt_path=args.gt_path,
+                dataset_type=args.dataset_type,
+                car_model=args.car_model,
+                use_camera_mask=args.use_camera_mask,
+                save_path=args.save_path,
+            )
+        else:
+            # Single data visualization (NuScenes DB 불필요)
+            vis_occ_single_on_3d(args.vis_single_data, dataset_type=args.dataset_type, car_model=args.car_model, vis_flow=False, use_camera_mask=args.use_camera_mask, gt_path=args.gt_path, save_path=args.save_path)
+        # ── 씬 전체 시각화 시 아래 주석 해제 (NuScenes DB + pkl 필요) ──────────
+        # mmengine.mkdir_or_exist(args.vis_path)
+        # pkl_data = mmengine.load(args.pkl_file)
+        # nusc = NuScenes(args.data_version, args.data_path)
+        # vis_scenes_infos = arange_according_to_scene(pkl_data['infos'], nusc, args.vis_scene)
         # GT visualization
         # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, dataset_type=args.dataset_type, vis_gt=True, car_model=args.car_model)
         # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, load_camera_mask=False, dataset_type=args.dataset_type, vis_gt=True, car_model=args.car_model)
@@ -596,8 +729,6 @@ if __name__ == '__main__':
         # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, load_camera_mask=False, dataset_type=args.dataset_type, vis_gt=False, car_model=args.car_model)
         # Pred visualization (with camera mask from GT)
         # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, load_camera_mask=True, dataset_type=args.dataset_type, vis_gt=False, car_model=args.car_model)
-        # # Single data visualization
-        vis_occ_single_on_3d(args.vis_single_data, dataset_type=args.dataset_type, car_model=args.car_model, vis_flow=False, use_camera_mask=args.use_camera_mask, gt_path=args.gt_path)
     # # GT Flow visualization
     # vis_occ_scene_on_3d(vis_scenes_infos, args.vis_scene, args.vis_path, args.pred_path, dataset_type=args.dataset_type, vis_gt=True, vis_flow=True, car_model=args.car_model)
     # # Pred Flow visualization (without camera mask)
@@ -622,8 +753,12 @@ if __name__ == '__main__':
 #   --vis-path        : 결과 이미지/비디오 저장 경로 (default: demo_out)
 #   --car-model       : 차량 3D 모델(.obj) 경로 (default: visualizer/3d_model.obj)
 #   --vis-single-data    : 단일 .npz 파일 경로 (occ3d/openocc) 또는 .npy 파일 경로 (nusc_occ)
-#   --gt-path            : GT labels.npz 경로 (카메라 마스크 로딩용)
+#   --gt-path            : GT labels.npz 경로 (카메라 마스크 로딩 또는 --vis-diff 비교 대상)
 #   --use-camera-mask    : 카메라에서 보이는 복셀만 시각화 (flag)
+#   --vis-diff           : GT vs Pred 비교 모드 (--gt-path 필수)
+#                          각 voxel의 26-이웃 중 정확한 예측 비율로 viridis pseudo-color 적용
+#                          (맞은 이웃 많음 → 보라/남색, 틀린 이웃 많음 → 노랑)
+#   --save-path          : 저장할 이미지 경로 (.png 자동 추가, e.g. demo_out/result)
 #   --nusc-occ-path        : [nusc_occ] .npy 파일 경로 (--vis-single-data 대체 가능)
 #   --nusc-occ-pc-range    : [nusc_occ] point cloud range 6개 값 (default: -51.2 -51.2 -5.0 51.2 51.2 3.0)
 #   --nusc-occ-grid-size   : [nusc_occ] voxel grid 크기 3개 값 (default: 512 512 40)
@@ -693,6 +828,31 @@ if __name__ == '__main__':
 #   python tools/vis_results.py \
 #       --dataset-type nusc_occ \
 #       --vis-single-data data/nuScenes-Occupancy/scene_c3ab8ee2c1a54068a72d7eb4cf22e43d/occupancy/3f30536943fa4fc6a63cf8377433a9c8.npy
+#
+# --------------------------------------------------------------------------
+# 8. GT vs Pred 비교 시각화 (--vis-diff)
+#    각 voxel의 26-이웃 정확도 비율을 viridis pseudo-color로 표현
+#    - 맞은 이웃이 많을수록 → 보라/남색(어두움)
+#    - 틀린 이웃이 많을수록 → 밝은 노랑
+#    결과: demo_out/diff_result.png
+#
+#   python tools/vis_results.py \
+#       --vis-single-data results/scene-0268/<pred_token>.npz \
+#       --gt-path data/nuscenes/gts/scene-0268/<token>/labels.npz \
+#       --vis-diff \
+#       --dataset-type occ3d \
+#       --save-path demo_out/diff_result
+#
+# --------------------------------------------------------------------------
+# 9. GT vs Pred 비교 시각화 + 카메라 마스크 적용
+#    카메라 가시 영역만 비교 (더 공정한 평가 시각화)
+#
+#   python tools/vis_results.py \
+#       --vis-single-data results/scene-0268/<pred_token>.npz \
+#       --gt-path data/nuscenes/gts/scene-0268/<token>/labels.npz \
+#       --vis-diff \
+#       --use-camera-mask \
+#       --save-path demo_out/diff_w_mask
 #
 # --------------------------------------------------------------------------
 # 7. SurroundOcc GT .npy 파일 시각화
