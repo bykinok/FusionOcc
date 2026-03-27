@@ -20,7 +20,7 @@ custom_imports = dict(
 #
 # To run ablation variants, only change the values below:
 depth_loss_annealing_schedule = [
-    (1,  2.0),   # epoch  1–8
+    (1,  4.0),   # epoch  1–8
     (9,  0.5),   # epoch  9–16
     (17, 0.1),   # epoch 17–24
 ]
@@ -218,7 +218,7 @@ val_evaluator = dict(
     ann_file='data/nuscenes/occfrmwrk-nuscenes_infos_val.pkl',
     data_root='data/nuscenes/',
     eval_metric='miou',
-    sort_by_timestamp=False)  # TPVFormer does NOT sort dataset by timestamp
+    sort_by_timestamp=True)   # Dataset sorts by timestamp (load_data_list); metric must match
 
 test_evaluator = val_evaluator
 

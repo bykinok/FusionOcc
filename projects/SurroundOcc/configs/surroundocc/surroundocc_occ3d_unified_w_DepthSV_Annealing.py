@@ -25,7 +25,7 @@ custom_imports = dict(
 #
 # To run ablation variants, only change the values below:
 depth_loss_annealing_schedule = [
-    (1,  2.0),   # epoch  1–8
+    (1,  4.0),   # epoch  1–8
     (9,  0.5),   # epoch  9–16
     (17, 0.1),   # epoch 17–24
 ]
@@ -317,7 +317,7 @@ val_evaluator = dict(
     data_root='data/nuscenes',
     class_names=class_names,
     eval_metric='miou',
-    sort_by_timestamp=False)  # Dataset does NOT sort by timestamp (matching original SurroundOcc)
+    sort_by_timestamp=True)   # Dataset sorts by timestamp; metric must match
 
 test_evaluator = val_evaluator
 load_from = 'projects/SurroundOcc/pretrain/r101_dcn_fcos3d_pretrain.pth'

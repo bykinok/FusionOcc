@@ -29,7 +29,7 @@ custom_imports = dict(
 #
 # To run ablation variants, only change the values below:
 depth_loss_annealing_schedule = [
-    (1,  2.0),   # epoch  1–8
+    (1,  4.0),   # epoch  1–8
     (9,  0.5),   # epoch  9–16
     (17, 0.1),   # epoch 17–24
 ]
