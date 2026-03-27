@@ -16,13 +16,16 @@ custom_imports = dict(
 #   competes with the occupancy gradient in later epochs.
 #
 # 3-phase schedule over 24 epochs:
-#   Phase 1 (ep  1-8 ): weight=4.0 → strong geometric prior  (~22% of total loss)
-#   Phase 2 (ep  9-16): weight=0.5 → gentle regularisation   (~ 3% of total loss)
-#   Phase 3 (ep 17-24): weight=0.1 → near-zero, occ focus    (~ 1% of total loss)
+#   Phase 1 (ep  1-8 ): weight=2.0 → proven safe initial weight (+0.28 mIoU at ep1)
+#   Phase 2 (ep  9-16): weight=0.5 → gentle regularisation
+#   Phase 3 (ep 17-24): weight=0.1 → near-zero, occ focus
+#
+# NOTE: weight=4.0 caused loss explosion at init (depth: 43% of total loss),
+#   collapsing epoch-1 mIoU to 5.0. weight=2.0 is the verified safe upper bound.
 #
 # To run ablation variants, only change the values below:
 depth_loss_annealing_schedule = [
-    (1,  4.0),   # epoch  1–8
+    (1,  2.0),   # epoch  1–8
     (9,  0.5),   # epoch  9–16
     (17, 0.1),   # epoch 17–24
 ]
@@ -93,7 +96,7 @@ model = dict(
         mid_channels=256,
         grid_config=depth_grid_config,
         downsample=depth_downsample,
-        loss_weight=4.0,  # Phase 1 initial value; overridden by DepthLossAnnealingHook
+        loss_weight=2.0,  # Phase 1 initial value; overridden by DepthLossAnnealingHook
         feature_level=1,
     ),
     img_backbone=dict(
