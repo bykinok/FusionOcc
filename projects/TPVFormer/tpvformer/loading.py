@@ -237,13 +237,40 @@ class TPVFormerPointToMultiViewDepth(BaseTransform):
     matrix. This transform converts points from lidar to ego using lidar2ego
     when use_ego_frame=True, then projects with results['lidar2img'] so that
     gt_depth is consistent with the model's view transformation.
+
+    Args:
+        selected_classes (list[int] | None): If set, only LiDAR points whose
+            semantic class (from results['pts_semantic_mask']) is in this list
+            contribute to the depth map.  Requires LoadOccupancy to run before
+            this transform so that pts_semantic_mask is available.
+
+            Occ3D class IDs (0-17):
+              0=others, 1=barrier, 2=bicycle, 3=bus, 4=car, 5=construction_vehicle,
+              6=motorcycle, 7=pedestrian, 8=traffic_cone, 9=trailer, 10=truck,
+              11=driveable_surface, 12=other_flat, 13=sidewalk, 14=terrain,
+              15=manmade, 16=vegetation, 17=free
+
+            Examples:
+              Option B – exclude only consistently-hurt classes:
+                selected_classes=[0,1,4,6,7,8,10,11,12,13,14,15,16]
+                (excludes bicycle=2, bus=3, construction_vehicle=5, trailer=9)
+
+              Option 1 (CompPair) – exclude both members of every competing pair:
+                selected_classes=[0,1,4,7,8,11,12,13,14,15,16]
+                (excludes bicycle=2, bus=3, CV=5, motorcycle=6, trailer=9, truck=10)
+                Competing pairs: bicycle↔motorcycle, bus↔truck, CV↔truck, trailer—truck
     """
 
-    def __init__(self, grid_config: dict, downsample: int = 1, use_ego_frame: bool = True):
+    def __init__(self, grid_config: dict, downsample: int = 1,
+                 use_ego_frame: bool = True,
+                 selected_classes: Optional[list] = None):
         super().__init__()
         self.downsample = downsample
         self.grid_config = grid_config
         self.use_ego_frame = use_ego_frame
+        self.selected_classes = (
+            np.array(selected_classes, dtype=np.int32) if selected_classes is not None else None
+        )
 
     def _points_to_ego(self, results: dict) -> np.ndarray:
         """Return 3D points in ego frame (N, 3). Uses lidar2ego from results."""
@@ -310,6 +337,18 @@ class TPVFormerPointToMultiViewDepth(BaseTransform):
     def transform(self, results: dict) -> dict:
         # Points in ego frame when use_ego_frame=True (same as TPVFormer lidar2img)
         points_ego = self._points_to_ego(results)
+
+        # Class-selective depth supervision:
+        # Keep only LiDAR points whose semantic class is in selected_classes.
+        # pts_semantic_mask is set by LoadOccupancy (must run before this transform).
+        if self.selected_classes is not None:
+            pts_mask = results.get('pts_semantic_mask')
+            if pts_mask is not None:
+                pts_mask = np.asarray(pts_mask).reshape(-1)
+                if len(pts_mask) == len(points_ego):
+                    keep = np.isin(pts_mask, self.selected_classes)
+                    points_ego = points_ego[keep]
+
         lidar2imgs = results['lidar2img']  # (num_cams, 4, 4), already ego2img when use_ego_frame
         if isinstance(lidar2imgs, torch.Tensor):
             lidar2imgs = lidar2imgs.numpy()

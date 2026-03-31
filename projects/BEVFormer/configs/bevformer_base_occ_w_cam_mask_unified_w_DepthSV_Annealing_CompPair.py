@@ -19,13 +19,13 @@ custom_imports = dict(
 # Motivation: depth supervision boosts early-epoch geometry learning but
 #   competes with the occupancy gradient in later epochs.
 #
-# 3-phase schedule over 24 epochs (aligned with TPVFormer verified schedule):
+# 3-phase schedule over 24 epochs (same as TPVFormer CompPair):
 #   Phase 1 (ep  1-8 ): weight=2.0 → proven safe initial weight
-#     (weight=4.0 caused loss explosion in TPVFormer, collapsing ep1 mIoU to 5.0)
-#   Phase 2 (ep  9-16): weight=0.5 → 점진적 감소
-#   Phase 3 (ep 17-24): weight=0.0 → 완전 차단 → occupancy 집중
-#     (weight=0.1 confirmed to still cause gradient conflict for bicycle/CV
-#      in TPVFormer experiments; full cutoff at ep17 showed best results)
+#     (TPVFormer: weight=4.0 caused loss explosion, collapsing ep1 mIoU to 5.0)
+#   Phase 2 (ep  9-16): weight=0.5 → gradual decay
+#   Phase 3 (ep 17-24): weight=0.0 → fully disabled → occupancy fine-tuning
+#     (TPVFormer: weight=0.1 still caused persistent gradient conflict for
+#      bicycle/CV; full cutoff at ep17 confirmed best in TPVFormer experiments)
 #
 # To run ablation variants, only change the values below:
 depth_loss_annealing_schedule = [
@@ -33,6 +33,23 @@ depth_loss_annealing_schedule = [
     (9,  0.5),   # epoch  9–16: 점진적 감소
     (17, 0.0),   # epoch 17–24: 완전 차단 → occupancy 집중
 ]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Competing-Pair Class Selection for Depth Supervision
+# ──────────────────────────────────────────────────────────────────────────────
+# Depth SV analysis on TPVFormer (ep24, Annealing vs Baseline) revealed gradient
+# conflicts for classes sharing a similar depth distribution with a dominant
+# counterpart ("competing pairs"):
+#   Pair 1: bicycle  ↔ motorcycle  |  Pair 2: bus ↔ truck
+#   Pair 3: CV       ↔ truck       |  Pair 4: trailer — truck (physically attached)
+#
+# Option 1: exclude both members of every competing pair symmetrically.
+#   Excluded (6): bicycle(2), bus(3), CV(5), motorcycle(6), trailer(9), truck(10)
+#   Included (11): others(0), barrier(1), car(4), pedestrian(7), traffic_cone(8),
+#                  driveable_surface(11), other_flat(12), sidewalk(13),
+#                  terrain(14), manmade(15), vegetation(16)
+depth_sv_selected_classes = [0, 1, 4, 7, 8, 11, 12, 13, 14, 15, 16]
+depth_sv_lidarseg_root = 'data/nuscenes/lidarseg/v1.0-trainval'
 
 # Set default scope to mmdet3d for all modules
 default_scope = 'mmdet3d'
@@ -219,7 +236,8 @@ train_pipeline = [
     dict(type='LoadPointsFromFile', coord_type='LIDAR', load_dim=5, use_dim=3),
     dict(type='LoadOccGTFromFile', data_root=occ_gt_data_root),
     dict(type='BEVAug', bda_aug_conf=bda_aug_conf, is_train=True),
-    dict(type='BEVFormerPointToMultiViewDepth', grid_config=depth_grid_config, downsample=depth_downsample),
+    dict(type='BEVFormerPointToMultiViewDepth', grid_config=depth_grid_config, downsample=depth_downsample,
+         selected_classes=depth_sv_selected_classes, lidarseg_root=depth_sv_lidarseg_root),
     dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=False),
     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='ObjectNameFilter', classes=class_names),
@@ -234,7 +252,8 @@ test_pipeline = [
     dict(type='LoadPointsFromFile', coord_type='LIDAR', load_dim=5, use_dim=3),
     dict(type='LoadOccGTFromFile', data_root=occ_gt_data_root),
     dict(type='BEVAug', bda_aug_conf=bda_aug_conf, is_train=False),
-    dict(type='BEVFormerPointToMultiViewDepth', grid_config=depth_grid_config, downsample=depth_downsample),
+    dict(type='BEVFormerPointToMultiViewDepth', grid_config=depth_grid_config, downsample=depth_downsample,
+         selected_classes=depth_sv_selected_classes, lidarseg_root=depth_sv_lidarseg_root),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='PadMultiViewImage', size_divisor=32),
     dict(

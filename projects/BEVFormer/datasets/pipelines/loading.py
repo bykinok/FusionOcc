@@ -1,3 +1,4 @@
+import os
 import numpy as np
 from numpy import random
 import mmcv
@@ -194,11 +195,52 @@ class BEVFormerPointToMultiViewDepth(object):
     Uses results['lidar2img'], results['ego2lidar'] from NuSceneOcc.
     Projects ego-frame points with ego2img = lidar2img @ ego2lidar so gt_depth
     is consistent with ego-frame view (same convention as TPVFormer use_ego_frame=True).
+
+    Args:
+        selected_classes (list[int] | None): If set, only LiDAR points whose
+            semantic class (Occ3D IDs 0-16) is in this list contribute to the
+            depth map. Requires lidarseg_root to be specified.
+            Competing-pair selection (Option 1) example:
+              selected_classes=[0,1,4,7,8,11,12,13,14,15,16]
+              (excludes bicycle=2, bus=3, CV=5, motorcycle=6, trailer=9, truck=10)
+        lidarseg_root (str | None): Root directory of NuScenes lidarseg files
+            (e.g. 'data/nuscenes/lidarseg/v1.0-trainval').
+            Required when selected_classes is not None.
     """
 
-    def __init__(self, grid_config, downsample=16):
+    # NuScenes lidarseg (0-32) → Occ3D (0-17) mapping
+    _LIDARSEG_MAPPING = {
+        1: 0, 5: 0, 7: 0, 8: 0, 10: 0, 11: 0, 13: 0, 19: 0, 20: 0, 0: 0, 29: 0, 31: 0,
+        9: 1, 14: 2, 15: 3, 16: 3, 17: 4, 18: 5, 21: 6, 2: 7, 3: 7, 4: 7, 6: 7,
+        12: 8, 22: 9, 23: 10, 24: 11, 25: 12, 26: 13, 27: 14, 28: 15, 30: 16, 32: 17,
+    }
+
+    def __init__(self, grid_config, downsample=16,
+                 selected_classes=None, lidarseg_root=None):
         self.downsample = downsample
         self.grid_config = grid_config
+        self.selected_classes = (
+            np.array(selected_classes, dtype=np.int32)
+            if selected_classes is not None else None
+        )
+        self.lidarseg_root = lidarseg_root
+
+    def _load_pts_semantic_mask(self, results):
+        """Load lidarseg labels and map to Occ3D class IDs."""
+        pts_filename = results.get('pts_filename') or \
+                       results.get('lidar_points', {}).get('lidar_path', '')
+        if not pts_filename:
+            return None
+        # Derive sample token from filename:
+        # e.g. ".../LIDAR_TOP/{token}.pcd.bin" -> "{token}"
+        token = os.path.basename(pts_filename).replace('.pcd.bin', '')
+        seg_path = os.path.join(self.lidarseg_root, f'{token}_lidarseg.bin')
+        if not os.path.exists(seg_path):
+            return None
+        raw = np.fromfile(seg_path, dtype=np.uint8)
+        mapping = self._LIDARSEG_MAPPING
+        mapped = np.vectorize(lambda x: mapping.get(int(x), 0))(raw)
+        return mapped.astype(np.int32)
 
     def _points_to_ego(self, results):
         """Points in ego frame (N, 3). lidar2ego = inv(ego2lidar)."""
@@ -250,6 +292,18 @@ class BEVFormerPointToMultiViewDepth(object):
     def __call__(self, results):
         import torch
         points_ego = self._points_to_ego(results)
+
+        # Class-selective depth supervision: filter by semantic class
+        if self.selected_classes is not None and self.lidarseg_root is not None:
+            pts_mask = results.get('pts_semantic_mask')
+            if pts_mask is None:
+                pts_mask = self._load_pts_semantic_mask(results)
+            if pts_mask is not None:
+                pts_mask = np.asarray(pts_mask).reshape(-1)
+                if len(pts_mask) == len(points_ego):
+                    keep = np.isin(pts_mask, self.selected_classes)
+                    points_ego = points_ego[keep]
+
         lidar2img_list = results['lidar2img']
         ego2lidar = np.asarray(results['ego2lidar'], dtype=np.float64)
         if ego2lidar.shape != (4, 4):
@@ -284,5 +338,6 @@ class BEVFormerPointToMultiViewDepth(object):
         return results
 
     def __repr__(self):
-        return "{} (downsample={}, grid_config={})".format(
-            self.__class__.__name__, self.downsample, self.grid_config)
+        return "{} (downsample={}, grid_config={}, selected_classes={})".format(
+            self.__class__.__name__, self.downsample, self.grid_config,
+            list(self.selected_classes) if self.selected_classes is not None else None)
