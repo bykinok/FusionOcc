@@ -90,7 +90,13 @@ class DepthLossAnnealingHook(Hook):
             return
         weight = self._resolve_weight(epoch)
         depth_head.loss_weight = weight
-        runner.logger.info(
-            f'[DepthLossAnnealingHook] epoch {epoch:>2d} → '
-            f'depth loss_weight = {weight}'
-        )
+        if weight == 0.0:
+            runner.logger.info(
+                f'[DepthLossAnnealingHook] epoch {epoch:>2d} → '
+                f'depth loss_weight = {weight} (depth loss disabled)'
+            )
+        else:
+            runner.logger.info(
+                f'[DepthLossAnnealingHook] epoch {epoch:>2d} → '
+                f'depth loss_weight = {weight}'
+            )

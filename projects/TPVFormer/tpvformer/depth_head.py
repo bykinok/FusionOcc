@@ -107,7 +107,15 @@ class AuxiliaryDepthHead(BaseModule):
         This is equivalent to reduction='mean' over foreground elements only,
         giving a per-element average BCE that is directly comparable in scale
         to the occupancy CE/Lovász losses.
+
+        When loss_weight == 0.0, skips heavy computation and returns 0 via
+        a lightweight sum of depth_preds (keeps depth_head params in the
+        computation graph, which is required for DDP find_unused_parameters=False).
         """
+        if self.loss_weight == 0.0:
+            # Keep depth_head params in graph for DDP; no actual loss contribution.
+            return depth_preds.sum() * 0.0
+
         if isinstance(depth_labels, (list, tuple)):
             depth_labels = torch.stack([t if torch.is_tensor(t) else torch.as_tensor(t) for t in depth_labels])
         B, N, H, W = depth_labels.shape

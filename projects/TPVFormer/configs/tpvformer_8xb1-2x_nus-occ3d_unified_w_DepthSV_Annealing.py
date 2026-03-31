@@ -12,17 +12,20 @@ custom_imports = dict(
 #
 # 3-phase schedule over 24 epochs:
 #   Phase 1 (ep  1-8 ): weight=2.0 → proven safe initial weight (+0.28 mIoU at ep1)
-#   Phase 2 (ep  9-16): weight=0.5 → gentle regularisation
-#   Phase 3 (ep 17-24): weight=0.1 → near-zero, occ focus
+#   Phase 2 (ep  9-16): weight=0.5 → 점진적 감소
+#   Phase 3 (ep 17-24): weight=0.0 → 완전 차단
+#     - weight=0.1도 bicycle/CV에 지속적 gradient 충돌 유발 확인
+#     - ep17-24은 occupancy fine-tuning 단계: depth 간섭 제거 효과 기대
 #
 # NOTE: weight=4.0 caused loss explosion at init (depth: 43% of total loss),
 #   collapsing epoch-1 mIoU to 5.0. weight=2.0 is the verified safe upper bound.
+# HISTORY: initial run used (1,4.0) → ep24 mIoU 37.63 (-0.21 vs baseline 37.84)
 #
 # To run ablation variants, only change the values below:
 depth_loss_annealing_schedule = [
-    (1,  4.0),   # epoch  1–8
-    (9,  0.5),   # epoch  9–16
-    (17, 0.1),   # epoch 17–24
+    (1,  2.0),   # epoch  1–8:  기하 priors 학습 (weight=4.0은 ep1 손상 확인됨)
+    (9,  0.5),   # epoch  9–16: 점진적 감소
+    (17, 0.0),   # epoch 17–24: 완전 차단 → occupancy 집중 (0.1도 bicycle/CV에 악영향)
 ]
 
 # Occupancy task 설정
