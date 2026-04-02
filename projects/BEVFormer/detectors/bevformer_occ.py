@@ -245,10 +245,10 @@ class BEVFormerOcc(MVXTwoStageDetector):
     def obtain_history_bev(self, imgs_queue, img_metas_list):
         """Obtain history BEV features iteratively. To save GPU memory, gradients are not calculated.
         """
-        # CRITICAL: For distributed training (DDP), don't call self.eval() directly
-        # Instead, use a context manager to temporarily disable BN statistics updates
-        # Save the current training mode
-        # breakpoint()
+        # When queue_length=1, prev_img has shape [B, 0, N, C, H, W] (empty).
+        # Skip processing and return None immediately.
+        if imgs_queue.size(1) == 0:
+            return None
 
         was_training = self.training
         self.eval()

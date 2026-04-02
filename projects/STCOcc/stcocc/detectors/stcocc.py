@@ -140,22 +140,22 @@ class STCOcc(CenterPoint):
                     backward_projection_config_dict['num_stage_{}'.format(index+1)]['transformer']['encoder']['grid_config']['z'][2] * 2
 
                 # transformerlayers bev shape adjust
-                backward_projection_config_dict['num_stage_{}'.format(index+1)]['transformer']['encoder']['transformerlayers']['attn_cfgs'][1][
-                    'deformable_attention']['num_points'] = \
-                    int(backward_projection_config_dict['num_stage_{}'.format(index+1)]['transformer']['encoder']['transformerlayers']['attn_cfgs'][1][
-                        'deformable_attention']['num_points'] / 2)
+                # attn_cfgs layout: [OA_TemporalAttention (optional), OA_SpatialCrossAttention]
+                # When TSA is removed (no_tsa config), only SCA remains at index 0.
+                _attn_cfgs = backward_projection_config_dict['num_stage_{}'.format(index+1)]['transformer']['encoder']['transformerlayers']['attn_cfgs']
+                _sca_idx = next(i for i, cfg in enumerate(_attn_cfgs) if 'deformable_attention' in cfg)
+                _sca_cfg = _attn_cfgs[_sca_idx]
 
-                backward_projection_config_dict['num_stage_{}'.format(index + 1)]['transformer']['encoder'][
-                    'transformerlayers']['attn_cfgs'][0]['num_points'] = \
-                    int(backward_projection_config_dict['num_stage_{}'.format(index + 1)]['transformer']['encoder'][
-                            'transformerlayers']['attn_cfgs'][0]['num_points'] / 2)
+                _sca_cfg['deformable_attention']['num_points'] = int(_sca_cfg['deformable_attention']['num_points'] / 2)
 
-                if 'num_Z_anchors' in backward_projection_config_dict['num_stage_{}'.format(index + 1)]['transformer']['encoder'][
-                    'transformerlayers']['attn_cfgs'][1]['deformable_attention']:
-                    backward_projection_config_dict['num_stage_{}'.format(index + 1)]['transformer']['encoder'][
-                        'transformerlayers']['attn_cfgs'][1]['deformable_attention']['num_Z_anchors'] = \
-                        int(backward_projection_config_dict['num_stage_{}'.format(index + 1)]['transformer']['encoder'][
-                                'transformerlayers']['attn_cfgs'][1]['deformable_attention']['num_Z_anchors'] / 2)
+                # Adjust TSA num_points only when TSA is present
+                _tsa_indices = [i for i, cfg in enumerate(_attn_cfgs) if 'deformable_attention' not in cfg]
+                if _tsa_indices:
+                    _tsa_cfg = _attn_cfgs[_tsa_indices[0]]
+                    _tsa_cfg['num_points'] = int(_tsa_cfg['num_points'] / 2)
+
+                if 'num_Z_anchors' in _sca_cfg['deformable_attention']:
+                    _sca_cfg['deformable_attention']['num_Z_anchors'] = int(_sca_cfg['deformable_attention']['num_Z_anchors'] / 2)
 
                 # positional_encoding bev shape adjust
                 backward_projection_config_dict['num_stage_{}'.format(index+1)]['positional_encoding']['row_num_embed'] = \

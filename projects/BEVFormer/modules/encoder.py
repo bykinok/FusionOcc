@@ -351,9 +351,13 @@ class BEVFormerLayer(MyCustomBaseTransformerLayer):
             ffn_num_fcs=ffn_num_fcs,
             **kwargs)
         self.fp16_enabled = False
-        assert len(operation_order) == 6
-        assert set(operation_order) == set(
-            ['self_attn', 'norm', 'cross_attn', 'ffn'])
+        # Allow operation_order without 'self_attn' (e.g., no_tsa configs)
+        required_ops = {'cross_attn', 'norm', 'ffn'}
+        assert required_ops.issubset(set(operation_order)), \
+            f"operation_order must contain {required_ops}, got {set(operation_order)}"
+        assert set(operation_order).issubset(
+            {'self_attn', 'norm', 'cross_attn', 'ffn'}), \
+            f"operation_order contains unknown ops: {set(operation_order) - {'self_attn', 'norm', 'cross_attn', 'ffn'}}"
 
     def forward(self,
                 query,
