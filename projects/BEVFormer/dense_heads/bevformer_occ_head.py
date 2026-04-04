@@ -308,22 +308,24 @@ class BEVFormerOccHead(BaseModule):
         # Convert numpy arrays to torch tensors if needed
         if isinstance(voxel_semantics, np.ndarray):
             voxel_semantics = torch.from_numpy(voxel_semantics)
-        if isinstance(mask_camera, np.ndarray):
-            mask_camera = torch.from_numpy(mask_camera)
         
         # Move tensors to the same device as preds
         device = preds.device
         voxel_semantics = voxel_semantics.to(device)
-        mask_camera = mask_camera.to(device)
         
         voxel_semantics=voxel_semantics.long()
         if self.use_mask:
+            # mask_camera가 제공된 경우에만 mask 처리
+            if isinstance(mask_camera, np.ndarray):
+                mask_camera = torch.from_numpy(mask_camera)
+            mask_camera = mask_camera.to(device)
             voxel_semantics=voxel_semantics.reshape(-1)
             preds=preds.reshape(-1,self.num_classes)
             mask_camera=mask_camera.reshape(-1)
             num_total_samples=mask_camera.sum()
             loss_occ=self.loss_occ(preds,voxel_semantics,mask_camera, avg_factor=num_total_samples)
         else:
+            # use_mask=False일 때는 mask_camera 없이 전체 GT로 학습
             voxel_semantics = voxel_semantics.reshape(-1)
             preds = preds.reshape(-1, self.num_classes)
             loss_occ = self.loss_occ(preds, voxel_semantics,)
