@@ -27,6 +27,14 @@ _pc_range = [-40, -40, -1.0, 40, 40, 5.4]
 _voxel_size = 0.4
 _occ_size = [200, 200, 16]
 
+# Radius bins: horizontal distance from ego origin (xy-plane)
+RADIUS_BINS = [(0, 20), (20, 35), (35, float('inf'))]
+RADIUS_BIN_LABELS = ['0-20m', '20-35m', '35m+']
+
+# Height bins: z coordinate in ego frame (ground ≈ z=0)
+HEIGHT_BINS = [(0, 2), (2, 4), (4, float('inf'))]
+HEIGHT_BIN_LABELS = ['0-2m', '2-4m', '4m+']
+
 occ_class_names = [
     'others','barrier', 'bicycle', 'bus', 'car', 'construction_vehicle',
     'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck',
@@ -229,6 +237,69 @@ def calc_metrics(pcd_pred_list, pcd_gt_list):
     return iou_list, ave_list
 
 
+def _accumulate_bin_stats(pcd_pred_item, pcd_gt_item, bin_mask,
+                          gt_cnt_bin, pred_cnt_bin, tp_cnt_bin, thresholds):
+    """bin_mask로 필터링한 ray subset에 대해 gt/pred/tp 카운트를 누적한다."""
+    if bin_mask.sum() == 0:
+        return
+    pcd_p = pcd_pred_item[bin_mask]
+    pcd_g = pcd_gt_item[bin_mask]
+
+    for j, threshold in enumerate(thresholds):
+        depth_pred = pcd_p[:, 4]
+        depth_gt   = pcd_g[:, 4]
+        tp_dist_mask = (np.abs(depth_pred - depth_gt) < threshold)
+
+        for i, cls in enumerate(occ_class_names):
+            cls_id = occ_class_names.index(cls)
+            cls_mask_pred = (pcd_p[:, 3] == cls_id)
+            cls_mask_gt   = (pcd_g[:, 3] == cls_id)
+
+            if j == 0:
+                gt_cnt_bin[i]   += cls_mask_gt.sum()
+                pred_cnt_bin[i] += cls_mask_pred.sum()
+
+            tp_cls  = cls_mask_gt & cls_mask_pred
+            tp_cnt_bin[j][i] += np.logical_and(tp_cls, tp_dist_mask).sum()
+
+
+def _print_bin_table(bin_labels, gt_cnt_bins, pred_cnt_bins, tp_cnt_bins,
+                     thresholds, logger, title):
+    """거리/높이 구간별 RayIoU 테이블을 출력한다."""
+    n_bins = len(bin_labels)
+    header = ['Class Names'] + [
+        f'{label} IoU@{t}' for label in bin_labels for t in thresholds
+    ]
+    table = PrettyTable(header)
+    table.float_format = '.3'
+
+    # per-class rows
+    for i in range(len(occ_class_names) - 1):  # free 제외
+        row = [occ_class_names[i]]
+        for b in range(n_bins):
+            denom = gt_cnt_bins[b] + pred_cnt_bins[b]
+            for j in range(len(thresholds)):
+                d = denom[i] - tp_cnt_bins[b][j][i]
+                iou = tp_cnt_bins[b][j][i] / d if d > 0 else float('nan')
+                row.append(iou)
+        table.add_row(row, divider=(i == len(occ_class_names) - 2))
+
+    # MEAN row
+    mean_row = ['MEAN']
+    for b in range(n_bins):
+        denom = gt_cnt_bins[b] + pred_cnt_bins[b]
+        for j in range(len(thresholds)):
+            iou_per_cls = []
+            for i in range(len(occ_class_names) - 1):
+                d = denom[i] - tp_cnt_bins[b][j][i]
+                iou_per_cls.append(tp_cnt_bins[b][j][i] / d if d > 0 else float('nan'))
+            mean_row.append(np.nanmean(iou_per_cls))
+    table.add_row(mean_row)
+
+    print_log(f'\n===> {title}', logger=logger)
+    print_log(table, logger=logger)
+
+
 def main(sem_pred_list, sem_gt_list, flow_pred_list, flow_gt_list, lidar_origin_list, logger):
     torch.cuda.empty_cache()
 
@@ -236,120 +307,154 @@ def main(sem_pred_list, sem_gt_list, flow_pred_list, flow_gt_list, lidar_origin_
     lidar_rays = generate_lidar_rays()
     lidar_rays = torch.from_numpy(lidar_rays)
 
-    # 메트릭을 누적할 변수들 (calc_metrics의 로직을 여기로 이동)
     thresholds = [1, 2, 4]
-    gt_cnt = np.zeros([len(occ_class_names)])
-    pred_cnt = np.zeros([len(occ_class_names)])
-    tp_cnt = np.zeros([len(thresholds), len(occ_class_names)])
-    ave = np.zeros([len(thresholds), len(occ_class_names)])
+    n_cls = len(occ_class_names)
+    n_thr = len(thresholds)
+
+    # ── 전체 메트릭 누적 변수 ──────────────────────────────────────────────
+    gt_cnt   = np.zeros([n_cls])
+    pred_cnt = np.zeros([n_cls])
+    tp_cnt   = np.zeros([n_thr, n_cls])
+    ave       = np.zeros([n_thr, n_cls])
     for i, cls in enumerate(occ_class_names):
         if cls not in flow_class_names:
             ave[:, i] = np.nan
-    ave_count = np.zeros([len(thresholds), len(occ_class_names)])
+    ave_count = np.zeros([n_thr, n_cls])
 
-    # 배치 단위로 처리 (메모리 절약)
-    batch_size = 500  # 500개씩 처리 후 메모리 정리
+    # ── 반경별(Radius) 누적 변수 ──────────────────────────────────────────
+    n_r = len(RADIUS_BINS)
+    gt_cnt_r   = [np.zeros([n_cls]) for _ in range(n_r)]
+    pred_cnt_r = [np.zeros([n_cls]) for _ in range(n_r)]
+    tp_cnt_r   = [np.zeros([n_thr, n_cls]) for _ in range(n_r)]
+
+    # ── 높이별(Height) 누적 변수 ──────────────────────────────────────────
+    n_h = len(HEIGHT_BINS)
+    gt_cnt_h   = [np.zeros([n_cls]) for _ in range(n_h)]
+    pred_cnt_h = [np.zeros([n_cls]) for _ in range(n_h)]
+    tp_cnt_h   = [np.zeros([n_thr, n_cls]) for _ in range(n_h)]
+
+    # ── 배치 처리 ─────────────────────────────────────────────────────────
+    batch_size = 500
     pcd_pred_batch, pcd_gt_batch = [], []
-    
+
     for idx, (sem_pred, sem_gt, flow_pred, flow_gt, lidar_origins) in enumerate(tqdm(
             zip(sem_pred_list, sem_gt_list, flow_pred_list, flow_gt_list, lidar_origin_list), ncols=50)):
-        sem_pred = np.reshape(sem_pred, [200, 200, 16])
-        sem_gt = np.reshape(sem_gt, [200, 200, 16])
+        sem_pred  = np.reshape(sem_pred,  [200, 200, 16])
+        sem_gt    = np.reshape(sem_gt,    [200, 200, 16])
         flow_pred = np.reshape(flow_pred, [200, 200, 16, 2])
-        flow_gt = np.reshape(flow_gt, [200, 200, 16, 2])
+        flow_gt   = np.reshape(flow_gt,   [200, 200, 16, 2])
 
         pcd_pred = process_one_sample(sem_pred, lidar_rays, lidar_origins, flow_pred)
-        pcd_gt = process_one_sample(sem_gt, lidar_rays, lidar_origins, flow_gt)
+        pcd_gt   = process_one_sample(sem_gt,   lidar_rays, lidar_origins, flow_gt)
 
-        # evalute on non-free rays
-        valid_mask = (pcd_gt[:, 3] != len(occ_class_names) - 1)
+        # free ray 제외
+        valid_mask = (pcd_gt[:, 3] != n_cls - 1)
         pcd_pred = pcd_pred[valid_mask]
-        pcd_gt = pcd_gt[valid_mask]
+        pcd_gt   = pcd_gt[valid_mask]
 
         assert pcd_pred.shape == pcd_gt.shape
         pcd_pred_batch.append(pcd_pred)
         pcd_gt_batch.append(pcd_gt)
-        
-        # 배치 단위로 메트릭 계산 및 누적
+
         if (idx + 1) % batch_size == 0 or (idx + 1) == len(sem_pred_list):
-            # 배치에 대한 메트릭 계산
             for pcd_pred_item, pcd_gt_item in zip(pcd_pred_batch, pcd_gt_batch):
+
+                # ── 전체 메트릭 ────────────────────────────────────────────
                 for j, threshold in enumerate(thresholds):
-                    depth_pred = pcd_pred_item[:, 4]
-                    depth_gt = pcd_gt_item[:, 4]
-                    l1_error = np.abs(depth_pred - depth_gt)
+                    depth_pred   = pcd_pred_item[:, 4]
+                    depth_gt     = pcd_gt_item[:, 4]
+                    l1_error     = np.abs(depth_pred - depth_gt)
                     tp_dist_mask = (l1_error < threshold)
 
                     for i, cls in enumerate(occ_class_names):
-                        cls_id = occ_class_names.index(cls)
+                        cls_id        = occ_class_names.index(cls)
                         cls_mask_pred = (pcd_pred_item[:, 3] == cls_id)
-                        cls_mask_gt = (pcd_gt_item[:, 3] == cls_id)
+                        cls_mask_gt   = (pcd_gt_item[:, 3] == cls_id)
 
-                        gt_cnt_i = cls_mask_gt.sum()
-                        pred_cnt_i = cls_mask_pred.sum()
                         if j == 0:
-                            gt_cnt[i] += gt_cnt_i
-                            pred_cnt[i] += pred_cnt_i
+                            gt_cnt[i]   += cls_mask_gt.sum()
+                            pred_cnt[i] += cls_mask_pred.sum()
 
-                        tp_cls = cls_mask_gt & cls_mask_pred
+                        tp_cls  = cls_mask_gt & cls_mask_pred
                         tp_mask = np.logical_and(tp_cls, tp_dist_mask)
                         tp_cnt[j][i] += tp_mask.sum()
 
-                        # flow L2 error
                         if cls in flow_class_names and tp_mask.sum() > 0:
-                            gt_flow_i = pcd_gt_item[tp_mask, 5:7]
-                            pred_flow_i = pcd_pred_item[tp_mask, 5:7]
-                            flow_error = np.linalg.norm(gt_flow_i - pred_flow_i, axis=1)
-                            ave[j][i] += np.sum(flow_error)
+                            flow_error = np.linalg.norm(
+                                pcd_gt_item[tp_mask, 5:7] - pcd_pred_item[tp_mask, 5:7], axis=1)
+                            ave[j][i]       += np.sum(flow_error)
                             ave_count[j][i] += flow_error.shape[0]
-            
-            # 배치 처리 후 메모리 정리
+
+                # ── 반경별(Radius) 메트릭 ─────────────────────────────────
+                # pcd[:, 0:3] = (x, y, z) in ego frame; radius = sqrt(x^2 + y^2)
+                radius_gt = np.sqrt(pcd_gt_item[:, 0] ** 2 + pcd_gt_item[:, 1] ** 2)
+                for b, (r_min, r_max) in enumerate(RADIUS_BINS):
+                    if r_max == float('inf'):
+                        bin_mask = (radius_gt >= r_min)
+                    else:
+                        bin_mask = (radius_gt >= r_min) & (radius_gt < r_max)
+                    _accumulate_bin_stats(
+                        pcd_pred_item, pcd_gt_item, bin_mask,
+                        gt_cnt_r[b], pred_cnt_r[b], tp_cnt_r[b], thresholds)
+
+                # ── 높이별(Height) 메트릭 ─────────────────────────────────
+                # pcd[:, 2] = z coordinate in ego frame (ground ≈ z=0)
+                height_gt = pcd_gt_item[:, 2]
+                for b, (h_min, h_max) in enumerate(HEIGHT_BINS):
+                    if h_max == float('inf'):
+                        bin_mask = (height_gt >= h_min)
+                    else:
+                        bin_mask = (height_gt >= h_min) & (height_gt < h_max)
+                    _accumulate_bin_stats(
+                        pcd_pred_item, pcd_gt_item, bin_mask,
+                        gt_cnt_h[b], pred_cnt_h[b], tp_cnt_h[b], thresholds)
+
             del pcd_pred_batch, pcd_gt_batch
             pcd_pred_batch, pcd_gt_batch = [], []
             torch.cuda.empty_cache()
             import gc
-            gc.collect()  # Python garbage collection
-        
-        # 주기적으로 CUDA 메모리 정리 (매 100개 샘플마다)
+            gc.collect()
+
         elif (idx + 1) % 100 == 0:
             torch.cuda.empty_cache()
 
-    # 최종 메트릭 계산
+    # ── 전체 IoU 계산 및 출력 ────────────────────────────────────────────
     iou_list = []
-    for j, threshold in enumerate(thresholds):
+    for j in range(n_thr):
         iou_list.append((tp_cnt[j] / (gt_cnt + pred_cnt - tp_cnt[j]))[:-1])
 
-    ave_list = ave[1][:-1] / ave_count[1][:-1]  # use threshold = 2
+    ave_list = ave[1][:-1] / ave_count[1][:-1]  # threshold=2 기준
 
-    table = PrettyTable([
-        'Class Names',
-        'IoU@1', 'IoU@2', 'IoU@4', 'AVE'
-    ])
+    table = PrettyTable(['Class Names', 'IoU@1', 'IoU@2', 'IoU@4', 'AVE'])
     table.float_format = '.3'
-
-    for i in range(len(occ_class_names) - 1):
+    for i in range(n_cls - 1):
         table.add_row([
             occ_class_names[i],
             iou_list[0][i], iou_list[1][i], iou_list[2][i], ave_list[i]
-        ], divider=(i == len(occ_class_names) - 2))
-
+        ], divider=(i == n_cls - 2))
     table.add_row([
         'MEAN',
-        np.nanmean(iou_list[0]),
-        np.nanmean(iou_list[1]),
-        np.nanmean(iou_list[2]),
-        np.nanmean(ave_list)
+        np.nanmean(iou_list[0]), np.nanmean(iou_list[1]),
+        np.nanmean(iou_list[2]), np.nanmean(ave_list)
     ])
-
     print_log(table, logger=logger)
 
-    miou = np.nanmean(iou_list)
-    mave = np.nanmean(ave_list)
-
+    miou  = np.nanmean(iou_list)
+    mave  = np.nanmean(ave_list)
     occ_score = miou * 0.9 + max(1 - mave, 0.0) * 0.1
-    print_log('MIOU: {}'.format(miou), logger=logger)
-    print_log('MAVE: {}'.format(mave), logger=logger)
+    print_log('MIOU: {}'.format(miou),       logger=logger)
+    print_log('MAVE: {}'.format(mave),       logger=logger)
     print_log('Occ score: {}'.format(occ_score), logger=logger)
+
+    # ── 반경별 RayIoU 출력 ───────────────────────────────────────────────
+    _print_bin_table(
+        RADIUS_BIN_LABELS, gt_cnt_r, pred_cnt_r, tp_cnt_r,
+        thresholds, logger, 'RayIoU by Radius (horizontal distance from ego)')
+
+    # ── 높이별 RayIoU 출력 ───────────────────────────────────────────────
+    _print_bin_table(
+        HEIGHT_BIN_LABELS, gt_cnt_h, pred_cnt_h, tp_cnt_h,
+        thresholds, logger, 'RayIoU by Height (z in ego frame)')
 
     torch.cuda.empty_cache()
 
