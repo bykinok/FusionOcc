@@ -9,7 +9,7 @@
 #                 → mask_camera가 모델에 전달되지 않음 → 전체 voxel에 loss 계산
 #   - Evaluation: use_image_mask=True (evaluator) → 카메라 가시 voxel만 mIoU 계산
 #
-work_dir = './work_dirs/ssc_rs_base_nuscenes_cam_lidar_occ3d_wo_train_cam_mask'
+work_dir = './work_dirs/ssc_rs_base_nuscenes_cam_lidar_occ3d_wo_train_cam_mask_ori_setting'
 
 # Custom imports for mmdet3d 2.x (mmengine)
 custom_imports = dict(
