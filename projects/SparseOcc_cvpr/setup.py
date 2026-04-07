@@ -43,7 +43,7 @@ def make_cuda_ext(name,
 if __name__ == '__main__':
     # add_mim_extention()
     setup(
-        name='SparseOcc',
+        name='SparseOcc_cvpr',
         version='0.0',
         description=("Copy and Modified from OpenOccupancy: A Large Scale Benchmark for Surrounding Semantic Occupancy Perception"),
         author='OpenOccupancy Contributors',
@@ -51,7 +51,7 @@ if __name__ == '__main__':
         keywords='Occupancy Perception',
         packages=find_packages(),
         include_package_data=True,
-        package_data={'sparseocc.ops': ['*/*.so']},
+        package_data={'sparseocc_cvpr.ops': ['*/*.so']},
         classifiers=[
             "Development Status :: 4 - Beta",
             "License :: OSI Approved :: Apache Software License",
@@ -65,7 +65,7 @@ if __name__ == '__main__':
         ext_modules=[
             make_cuda_ext(
                 name="occ_pool_ext",
-                module="sparseocc.ops.occ_pooling",
+                module="sparseocc_cvpr.ops.occ_pooling",
                 sources=[
                     "src/occ_pool.cpp",
                     "src/occ_pool_cuda.cu",

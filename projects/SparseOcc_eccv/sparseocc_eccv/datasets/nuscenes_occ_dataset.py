@@ -1,0 +1,216 @@
+import os
+import glob
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+# 구버전 mmdet.datasets.DATASETS → compat 경유
+from ..compat import DATASETS, LegacyNuScenesDataset
+from nuscenes.eval.common.utils import Quaternion
+from nuscenes.utils.geometry_utils import transform_matrix
+from ..models.utils import sparse2dense
+from .ray_metrics import main_rayiou, main_raypq
+from .ego_pose_dataset import EgoPoseDataset
+
+
+def _get_occ_class_names(occ_gt_root):
+    """occ_gt_root 경로에서 데이터 타입 추론 후 클래스명 반환."""
+    data_type = os.path.basename(os.path.normpath(occ_gt_root))
+    if data_type == 'occ3d':
+        return [
+            'others', 'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle',
+            'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck',
+            'driveable_surface', 'other_flat', 'sidewalk',
+            'terrain', 'manmade', 'vegetation', 'free'
+        ]
+    elif data_type == 'openocc_v2':
+        return [
+            'others', 'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle',
+            'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck',
+            'driveable_surface', 'other_flat', 'sidewalk',
+            'terrain', 'manmade', 'vegetation', 'free'
+        ]
+    return []
+
+
+@DATASETS.register_module()
+class NuSceneOcc(LegacyNuScenesDataset):
+    """NuScenes Occupancy Dataset.
+
+    새 mmdet3d 1.x 환경에서 구버전 NuSceneOcc 동작을 재현하는 클래스.
+    LegacyNuScenesDataset을 베이스로 사용해 mmdet3d의 Det3DDataset API 변경을 우회한다.
+    """
+
+    def __init__(self, occ_gt_root, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.occ_gt_root = occ_gt_root
+
+        self.token2scene = {}
+        for gt_path in glob.glob(os.path.join(self.occ_gt_root, '*/*/*.npz')):
+            token = gt_path.split('/')[-2]
+            scene_name = gt_path.split('/')[-3]
+            self.token2scene[token] = scene_name
+
+        for i in range(len(self.data_infos)):
+            token = self.data_infos[i].get('token', self.data_infos[i].get('sample_idx', ''))
+            if token in self.token2scene:
+                self.data_infos[i]['scene_name'] = self.token2scene[token]
+
+    def collect_sweeps(self, index, into_past=150, into_future=0):
+        all_sweeps_prev = []
+        curr_index = index
+        while len(all_sweeps_prev) < into_past:
+            curr_sweeps = self.data_infos[curr_index].get('sweeps', [])
+            if len(curr_sweeps) == 0:
+                break
+            all_sweeps_prev.extend(curr_sweeps)
+            if curr_index > 0:
+                all_sweeps_prev.append(self.data_infos[curr_index - 1].get('cams', {}))
+            curr_index = curr_index - 1
+        
+        all_sweeps_next = []
+        curr_index = index + 1
+        while len(all_sweeps_next) < into_future:
+            if curr_index >= len(self.data_infos):
+                break
+            curr_sweeps = self.data_infos[curr_index].get('sweeps', [])
+            all_sweeps_next.extend(curr_sweeps[::-1])
+            all_sweeps_next.append(self.data_infos[curr_index].get('cams', {}))
+            curr_index = curr_index + 1
+
+        return all_sweeps_prev, all_sweeps_next
+
+    def get_data_info(self, index):
+        info = self.data_infos[index]
+        sweeps_prev, sweeps_next = self.collect_sweeps(index)
+
+        ego2global_translation = info['ego2global_translation']
+        ego2global_rotation = info['ego2global_rotation']
+        lidar2ego_translation = info['lidar2ego_translation']
+        lidar2ego_rotation = info['lidar2ego_rotation']
+        ego2global_rotation_mat = Quaternion(ego2global_rotation).rotation_matrix
+        lidar2ego_rotation_mat = Quaternion(lidar2ego_rotation).rotation_matrix
+
+        token = info.get('token', info.get('sample_idx', ''))
+
+        input_dict = dict(
+            sample_idx=token,
+            sweeps={'prev': sweeps_prev, 'next': sweeps_next},
+            timestamp=info['timestamp'] / 1e6,
+            ego2global_translation=ego2global_translation,
+            ego2global_rotation=ego2global_rotation_mat,
+            lidar2ego_translation=lidar2ego_translation,
+            lidar2ego_rotation=lidar2ego_rotation_mat,
+        )
+
+        ego2lidar = transform_matrix(lidar2ego_translation, Quaternion(lidar2ego_rotation), inverse=True)
+        input_dict['ego2lidar'] = [ego2lidar for _ in range(6)]
+
+        scene_name = info.get('scene_name', self.token2scene.get(token, ''))
+        input_dict['occ_path'] = os.path.join(self.occ_gt_root, scene_name, token, 'labels.npz')
+
+        if self.modality.get('use_camera', True):
+            img_paths = []
+            img_timestamps = []
+            lidar2img_rts = []
+
+            cams = info.get('cams', {})
+            for _, cam_info in cams.items():
+                img_paths.append(os.path.relpath(cam_info['data_path']))
+                img_timestamps.append(cam_info['timestamp'] / 1e6)
+
+                lidar2cam_r = np.linalg.inv(cam_info['sensor2lidar_rotation'])
+                lidar2cam_t = cam_info['sensor2lidar_translation'] @ lidar2cam_r.T
+
+                lidar2cam_rt = np.eye(4)
+                lidar2cam_rt[:3, :3] = lidar2cam_r.T
+                lidar2cam_rt[3, :3] = -lidar2cam_t
+                
+                intrinsic = cam_info['cam_intrinsic']
+                viewpad = np.eye(4)
+                viewpad[:intrinsic.shape[0], :intrinsic.shape[1]] = intrinsic
+                lidar2img_rt = (viewpad @ lidar2cam_rt.T)
+                lidar2img_rts.append(lidar2img_rt)
+
+            input_dict.update(dict(
+                img_filename=img_paths,
+                img_timestamp=img_timestamps,
+                lidar2img=lidar2img_rts,
+            ))
+
+        if not self.test_mode:
+            annos = self._parse_ann_info(info)
+            input_dict['ann_info'] = annos
+
+        return input_dict
+
+    def evaluate(self, occ_results, runner=None, show_dir=None, **eval_kwargs):
+        occ_gts, occ_preds, inst_gts, inst_preds, lidar_origins = [], [], [], [], []
+        print('\nStarting Evaluation...')
+
+        sample_tokens = [
+            info.get('token', info.get('sample_idx', ''))
+            for info in self.data_infos
+        ]
+
+        occ_class_names = _get_occ_class_names(self.occ_gt_root)
+        free_id = len(occ_class_names) - 1
+
+        for batch in DataLoader(EgoPoseDataset(self.data_infos), num_workers=8):
+            token = batch[0][0]
+            output_origin = batch[1]
+            
+            data_id = sample_tokens.index(token)
+            info = self.data_infos[data_id]
+            token_key = info.get('token', info.get('sample_idx', ''))
+            scene_name = info.get('scene_name', self.token2scene.get(token_key, ''))
+
+            occ_path = os.path.join(self.occ_gt_root, scene_name, token_key, 'labels.npz')
+            occ_gt = np.load(occ_path, allow_pickle=True)
+            gt_semantics = occ_gt['semantics']
+
+            occ_pred = occ_results[data_id]
+            sem_pred = torch.from_numpy(occ_pred['sem_pred'])  # [B, N]
+            occ_loc = torch.from_numpy(occ_pred['occ_loc'].astype(np.int64))  # [B, N, 3]
+            
+            occ_size = list(gt_semantics.shape)
+            sem_pred, _ = sparse2dense(occ_loc, sem_pred, dense_shape=occ_size, empty_value=free_id)
+            sem_pred = sem_pred.squeeze(0).numpy()
+
+            if 'pano_inst' in occ_pred.keys():
+                pano_inst = torch.from_numpy(occ_pred['pano_inst'])
+                pano_sem = torch.from_numpy(occ_pred['pano_sem'])
+
+                pano_inst, _ = sparse2dense(occ_loc, pano_inst, dense_shape=occ_size, empty_value=0)
+                pano_sem, _ = sparse2dense(occ_loc, pano_sem, dense_shape=occ_size, empty_value=free_id)
+                pano_inst = pano_inst.squeeze(0).numpy()
+                pano_sem = pano_sem.squeeze(0).numpy()
+                sem_pred = pano_sem
+
+                gt_instances = occ_gt['instances']
+                inst_gts.append(gt_instances)
+                inst_preds.append(pano_inst)
+
+            lidar_origins.append(output_origin)
+            occ_gts.append(gt_semantics)
+            occ_preds.append(sem_pred)
+        
+        if len(inst_preds) > 0:
+            results = main_raypq(occ_preds, occ_gts, inst_preds, inst_gts, lidar_origins, occ_class_names=occ_class_names)
+            results.update(main_rayiou(occ_preds, occ_gts, lidar_origins, occ_class_names=occ_class_names))
+            return results
+        else:
+            return main_rayiou(occ_preds, occ_gts, lidar_origins, occ_class_names=occ_class_names)
+
+    def format_results(self, occ_results, submission_prefix, **kwargs):
+        import mmcv
+        from tqdm import tqdm
+        if submission_prefix is not None:
+            mmcv.mkdir_or_exist(submission_prefix)
+
+        for index, occ_pred in enumerate(tqdm(occ_results)):
+            info = self.data_infos[index]
+            sample_token = info.get('token', info.get('sample_idx', ''))
+            save_path = os.path.join(submission_prefix, '{}.npz'.format(sample_token))
+            np.savez_compressed(save_path, occ_pred.astype(np.uint8))
+        
+        print('\nFinished.')

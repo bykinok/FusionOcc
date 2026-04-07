@@ -1,10 +1,14 @@
 _base_ = [
-    '../_base_/default_runtime.py',
+    '../_base_/custom_nus-3d.py',
+    '../_base_/default_runtime.py'
 ]
-work_dir = 'work_dirs/sparseocc_kitti'
+
+custom_imports = dict(
+    imports=['projects.OccFormer.occformer'],
+    allow_failed_imports=False)
+
+
 sync_bn = True
-# plugin = True  # deprecated: custom_imports 사용
-custom_imports = dict(imports=['projects.SparseOcc_cvpr.sparseocc_cvpr'], allow_failed_imports=False)
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 camera_used = ['left']
@@ -28,7 +32,7 @@ voxel_y = (point_cloud_range[4] - point_cloud_range[1]) / occ_size[1]
 voxel_z = (point_cloud_range[5] - point_cloud_range[2]) / occ_size[2]
 voxel_size = [voxel_x, voxel_y, voxel_z]
 
-data_config = {
+data_config={
     'input_size': (384, 1280),
     'resize': (-0.06, 0.11),
     'rot': (-5.4, 5.4),
@@ -47,6 +51,9 @@ grid_config = {
 # settings for 3D encoder
 numC_Trans = 128
 voxel_channels = [128, 256, 512, 1024]
+voxel_num_layer = [2, 2, 2, 2]
+voxel_strides = [1, 2, 2, 2]
+voxel_out_indices = (0, 1, 2, 3)
 voxel_out_channels = 192
 norm_cfg = dict(type='GN', num_groups=32, requires_grad=True)
 
@@ -58,7 +65,7 @@ mask2former_pos_channel = mask2former_feat_channel / 3 # divided by ndim
 mask2former_num_heads = voxel_out_channels // 32
 
 model = dict(
-    type='SparseOcc',
+    type='OccupancyFormer',
     img_backbone=dict(
         type='CustomEfficientNet',
         arch='b7',
@@ -84,31 +91,58 @@ model = dict(
         numC_Trans=numC_Trans,
         vp_megvii=False),
     img_bev_encoder_backbone=dict(
-        type='SparseLatentDiffuser',
-        output_shape=[256//2, 256//2, 32//2],
+        type='OccupancyEncoder',
+        num_stage=len(voxel_num_layer),
         in_channels=numC_Trans,
-        num_layers=[3, 2, 2, 1]),
+        block_numbers=voxel_num_layer,
+        block_inplanes=voxel_channels,
+        block_strides=voxel_strides,
+        out_indices=voxel_out_indices,
+        with_cp=True,
+        norm_cfg=norm_cfg,
+    ),
     img_bev_encoder_neck=dict(
-        type='SparseFeaturePyramid',
+        type='MSDeformAttnPixelDecoder3D',
+        strides=[2, 4, 8, 16],
         in_channels=voxel_channels,
         feat_channels=voxel_out_channels,
         out_channels=voxel_out_channels,
-        norm_cfg=norm_cfg
+        norm_cfg=norm_cfg,
+        encoder=dict(
+            type='DetrTransformerEncoder',
+            num_layers=6,
+            transformerlayers=dict(
+                type='BaseTransformerLayer',
+                attn_cfgs=dict(
+                    type='MultiScaleDeformableAttention3D',
+                    embed_dims=voxel_out_channels,
+                    num_heads=8,
+                    num_levels=3,
+                    num_points=4,
+                    im2col_step=64,
+                    dropout=0.0,
+                    batch_first=False,
+                    norm_cfg=None,
+                    init_cfg=None),
+                ffn_cfgs=dict(
+                    embed_dims=voxel_out_channels),
+                feedforward_channels=voxel_out_channels * 4,
+                ffn_dropout=0.0,
+                operation_order=('self_attn', 'norm', 'ffn', 'norm')),
+            init_cfg=None),
+        positional_encoding=dict(
+            type='SinePositionalEncoding3D',
+            num_feats=voxel_out_channels // 3,
+            normalize=True),
     ),
     pts_bbox_head=dict(
-        type='SparseMask2FormerOccHead',
+        type='Mask2FormerOccHead',
         feat_channels=mask2former_feat_channel,
         out_channels=mask2former_output_channel,
         num_queries=mask2former_num_queries,
         num_occupancy_classes=num_class,
         pooling_attn_mask=True,
         sample_weight_gamma=0.25,
-        cascade_ratio=2,
-        fine_topk=30000,
-        empty_idx=0,
-        final_occ_size=occ_size,
-        sample_from_voxel=True,
-        sample_from_img=False,
         # using stand-alone pixel decoder
         positional_encoding=dict(
             type='SinePositionalEncoding3D', num_feats=mask2former_pos_channel, normalize=True),
@@ -200,7 +234,7 @@ train_pipeline = [
             is_train=True, point_cloud_range=point_cloud_range),
     dict(type='OccDefaultFormatBundle3D', class_names=class_names),
     dict(type='Collect3D', keys=['img_inputs', 'gt_occ'], 
-         meta_keys=['pc_range', 'occ_size']),
+            meta_keys=['pc_range', 'occ_size']),
 ]
 
 test_pipeline = [
@@ -209,8 +243,8 @@ test_pipeline = [
     dict(type='LoadSemKittiAnnotation', bda_aug_conf=bda_aug_conf,
             is_train=False, point_cloud_range=point_cloud_range),
     dict(type='OccDefaultFormatBundle3D', class_names=class_names, with_label=False), 
-    dict(type='Collect3D', keys=['img_inputs', 'gt_occ'], 
-         meta_keys=['pc_range', 'occ_size', 'sequence', 'frame_id', 'raw_img']),
+    dict(type='Collect3D', keys=['img_inputs'], 
+            meta_keys=['pc_range', 'occ_size', 'sequence', 'frame_id']),
 ]
 
 input_modality = dict(
@@ -227,7 +261,7 @@ test_config=dict(
     pipeline=test_pipeline,
     classes=class_names,
     modality=input_modality,
-    split='test',
+    split='test-submit',
     camera_used=camera_used,
     occ_size=occ_size,
     pc_range=point_cloud_range,
@@ -273,7 +307,7 @@ optimizer = dict(
         },
         norm_decay_mult=0.0))
 
-optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
+optimizer_config = dict(grad_clip=dict(max_norm=20, norm_type=2))
 
 # learning policy
 lr_config = dict(

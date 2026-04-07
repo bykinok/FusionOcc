@@ -40,7 +40,7 @@ except ImportError:
     except ImportError:
         import logging
         def get_root_logger(log_level='INFO'):
-            return logging.getLogger('sparseocc')
+            return logging.getLogger('sparseocc_cvpr')
 
 from ..datasets.builder import build_dataloader
 from ..core.evaluation.eval_hooks import OccDistEvalHook

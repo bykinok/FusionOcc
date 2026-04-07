@@ -14,7 +14,7 @@ _base_ = [
 
 # 플러그인 로드 (새 mmengine custom_imports 방식)
 custom_imports = dict(
-    imports=['projects.SparseOcc_cvpr.sparseocc'],
+    imports=['projects.SparseOcc_cvpr.sparseocc_cvpr'],
     allow_failed_imports=False)
 
 work_dir = 'work_dirs/sparseocc_nusc_256'
