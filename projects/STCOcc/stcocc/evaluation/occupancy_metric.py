@@ -1415,9 +1415,27 @@ class OccupancyMetric(BaseMetric):
     
     def _compute_rayiou(self) -> Dict[str, float]:
         """Compute ray-based IoU metric."""
-        from ..datasets.nuscenes_ego_pose_loader import nuScenesDataset
-        from ..datasets.ray_metrics_occ3d import main as ray_based_miou_occ3d
-        from ..datasets.ray_metrics_openocc import main as ray_based_miou_openocc
+        try:
+            from ..datasets.nuscenes_ego_pose_loader import nuScenesDataset
+            from ..datasets.ray_metrics_occ3d import main as ray_based_miou_occ3d
+            from ..datasets.ray_metrics_openocc import main as ray_based_miou_openocc
+        except ImportError:
+            import importlib.util as _ilu
+            _eval_dir = os.path.dirname(os.path.abspath(__file__))
+
+            def _load_mod(mod_name, filename):
+                path = os.path.normpath(os.path.join(_eval_dir, '..', 'datasets', filename))
+                spec = _ilu.spec_from_file_location(mod_name, path)
+                mod = _ilu.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return mod
+
+            _pose_mod = _load_mod('nuscenes_ego_pose_loader', 'nuscenes_ego_pose_loader.py')
+            nuScenesDataset = _pose_mod.nuScenesDataset
+            _occ3d_mod = _load_mod('ray_metrics_occ3d', 'ray_metrics_occ3d.py')
+            ray_based_miou_occ3d = _occ3d_mod.main
+            _openocc_mod = _load_mod('ray_metrics_openocc', 'ray_metrics_openocc.py')
+            ray_based_miou_openocc = _openocc_mod.main
         
         pred_sems, gt_sems = [], []
         pred_flows, gt_flows = [], []
