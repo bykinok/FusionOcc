@@ -251,7 +251,7 @@ val_evaluator = dict(
     data_root='data/nuscenes',
     class_names=class_names,
     eval_metric='miou',
-    sort_by_timestamp=False)  # Dataset does NOT sort by timestamp (matching original SurroundOcc)
+    sort_by_timestamp=True)  # Dataset does NOT sort by timestamp (matching original SurroundOcc)
 
 test_evaluator = val_evaluator
 load_from = 'projects/SurroundOcc/pretrain/r101_dcn_fcos3d_pretrain.pth'

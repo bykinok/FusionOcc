@@ -312,7 +312,7 @@ val_evaluator = [
         data_root=data_root,
         class_names=class_names,
         eval_metric='rayiou',
-        sort_by_timestamp=False,
+        sort_by_timestamp=True,
     )
 ]
 test_evaluator = [
@@ -326,7 +326,7 @@ test_evaluator = [
         data_root=data_root,
         class_names=class_names,
         eval_metric='rayiou',
-        sort_by_timestamp=False,
+        sort_by_timestamp=True,
     )
 ]
 

@@ -331,7 +331,7 @@ val_evaluator = [
         data_root=data_root,
         class_names=class_names,
         eval_metric='miou',
-        sort_by_timestamp=False,  # Match dataset order
+        sort_by_timestamp=True,  # Match dataset order
     )
 ]
 test_evaluator = [
@@ -345,7 +345,7 @@ test_evaluator = [
         data_root=data_root,
         class_names=class_names,
         eval_metric='miou',
-        sort_by_timestamp=False,  # Match dataset order
+        sort_by_timestamp=True,  # Match dataset order
     )
 ]
 
