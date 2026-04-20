@@ -154,3 +154,5 @@ work_dirs
 pre_ckpt
 work_dirs_nas_1st
 view.json
+code
+vscode_cli.tar.gz
