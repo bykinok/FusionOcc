@@ -253,7 +253,7 @@ train_pipeline = [
          use_camera_mask=visible_mask),  # 학습 시 camera mask 미사용 (False)
     dict(type='OccDefaultFormatBundle3D', class_names=class_names),
     dict(type='Collect3D', keys=['img_inputs', 'gt_occ', 'points'],
-         meta_keys=['pc_range', 'occ_size', 'scene_token', 'scene_name', 'token', 'lidar_token', 'sample_idx', 'index']),
+         meta_keys=['pc_range', 'occ_size', 'scene_token', 'scene_name', 'token', 'lidar_token', 'sample_idx', 'index', 'occ_path']),
 ]
 
 # 평가 시 camera mask 사용 (visible_mask_eval=True)
@@ -294,7 +294,7 @@ test_pipeline = [
     dict(type='OccDefaultFormatBundle3D', class_names=class_names, with_label=False), 
     dict(type='Collect3D', 
          keys=['img_inputs', 'gt_occ', 'points'],
-         meta_keys=['pc_range', 'occ_size', 'scene_token', 'scene_name', 'token', 'lidar_token', 'sample_idx', 'index']),
+         meta_keys=['pc_range', 'occ_size', 'scene_token', 'scene_name', 'token', 'lidar_token', 'sample_idx', 'index', 'occ_path']),
 ]
 
 # Data loaders
