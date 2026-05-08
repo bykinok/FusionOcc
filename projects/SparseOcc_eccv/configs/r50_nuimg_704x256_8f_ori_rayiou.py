@@ -154,7 +154,7 @@ test_pipeline = [
 
 # ── DataLoader (새 mmengine 형식) ────────────────────────────────────────────
 train_dataloader = dict(
-    batch_size=1,
+    batch_size=2,
     num_workers=4,
     persistent_workers=True,
     sampler=dict(type='DistributedGroupSampler', seed=0),
@@ -252,6 +252,12 @@ default_hooks = dict(
 # ── 사전 학습 가중치 ────────────────────────────────────────────────────────────
 load_from = 'projects/SparseOcc_eccv/pretrain/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth'
 
+# checkpoint 로드 시 'backbone' → 'img_backbone' 키 리매핑 (원본 revise_keys와 동일)
+custom_hooks = [
+    dict(type='ReviseCheckpointKeysHook',
+         revise_keys=[('backbone', 'img_backbone')]),
+]
+
 # ── 런타임 설정 ────────────────────────────────────────────────────────────────
 env_cfg = dict(
     cudnn_benchmark=False,
@@ -260,3 +266,7 @@ env_cfg = dict(
 )
 log_level = 'INFO'
 work_dir = 'work_dirs/sparseocc_eccv_r50_256x704_8f_rayiou'
+
+# worker seed 고정 (원본과 동일하게 np.random.seed(0) 적용)
+# worker_seed = num_workers*rank + worker_id + seed = 1*0 + 0 + 0 = 0
+randomness = dict(seed=0, deterministic=False)

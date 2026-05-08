@@ -13,6 +13,7 @@ import functools
 from contextlib import contextmanager
 from typing import Optional, Callable
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -148,21 +149,44 @@ _register_mmdet_task_utils()
 # (구버전 mmcv.runner 데코레이터 호환 — 새 환경에서는 AMP를 torch.cuda.amp 로 처리)
 # ---------------------------------------------------------------------------
 
-def force_fp32(apply_to=None, out_fp32=False):
-    """mmcv.runner.force_fp32 호환 데코레이터."""
+def force_fp32(apply_to=None, out_fp16=False):
+    """mmcv.runner.force_fp32 호환 데코레이터.
+
+    원본 mmcv와 동일한 동작:
+    - fp16_enabled=False(기본값)이면 완전한 no-op
+    - fp16_enabled=True일 때만 fp16 텐서를 fp32로 변환 (uint8 등 다른 dtype은 변환하지 않음)
+    """
+    from inspect import getfullargspec
+
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            if apply_to:
-                new_args = list(args)
-                for i, arg_val in enumerate(new_args):
-                    pass  # args positional 처리는 복잡, 그냥 통과
-                new_kwargs = {
-                    k: v.float() if k in apply_to and isinstance(v, torch.Tensor) else v
-                    for k, v in kwargs.items()
-                }
-                return func(*new_args, **new_kwargs)
-            return func(*args, **kwargs)
+            # fp16_enabled가 True인 경우에만 변환, 아니면 no-op (원본 mmcv 동작)
+            if not (args and isinstance(args[0], torch.nn.Module)
+                    and hasattr(args[0], 'fp16_enabled')
+                    and args[0].fp16_enabled):
+                return func(*args, **kwargs)
+            # fp16 활성화 시: fp16 텐서만 fp32로 변환
+            args_info = getfullargspec(func)
+            args_to_cast = args_info.args if apply_to is None else apply_to
+            new_args = []
+            if args:
+                arg_names = args_info.args[:len(args)]
+                for i, arg_name in enumerate(arg_names):
+                    if arg_name in args_to_cast:
+                        new_args.append(
+                            cast_tensor_type(args[i], torch.half, torch.float))
+                    else:
+                        new_args.append(args[i])
+            new_kwargs = {}
+            if kwargs:
+                for arg_name, arg_value in kwargs.items():
+                    if arg_name in args_to_cast:
+                        new_kwargs[arg_name] = cast_tensor_type(
+                            arg_value, torch.half, torch.float)
+                    else:
+                        new_kwargs[arg_name] = arg_value
+            return func(*new_args, **new_kwargs)
         return wrapper
     # force_fp32(apply_to=(...)) 형식과 @force_fp32 형식 모두 지원
     if callable(apply_to):
@@ -644,30 +668,207 @@ except Exception:
 
 
 # ---------------------------------------------------------------------------
-# 구버전 mmdet3d Sampler 호환 클래스 (새 버전 mmengine DefaultSampler로 매핑)
+# 구버전 mmdet3d Sampler 호환 클래스
 # mmdet3d.registry.DATA_SAMPLERS에 등록
 # ---------------------------------------------------------------------------
 try:
+    import math
     from mmdet3d.registry import DATA_SAMPLERS as _MMDET3D_DATA_SAMPLERS
     from mmengine.dataset import DefaultSampler
 
     @_MMDET3D_DATA_SAMPLERS.register_module()
     class DistributedSampler(DefaultSampler):
-        """구버전 mmdet3d DistributedSampler 호환 클래스.
-
-        mmengine DefaultSampler를 래핑하여 기존 설정과 호환성 제공.
-        """
+        """구버전 mmdet3d DistributedSampler 호환 클래스."""
         def __init__(self, dataset, shuffle=True, seed=0, round_up=True, **kwargs):
             super().__init__(dataset=dataset, shuffle=shuffle, seed=seed, round_up=round_up)
 
     @_MMDET3D_DATA_SAMPLERS.register_module()
-    class DistributedGroupSampler(DefaultSampler):
-        """구버전 mmdet3d DistributedGroupSampler 호환 클래스.
+    class DistributedGroupSampler(torch.utils.data.Sampler):
+        """구버전 mmdet3d DistributedGroupSampler 원본 로직 재구현.
 
-        그룹별 샘플링은 무시하고 DefaultSampler(shuffle=True)로 동작.
+        원본과 동일하게:
+          1. g.manual_seed(epoch + seed) 로 Generator를 초기화
+          2. 그룹별 torch.randperm 으로 shuffle
+          3. 배치 단위로 한 번 더 torch.randperm 으로 섞음
+          4. rank에 따라 subsample
+
+        NuSceneOcc의 flag = np.zeros(N) 이므로 모든 샘플이 그룹 0에 속하며,
+        이 로직이 원본과 정확히 동일한 데이터 순서를 보장한다.
         """
-        def __init__(self, dataset, samples_per_gpu=1, shuffle=True, seed=0, **kwargs):
-            super().__init__(dataset=dataset, shuffle=shuffle, seed=seed)
+
+        def __init__(self, dataset, samples_per_gpu=1, num_replicas=None,
+                     rank=None, seed=0, **kwargs):
+            _rank, _num_replicas = get_dist_info()
+            if num_replicas is None:
+                num_replicas = _num_replicas
+            if rank is None:
+                rank = _rank
+
+            self.dataset = dataset
+            self.samples_per_gpu = samples_per_gpu
+            self.num_replicas = num_replicas
+            self.rank = rank
+            self.epoch = 0
+            self.seed = seed if seed is not None else 0
+
+            assert hasattr(self.dataset, 'flag'), \
+                "Dataset must have a 'flag' attribute for DistributedGroupSampler"
+            self.flag = self.dataset.flag
+            self.group_sizes = np.bincount(self.flag)
+
+            self.num_samples = 0
+            for i, j in enumerate(self.group_sizes):
+                self.num_samples += int(
+                    math.ceil(self.group_sizes[i] * 1.0 / self.samples_per_gpu /
+                              self.num_replicas)) * self.samples_per_gpu
+            self.total_size = self.num_samples * self.num_replicas
+
+        def __iter__(self):
+            g = torch.Generator()
+            g.manual_seed(self.epoch + self.seed)
+
+            indices = []
+            for i, size in enumerate(self.group_sizes):
+                if size > 0:
+                    indice = np.where(self.flag == i)[0]
+                    assert len(indice) == size
+                    indice = indice[list(
+                        torch.randperm(int(size), generator=g).numpy())].tolist()
+                    extra = int(
+                        math.ceil(
+                            size * 1.0 / self.samples_per_gpu / self.num_replicas)
+                    ) * self.samples_per_gpu * self.num_replicas - len(indice)
+                    tmp = indice.copy()
+                    for _ in range(extra // size):
+                        indice.extend(tmp)
+                    indice.extend(tmp[:extra % size])
+                    indices.extend(indice)
+
+            assert len(indices) == self.total_size
+
+            # 배치 단위로 한 번 더 shuffle
+            indices = [
+                indices[j] for i in list(
+                    torch.randperm(
+                        len(indices) // self.samples_per_gpu, generator=g))
+                for j in range(i * self.samples_per_gpu, (i + 1) *
+                               self.samples_per_gpu)
+            ]
+
+            # rank에 따라 subsample
+            offset = self.num_samples * self.rank
+            indices = indices[offset:offset + self.num_samples]
+            assert len(indices) == self.num_samples
+
+            return iter(indices)
+
+        def __len__(self):
+            return self.num_samples
+
+        def set_epoch(self, epoch):
+            self.epoch = epoch
+
+    @_MMDET3D_DATA_SAMPLERS.register_module()
+    class GroupSampler(torch.utils.data.Sampler):
+        """원본 mmdet2.x GroupSampler 재구현 (단일 GPU / 비분산).
+
+        원본 동작 재현:
+          - np.random.shuffle + np.random.choice 로 데이터 섞기
+          - np.random.permutation 으로 배치 순서 섞기
+          - seed 파라미터를 __iter__ 시작 시 np.random.seed(seed) 로 설정해
+            항상 동일한 데이터 순서를 보장
+
+        원본 build_dataloader 에서 dist=False (world_size==1) 일 때 사용하므로
+        SparseOcc_eccv config 에서도 단일 GPU 실행 시 이 클래스를 사용한다.
+        """
+
+        def __init__(self, dataset, samples_per_gpu=1, seed=0, **kwargs):
+            assert hasattr(dataset, 'flag'), \
+                "Dataset must have a 'flag' attribute for GroupSampler"
+            self.dataset = dataset
+            self.samples_per_gpu = samples_per_gpu
+            self.seed = seed
+            self.flag = dataset.flag.astype(np.int64)
+            self.group_sizes = np.bincount(self.flag)
+            self.num_samples = 0
+            for i, size in enumerate(self.group_sizes):
+                self.num_samples += int(
+                    np.ceil(size / self.samples_per_gpu)) * self.samples_per_gpu
+
+        def __iter__(self):
+            np.random.seed(self.seed)
+            indices = []
+            for i, size in enumerate(self.group_sizes):
+                if size == 0:
+                    continue
+                indice = np.where(self.flag == i)[0]
+                assert len(indice) == size
+                np.random.shuffle(indice)
+                num_extra = int(
+                    np.ceil(size / self.samples_per_gpu)
+                ) * self.samples_per_gpu - len(indice)
+                indice = np.concatenate(
+                    [indice, np.random.choice(indice, num_extra)])
+                indices.append(indice)
+            indices = np.concatenate(indices)
+            indices = [
+                indices[i * self.samples_per_gpu:(i + 1) * self.samples_per_gpu]
+                for i in np.random.permutation(
+                    range(len(indices) // self.samples_per_gpu))
+            ]
+            indices = np.concatenate(indices).astype(np.int64).tolist()
+            assert len(indices) == self.num_samples
+            return iter(indices)
+
+        def __len__(self):
+            return self.num_samples
+
+        def set_epoch(self, epoch):
+            pass
+
+except Exception:
+    pass
+
+
+# ---------------------------------------------------------------------------
+# ReviseCheckpointKeysHook
+# mmengine Runner의 load_from이 revise_keys를 config로 전달할 수 없으므로,
+# after_load_checkpoint 훅에서 state_dict 키를 직접 리매핑한다.
+# 원본 train.py의 revise_keys=[('backbone', 'img_backbone')] 동작을 재현.
+# ---------------------------------------------------------------------------
+try:
+    import re as _re
+    from mmengine.hooks import Hook as _Hook
+    from mmengine.registry import HOOKS as _HOOKS
+
+    @_HOOKS.register_module()
+    class ReviseCheckpointKeysHook(_Hook):
+        """checkpoint 로드 직후 state_dict 키를 정규식으로 리매핑하는 훅.
+
+        Args:
+            revise_keys (list[tuple[str, str]]): (pattern, replacement) 쌍의 리스트.
+                각 패턴은 re.sub(pattern, replacement, key)로 적용된다.
+                예: [('backbone', 'img_backbone')]
+        """
+
+        def __init__(self, revise_keys):
+            self.revise_keys = list(revise_keys)
+
+        def after_load_checkpoint(self, runner, checkpoint):
+            """state_dict 키를 리매핑한 뒤 checkpoint dict에 덮어쓴다."""
+            if 'state_dict' in checkpoint:
+                sd_key = 'state_dict'
+            else:
+                return  # state_dict가 없으면 처리 불가
+
+            old_sd = checkpoint[sd_key]
+            new_sd = {}
+            for k, v in old_sd.items():
+                new_k = k
+                for pattern, replacement in self.revise_keys:
+                    new_k = _re.sub(pattern, replacement, new_k)
+                new_sd[new_k] = v
+            checkpoint[sd_key] = new_sd
 
 except Exception:
     pass
