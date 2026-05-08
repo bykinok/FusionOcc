@@ -463,9 +463,15 @@ class LegacyNuScenesDataset:
     def load_annotations(self, ann_file):
         import pickle
         import os
-        # ann_file이 절대경로가 아닌 경우 data_root 기준으로 처리
+        # ann_file이 절대경로가 아니고, data_root를 포함하지 않은 경우에만 data_root를 붙임
+        # (설정에서 ann_file이 이미 'data/nuscenes/xxx.pkl' 형태인 경우 이중 경로 방지)
         if not os.path.isabs(ann_file) and not os.path.exists(ann_file):
-            ann_file = os.path.join(self.data_root, ann_file)
+            candidate = os.path.join(self.data_root, ann_file)
+            # 이미 data_root로 시작하는 경우엔 그대로 사용
+            data_root_norm = self.data_root.rstrip('/')
+            ann_norm = ann_file.replace('\\', '/')
+            if not ann_norm.startswith(data_root_norm):
+                ann_file = candidate
 
         with open(ann_file, 'rb') as f:
             data = pickle.load(f)
@@ -474,7 +480,9 @@ class LegacyNuScenesDataset:
         # 또는 새버전 pkl: {'data_list': [...], 'metainfo': {...}}
         if isinstance(data, dict):
             if 'infos' in data:
-                return data['infos']
+                # 구버전 mmdet3d NuScenesDataset.load_annotations()와 동일하게
+                # timestamp 순으로 정렬 (원본 동작 재현)
+                return list(sorted(data['infos'], key=lambda e: e['timestamp']))
             elif 'data_list' in data:
                 return data['data_list']
             else:
@@ -541,3 +549,125 @@ class LegacyNuScenesDataset:
 
     def format_results(self, results, **kwargs):
         raise NotImplementedError
+
+
+# ---------------------------------------------------------------------------
+# 구버전 mmdet3d Transform 호환 클래스들 (새 버전에서 제거됨)
+# mmdet3d.registry.TRANSFORMS에 등록
+# ---------------------------------------------------------------------------
+try:
+    from mmdet3d.registry import TRANSFORMS as _MMDET3D_TRANSFORMS_REG
+
+    @_MMDET3D_TRANSFORMS_REG.register_module()
+    class DefaultFormatBundle3D:
+        """구버전 mmdet3d DefaultFormatBundle3D 호환 클래스.
+
+        신버전 mmdet3d에서 Pack3DDetInputs으로 대체되었으나,
+        기존 dict 기반 결과 포맷 및 class_names 파라미터를 유지한다.
+        다중 뷰 이미지를 [N, C, H, W] 텐서로 변환하고 DC(stack=True)로 래핑한다.
+        """
+
+        def __init__(self, class_names=None, with_label=True, **kwargs):
+            self.class_names = class_names
+            self.with_label = with_label
+
+        def __call__(self, results):
+            import numpy as np
+
+            if 'img' in results:
+                imgs = results['img']
+                if isinstance(imgs, list):
+                    # 각 이미지 [H, W, C] → [C, H, W] 로 transpose 후 스택
+                    imgs_transposed = []
+                    for img in imgs:
+                        if isinstance(img, np.ndarray):
+                            imgs_transposed.append(np.ascontiguousarray(img.transpose(2, 0, 1)))
+                        elif hasattr(img, 'permute'):
+                            imgs_transposed.append(img)
+                        else:
+                            imgs_transposed.append(img)
+                    try:
+                        imgs_arr = np.stack(imgs_transposed, axis=0)  # [N, C, H, W]
+                        results['img'] = DC(to_tensor(imgs_arr), stack=True)
+                    except Exception:
+                        results['img'] = DC(imgs_transposed, stack=False)
+                elif isinstance(imgs, np.ndarray) and imgs.ndim == 4:
+                    results['img'] = DC(to_tensor(imgs), stack=True)
+
+            return results
+
+        def __repr__(self):
+            return (f'{self.__class__.__name__}('
+                    f'class_names={self.class_names}, '
+                    f'with_label={self.with_label})')
+
+    @_MMDET3D_TRANSFORMS_REG.register_module()
+    class Collect3D:
+        """구버전 mmdet3d Collect3D 호환 클래스.
+
+        지정된 keys만 결과 dict에 남기고, meta_keys는 img_metas에 묶는다.
+        """
+
+        def __init__(self,
+                     keys,
+                     meta_keys=('filename', 'ori_shape', 'img_shape',
+                                'lidar2img', 'depth2img', 'cam2img',
+                                'pad_shape', 'scale_factor', 'flip',
+                                'pcd_horizontal_flip', 'pcd_vertical_flip',
+                                'box_mode_3d', 'box_type_3d', 'img_norm_cfg',
+                                'pcd_trans', 'sample_idx', 'pcd_scale_factor',
+                                'pcd_rotation', 'pcd_rotation_angle',
+                                'pts_filename', 'transformation_3d_flow',
+                                'trans_mat', 'affine_aug', 'occ_size',
+                                'pc_range', 'scene_token', 'lidar_token',
+                                'img_timestamp', 'ego2lidar')):
+            self.keys = keys
+            self.meta_keys = meta_keys
+
+        def __call__(self, results):
+            data = {}
+            img_metas = {}
+            for key in self.meta_keys:
+                if key in results:
+                    img_metas[key] = results[key]
+            data['img_metas'] = DC(img_metas, cpu_only=True)
+            for key in self.keys:
+                data[key] = results[key]
+            return data
+
+        def __repr__(self):
+            return (f'{self.__class__.__name__}('
+                    f'keys={self.keys}, meta_keys={self.meta_keys})')
+
+except Exception:
+    pass
+
+
+# ---------------------------------------------------------------------------
+# 구버전 mmdet3d Sampler 호환 클래스 (새 버전 mmengine DefaultSampler로 매핑)
+# mmdet3d.registry.DATA_SAMPLERS에 등록
+# ---------------------------------------------------------------------------
+try:
+    from mmdet3d.registry import DATA_SAMPLERS as _MMDET3D_DATA_SAMPLERS
+    from mmengine.dataset import DefaultSampler
+
+    @_MMDET3D_DATA_SAMPLERS.register_module()
+    class DistributedSampler(DefaultSampler):
+        """구버전 mmdet3d DistributedSampler 호환 클래스.
+
+        mmengine DefaultSampler를 래핑하여 기존 설정과 호환성 제공.
+        """
+        def __init__(self, dataset, shuffle=True, seed=0, round_up=True, **kwargs):
+            super().__init__(dataset=dataset, shuffle=shuffle, seed=seed, round_up=round_up)
+
+    @_MMDET3D_DATA_SAMPLERS.register_module()
+    class DistributedGroupSampler(DefaultSampler):
+        """구버전 mmdet3d DistributedGroupSampler 호환 클래스.
+
+        그룹별 샘플링은 무시하고 DefaultSampler(shuffle=True)로 동작.
+        """
+        def __init__(self, dataset, samples_per_gpu=1, shuffle=True, seed=0, **kwargs):
+            super().__init__(dataset=dataset, shuffle=shuffle, seed=seed)
+
+except Exception:
+    pass

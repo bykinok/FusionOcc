@@ -53,7 +53,10 @@ class NuSceneOcc(LegacyNuScenesDataset):
         for i in range(len(self.data_infos)):
             token = self.data_infos[i].get('token', self.data_infos[i].get('sample_idx', ''))
             if token in self.token2scene:
-                self.data_infos[i]['scene_name'] = self.token2scene[token]
+                scene_name = self.token2scene[token]
+                self.data_infos[i]['scene_name'] = scene_name
+                # OccupancyMetric이 occ_path를 찾을 수 있도록 추가 (labels.npz는 자동으로 붙음)
+                self.data_infos[i]['occ_path'] = os.path.join(self.occ_gt_root, scene_name, token)
 
     def collect_sweeps(self, index, into_past=150, into_future=0):
         all_sweeps_prev = []
@@ -94,6 +97,7 @@ class NuSceneOcc(LegacyNuScenesDataset):
 
         input_dict = dict(
             sample_idx=token,
+            index=index,
             sweeps={'prev': sweeps_prev, 'next': sweeps_next},
             timestamp=info['timestamp'] / 1e6,
             ego2global_translation=ego2global_translation,
@@ -214,3 +218,4 @@ class NuSceneOcc(LegacyNuScenesDataset):
             np.savez_compressed(save_path, occ_pred.astype(np.uint8))
         
         print('\nFinished.')
+

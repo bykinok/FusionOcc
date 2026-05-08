@@ -1,4 +1,4 @@
-from .loading import LoadMultiViewImageFromMultiSweeps, LoadOccGTFromFile
+from .loading import LoadMultiViewImageFromFiles, LoadMultiViewImageFromMultiSweeps, LoadOccGTFromFile
 from .transforms import (
     PadMultiViewImage,
     NormalizeMultiviewImage,
@@ -8,6 +8,7 @@ from .transforms import (
 )
 
 __all__ = [
+    'LoadMultiViewImageFromFiles',
     'LoadMultiViewImageFromMultiSweeps',
     'LoadOccGTFromFile',
     'PadMultiViewImage',

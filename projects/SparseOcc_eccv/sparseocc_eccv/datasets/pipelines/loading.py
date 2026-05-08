@@ -6,6 +6,47 @@ import numpy as np
 from ...compat import PIPELINES, get_dist_info, DC, to_tensor
 from numpy.linalg import inv
 
+# ---------------------------------------------------------------------------
+# LoadMultiViewImageFromFiles: 구버전 img_filename 기반 다중 뷰 이미지 로더
+# 새 mmdet3d는 'images' dict 키를 사용하지만, 본 데이터셋은 'img_filename' 리스트를 사용
+# 주의: 이 클래스는 데코레이터 등록 없이 정의만 하고,
+#       sparseocc_eccv/__init__.py에서 mmdet3d 전체 import 후 force=True로 등록한다.
+# ---------------------------------------------------------------------------
+class LoadMultiViewImageFromFiles:
+    """구버전 스타일 다중 뷰 이미지 로더.
+
+    results['img_filename'] (list of str)에서 이미지를 읽어
+    results['img'], results['filename'], results['img_shape'] 등을 채운다.
+    """
+
+    def __init__(self, to_float32=False, color_type='color', **kwargs):
+        self.to_float32 = to_float32
+        self.color_type = color_type
+
+    def __call__(self, results):
+        filenames = results.get('img_filename', [])
+        imgs = []
+        for fname in filenames:
+            img = mmcv.imread(fname, channel_order='rgb'
+                              if self.color_type == 'color' else 'grayscale')
+            if self.to_float32:
+                img = img.astype(np.float32)
+            imgs.append(img)
+
+        results['filename'] = filenames
+        results['img'] = imgs
+        results['img_shape'] = [img.shape for img in imgs]
+        results['ori_shape'] = [img.shape for img in imgs]
+        results['pad_shape'] = [img.shape for img in imgs]
+        results['scale_factor'] = 1.0
+        results['img_norm_cfg'] = dict(mean=np.zeros(3), std=np.ones(3), to_rgb=False)
+        return results
+
+    def __repr__(self):
+        return (f'{self.__class__.__name__}('
+                f'to_float32={self.to_float32}, '
+                f'color_type={self.color_type!r})')
+
 
 def compose_lidar2img(ego2global_translation_curr,
                       ego2global_rotation_curr,

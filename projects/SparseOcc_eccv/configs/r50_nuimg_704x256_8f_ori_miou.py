@@ -11,13 +11,15 @@
 
 # 플러그인 로드 (새 mmengine custom_imports 방식)
 custom_imports = dict(
-    imports=['projects.SparseOcc_ori.sparseocc_eccv'],
+    imports=['projects.SparseOcc_eccv.sparseocc_eccv'],
     allow_failed_imports=False)
+
+default_scope = 'mmdet3d'
 
 # ── 기본 파라미터 (원본과 동일) ────────────────────────────────────────────────
 dataset_type = 'NuSceneOcc'
 dataset_root = 'data/nuscenes/'
-occ_gt_root = 'data/nuscenes/occ3d'
+occ_gt_root = 'data/nuscenes/gts'
 
 point_cloud_range = [-40, -40, -1.0, 40, 40, 5.4]
 occ_size = [200, 200, 16]
@@ -146,7 +148,7 @@ test_pipeline = [
     dict(type='Collect3D',
          keys=['img', 'voxel_semantics', 'voxel_instances', 'instance_class_ids'],
          meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape',
-                    'lidar2img', 'img_timestamp', 'ego2lidar'))
+                    'lidar2img', 'img_timestamp', 'ego2lidar', 'index'))
 ]
 
 # ── DataLoader (새 mmengine 형식) ────────────────────────────────────────────
@@ -187,7 +189,18 @@ val_dataloader = dict(
 
 test_dataloader = val_dataloader
 
-val_evaluator = dict(type='NuScenesOccMetric')
+val_evaluator = dict(
+    type='OccupancyMetricHybrid',
+    occ_gt_root=occ_gt_root,
+    ann_file=dataset_root + 'nuscenes_infos_val_sweep.pkl',
+    data_root=dataset_root,
+    num_classes=18,
+    use_lidar_mask=False,
+    use_image_mask=True,
+    dataset_name='occ3d',
+    eval_metric='miou',
+    sort_by_timestamp=True,
+)
 test_evaluator = val_evaluator
 
 # ── Optimizer & Scheduler (새 mmengine 형식) ─────────────────────────────────
@@ -196,14 +209,14 @@ optim_wrapper = dict(
     optimizer=dict(
         type='AdamW',
         lr=2e-4,
-        paramwise_cfg=dict(
-            custom_keys={
-                'img_backbone': dict(lr_mult=0.1),
-                'sampling_offset': dict(lr_mult=0.1),
-            }),
         weight_decay=0.01,
     ),
     clip_grad=dict(max_norm=35, norm_type=2),
+    paramwise_cfg=dict(
+        custom_keys={
+            'img_backbone': dict(lr_mult=0.1),
+            'sampling_offset': dict(lr_mult=0.1),
+        }),
 )
 
 # 학습 설정
@@ -236,7 +249,7 @@ default_hooks = dict(
 )
 
 # ── 사전 학습 가중치 ────────────────────────────────────────────────────────────
-load_from = 'pretrain/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth'
+load_from = 'projects/SparseOcc_eccv/pretrain/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth'
 
 # ── 런타임 설정 ────────────────────────────────────────────────────────────────
 env_cfg = dict(
@@ -245,4 +258,4 @@ env_cfg = dict(
     dist_cfg=dict(backend='nccl'),
 )
 log_level = 'INFO'
-work_dir = 'work_dirs/sparseocc_eccv_r50_256x704_8f'
+work_dir = 'work_dirs/sparseocc_eccv_r50_256x704_8f_miou'

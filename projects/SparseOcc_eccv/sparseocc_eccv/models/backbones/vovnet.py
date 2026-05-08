@@ -4,8 +4,8 @@ import torch.nn.functional as F
 import warnings
 import torch.utils.checkpoint as cp
 from collections import OrderedDict
-from mmcv.runner import BaseModule
-from mmdet.models.builder import BACKBONES
+from mmengine.model import BaseModule
+from mmdet.registry import MODELS as BACKBONES
 from torch.nn.modules.batchnorm import _BatchNorm
 
 

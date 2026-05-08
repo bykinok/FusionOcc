@@ -143,13 +143,133 @@ class SparseOcc(MVXTwoStageDetector):
         return self.pts_bbox_head.loss(*loss_inputs)
 
     # -----------------------------------------------------------------------
-    # 구버전 forward 인터페이스 (원본 유지)
+    # DC 객체 언래핑 헬퍼
     # -----------------------------------------------------------------------
-    def forward(self, return_loss=True, **kwargs):
-        if return_loss:
-            return self.forward_train(**kwargs)
-        else:
-            return self.forward_test(**kwargs)
+    @staticmethod
+    def _unwrap_dc(val):
+        """DataContainer(DC) 래핑 해제. 재귀적으로 처리.
+        torch.Tensor의 .data 속성과 혼동하지 않도록 DC 클래스만 처리한다.
+        """
+        # DC 클래스 여부 확인 (torch.Tensor, np.ndarray 제외)
+        if (not isinstance(val, (torch.Tensor, np.ndarray))
+                and hasattr(val, 'data')
+                and type(val).__name__ == 'DC'):
+            return SparseOcc._unwrap_dc(val.data)
+        if isinstance(val, list):
+            return [SparseOcc._unwrap_dc(v) for v in val]
+        return val
+
+    # -----------------------------------------------------------------------
+    # forward 인터페이스 (구버전 return_loss + 새 mmengine mode 모두 지원)
+    # -----------------------------------------------------------------------
+    def forward(self, inputs=None, data_samples=None, mode='tensor',
+                return_loss=None, **kwargs):
+        # mmengine 새 API: mode 기반 dispatch
+        if mode == 'loss':
+            # 새 API: inputs가 dict로 왔을 때
+            if inputs is not None:
+                return self.loss(inputs, data_samples)
+            # 구버전 데이터: img, img_metas 등이 DC 래핑으로 kwargs에 올 때
+            img = self._unwrap_dc(kwargs.get('img'))
+            img_metas = self._unwrap_dc(kwargs.get('img_metas', []))
+            if isinstance(img_metas, dict):
+                img_metas = [img_metas]
+            # img 처리: DC unwrap 후 스택 or 그대로
+            if isinstance(img, list):
+                try:
+                    img = torch.stack([
+                        x if isinstance(x, torch.Tensor) else torch.from_numpy(x)
+                        for x in img
+                    ])
+                except Exception:
+                    pass
+            if isinstance(img, torch.Tensor):
+                device = next(self.parameters()).device
+                img = img.to(device)
+            # gt 데이터 언래핑 + 리스트 텐서 스택
+            device = next(self.parameters()).device
+
+            def _unwrap_and_stack(val):
+                """DC 언래핑 후 list-of-tensor를 단일 배치 텐서로 스택."""
+                val = self._unwrap_dc(val)
+                if isinstance(val, list) and len(val) > 0:
+                    try:
+                        tensors = []
+                        for x in val:
+                            if isinstance(x, torch.Tensor):
+                                tensors.append(x)
+                            elif isinstance(x, np.ndarray):
+                                tensors.append(torch.from_numpy(np.ascontiguousarray(x)))
+                            else:
+                                tensors.append(torch.tensor(x))
+                        val = torch.stack(tensors, dim=0).to(device)
+                    except Exception:
+                        pass
+                elif isinstance(val, torch.Tensor):
+                    val = val.to(device)
+                return val
+
+            voxel_semantics = _unwrap_and_stack(kwargs.get('voxel_semantics'))
+            voxel_instances = _unwrap_and_stack(kwargs.get('voxel_instances'))
+            mask_camera = _unwrap_and_stack(kwargs.get('mask_camera'))
+            # instance_class_ids는 배치 아이템마다 길이가 다를 수 있고
+            # loss_single 에서 리스트로 재할당하므로 반드시 리스트로 유지
+            raw_icids = self._unwrap_dc(kwargs.get('instance_class_ids'))
+            if isinstance(raw_icids, list):
+                instance_class_ids = [
+                    (x.to(device) if isinstance(x, torch.Tensor) else
+                     torch.from_numpy(np.ascontiguousarray(x)).to(device)
+                     if isinstance(x, np.ndarray) else x)
+                    for x in raw_icids
+                ]
+            elif isinstance(raw_icids, torch.Tensor):
+                instance_class_ids = [raw_icids[b].to(device) for b in range(raw_icids.shape[0])]
+            else:
+                instance_class_ids = raw_icids
+            return self.forward_train(
+                img_metas=img_metas,
+                img=img,
+                voxel_semantics=voxel_semantics,
+                voxel_instances=voxel_instances,
+                instance_class_ids=instance_class_ids,
+                mask_camera=mask_camera,
+            )
+        elif mode == 'predict':
+            # 새 API: inputs/data_samples 형식
+            if inputs is not None:
+                return self.predict(inputs, data_samples)
+            # 구버전 데이터: img, img_metas 등이 DC 래핑으로 kwargs에 올 때
+            img = self._unwrap_dc(kwargs.get('img'))
+            img_metas = self._unwrap_dc(kwargs.get('img_metas', []))
+            # img 처리: list → tensor [B, N, C, H, W]
+            if isinstance(img, list):
+                img = torch.stack([
+                    x if isinstance(x, torch.Tensor) else torch.from_numpy(x)
+                    for x in img
+                ])
+            # 모델 디바이스로 이동 (CPU → GPU)
+            if isinstance(img, torch.Tensor):
+                device = next(self.parameters()).device
+                img = img.to(device)
+            # img_metas 처리: list of dicts 보장
+            if isinstance(img_metas, dict):
+                img_metas = [img_metas]
+            return self.forward_test(img_metas, img)
+        elif mode == 'tensor':
+            # 구버전 호환: return_loss 기반 dispatch
+            if return_loss is not None:
+                if return_loss:
+                    return self.forward_train(**kwargs)
+                else:
+                    return self.forward_test(**kwargs)
+            return self._forward(inputs, data_samples, **kwargs)
+        # fallback: 구버전 API
+        if return_loss is not None:
+            if return_loss:
+                return self.forward_train(**kwargs)
+            else:
+                return self.forward_test(**kwargs)
+        return self.predict(inputs, data_samples)
 
     @force_fp32(apply_to=('img',))
     def forward_train(self, img_metas=None, img=None, voxel_semantics=None, voxel_instances=None, instance_class_ids=None, mask_camera=None, **kwargs):
@@ -157,6 +277,9 @@ class SparseOcc(MVXTwoStageDetector):
         return self.forward_pts_train(img_feats, voxel_semantics, voxel_instances, instance_class_ids, mask_camera, img_metas)
 
     def forward_test(self, img_metas, img=None, **kwargs):
+        from ..datasets.nuscenes_occ_dataset import _get_occ_class_names
+        from .utils import sparse2dense
+
         output = self.simple_test(img_metas, img)
 
         sem_pred = output['sem_pred'].cpu().numpy().astype(np.uint8)
@@ -164,21 +287,33 @@ class SparseOcc(MVXTwoStageDetector):
 
         batch_size = sem_pred.shape[0]
 
-        if 'pano_inst' and 'pano_sem' in output:
-            pano_inst = output['pano_inst'].cpu().numpy().astype(np.int16)
-            pano_sem = output['pano_sem'].cpu().numpy().astype(np.uint8)
-            
-            return [{
+        occ_size = list(self.pts_bbox_head.occ_size)
+        occ_class_names = self.pts_bbox_head.class_names
+        free_id = len(occ_class_names) - 1
+
+        results = []
+        for b in range(batch_size):
+            sem_b = torch.from_numpy(sem_pred[b:b+1])
+            loc_b = torch.from_numpy(occ_loc[b:b+1].astype(np.int64))
+            dense_sem, _ = sparse2dense(loc_b, sem_b, dense_shape=occ_size, empty_value=free_id)
+            dense_sem_np = dense_sem.squeeze(0).numpy().astype(np.uint8)
+
+            index = img_metas[b].get('index', b) if b < len(img_metas) else b
+
+            result = {
+                'occ_results': dense_sem_np,
+                'index': index,
                 'sem_pred': sem_pred[b:b+1],
-                'pano_inst': pano_inst[b:b+1],
-                'pano_sem': pano_sem[b:b+1],
-                'occ_loc': occ_loc[b:b+1]
-            } for b in range(batch_size)]
-        else:
-            return [{
-                'sem_pred': sem_pred[b:b+1],
-                'occ_loc': occ_loc[b:b+1]
-            } for b in range(batch_size)]
+                'occ_loc': occ_loc[b:b+1],
+            }
+
+            if 'pano_inst' in output and 'pano_sem' in output:
+                result['pano_inst'] = output['pano_inst'].cpu().numpy().astype(np.int16)[b:b+1]
+                result['pano_sem'] = output['pano_sem'].cpu().numpy().astype(np.uint8)[b:b+1]
+
+            results.append(result)
+
+        return results
 
     def simple_test_pts(self, x, img_metas, rescale=False):
         outs = self.pts_bbox_head(x, img_metas)
@@ -302,8 +437,18 @@ class SparseOcc(MVXTwoStageDetector):
 
         results = self.forward_test(img_metas, img)
 
-        # Det3DDataSample에 결과 저장
+        # Det3DDataSample에 결과 저장 (OccupancyMetricHybrid.process()가 직접 읽음)
         for i, (result, data_sample) in enumerate(zip(results, batch_data_samples)):
-            data_sample.pred_occ = result
+            # BaseDataElement.set_field로 data field에 등록
+            data_sample.set_field(
+                value=[result['occ_results']],
+                name='occ_results',
+                field_type='data',
+            )
+            data_sample.set_field(
+                value=result['index'],
+                name='index',
+                field_type='data',
+            )
 
         return batch_data_samples

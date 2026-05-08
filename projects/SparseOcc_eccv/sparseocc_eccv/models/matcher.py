@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch.cuda.amp import autocast
 from scipy.optimize import linear_sum_assignment
 # 구버전 mmcv.runner.BaseModule → compat 경유
-from ..compat import BaseModule, build_match_cost
+from ..compat import BaseModule
 
 
 def batch_dice_loss(inputs: torch.Tensor, targets: torch.Tensor, mask_camera: torch.Tensor):
@@ -56,14 +56,25 @@ def batch_sigmoid_ce_loss(inputs: torch.Tensor, targets: torch.Tensor, mask_came
 batch_sigmoid_ce_loss_jit = torch.jit.script(batch_sigmoid_ce_loss)
 
 
+def _focal_loss_cost(cls_pred, gt_labels, alpha=0.25, gamma=2.0, weight=2.0):
+    """mmdet FocalLossCost의 구버전 텐서 기반 구현.
+
+    새 mmdet3.x는 InstanceData를 요구하므로, 직접 focal cost를 계산한다.
+    cls_pred: [N, C] logits, gt_labels: [M] int labels → returns [N, M]
+    """
+    cls_pred = cls_pred.sigmoid()
+    neg_cost = -(1 - cls_pred + 1e-8).log() * (1 - alpha) * cls_pred.pow(gamma)
+    pos_cost = -(cls_pred + 1e-8).log() * alpha * (1 - cls_pred).pow(gamma)
+    cost = pos_cost[:, gt_labels] - neg_cost[:, gt_labels]
+    return cost * weight
+
+
 class HungarianMatcher(BaseModule):
     def __init__(self, cost_class: float = 1, cost_mask: float = 1, cost_dice: float = 1):
         super().__init__()
         self.cost_class = cost_class
         self.cost_mask = cost_mask
         self.cost_dice = cost_dice
-
-        self.loss_focal = build_match_cost(dict(type='FocalLossCost', weight=2.0))
 
         assert cost_class != 0 or cost_mask != 0 or cost_dice != 0, "all costs cant be 0"
 
@@ -78,7 +89,7 @@ class HungarianMatcher(BaseModule):
             num_instances = tgt_ids.shape[0]
 
             out_prob = class_pred[b]
-            cost_class = self.loss_focal(out_prob, tgt_ids.long())
+            cost_class = _focal_loss_cost(out_prob, tgt_ids.long())
 
             out_mask = mask_pred[b]
             tgt_mask = mask_gt[b]
