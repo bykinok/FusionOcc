@@ -109,6 +109,11 @@ class NuSceneOcc(LegacyNuScenesDataset):
         ego2lidar = transform_matrix(lidar2ego_translation, Quaternion(lidar2ego_rotation), inverse=True)
         input_dict['ego2lidar'] = [ego2lidar for _ in range(6)]
 
+        # LiDAR 포인트 경로 (depth supervision용 LoadPointsFromFile에 필요)
+        lidar_path = info.get('lidar_path') or info.get('lidar_points', {}).get('lidar_path', '')
+        if lidar_path:
+            input_dict['pts_filename'] = lidar_path
+
         scene_name = info.get('scene_name', self.token2scene.get(token, ''))
         input_dict['occ_path'] = os.path.join(self.occ_gt_root, scene_name, token, 'labels.npz')
 

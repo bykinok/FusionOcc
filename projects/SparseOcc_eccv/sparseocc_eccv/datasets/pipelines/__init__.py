@@ -5,6 +5,8 @@ from .transforms import (
     PhotoMetricDistortionMultiViewImage,
     RandomTransformImage,
     GlobalRotScaleTransImage,
+    BEVAug,
+    PointToMultiViewDepth,
 )
 
 __all__ = [
@@ -16,4 +18,6 @@ __all__ = [
     'PhotoMetricDistortionMultiViewImage',
     'RandomTransformImage',
     'GlobalRotScaleTransImage',
+    'BEVAug',
+    'PointToMultiViewDepth',
 ]

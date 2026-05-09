@@ -1,12 +1,19 @@
-"""SparseOcc_ori r50 NuScenes 704x256 8frames 설정 (mmengine 형식).
+"""SparseOcc_unified r50 NuScenes 704x256 8frames — w/ train camera mask (mmengine 형식).
 
-원본: Ref/SparseOcc_ori/configs/r50_nuimg_704x256_8f.py
-변경 사항:
-  - plugin/plugin_dir → custom_imports
-  - data dict → train_dataloader/val_dataloader/test_dataloader
-  - optimizer/optimizer_config/lr_config → optim_wrapper/param_scheduler
-  - runner → train_cfg/val_cfg/test_cfg
-  - 모델 정의, 파이프라인, 하이퍼파라미터는 원본과 동일하게 유지
+원본: projects/SparseOcc_eccv/configs/r50_nuimg_704x256_8f_wo_cam_mask_unified_miou.py
+변경 사항 (wo_cam_mask → w_cam_mask):
+  1. [model] use_mask_camera=True
+     → forward_pts_train에서 mask_camera를 loss에 전달하여 카메라에 보이는
+       voxel에 대해서만 loss를 계산
+  2. [pipeline/LoadOccGTFromFile] load_mask_camera=True
+     → labels.npz에서 mask_camera (bool [200,200,16]) 로드
+  3. [train_pipeline/BEVAug] mask_camera도 voxel_semantics와 동일하게 flip
+  4. [train_pipeline/Collect3D] mask_camera를 keys에 추가
+  5. [work_dir] sparseocc_eccv_r50_256x704_8f_w_cam_mask_unified_miou
+
+Camera mask policy:
+  - Training  : use_mask_camera=True → loss는 카메라 가시 voxel에서만 계산
+  - Evaluation: use_image_mask=True  → mIoU도 카메라 가시 voxel에서만 계산
 """
 
 # 플러그인 로드 (새 mmengine custom_imports 방식)
@@ -16,7 +23,7 @@ custom_imports = dict(
 
 default_scope = 'mmdet3d'
 
-# ── 기본 파라미터 (원본과 동일) ────────────────────────────────────────────────
+# ── 기본 파라미터 ─────────────────────────────────────────────────────────────
 dataset_type = 'NuSceneOcc'
 dataset_root = 'data/nuscenes/'
 occ_gt_root = 'data/nuscenes/gts'
@@ -60,7 +67,22 @@ _topk_training_ = [4000, 16000, 64000]
 _topk_testing_ = [2000, 8000, 32000]
 _topk_training_ = _topk_testing_
 
-# ── 모델 (원본과 동일) ────────────────────────────────────────────────────────
+# ── BEV 증강 설정 ─────────────────────────────────────────────────────────────
+bda_aug_conf = dict(
+    flip_dx_ratio=0.5,
+    flip_dy_ratio=0.5,
+)
+
+# ── LR 스케줄 계산용 변수 ─────────────────────────────────────────────────────
+train_samples = 28130
+num_gpus = 8
+_total_epochs_ = 24
+_num_iters_per_epoch_ = train_samples // (num_gpus * 1)
+# BEVFormer 기준(num_gpus=2, warmup=500) 대비 epoch 비중이 동일하도록 비례 계산
+# 500 × (2 / num_gpus) = 500 × (2/8) = 125 iter
+_warmup_iters_ = round(500 * 2 / num_gpus)
+
+# ── 모델 ──────────────────────────────────────────────────────────────────────
 model = dict(
     type='SparseOcc',
     data_aug=dict(
@@ -68,7 +90,7 @@ model = dict(
         img_norm_cfg=img_norm_cfg,
         img_pad_cfg=dict(size_divisor=32)),
     use_grid_mask=False,
-    use_mask_camera=False,
+    use_mask_camera=True,  # [변경] 학습 시 camera mask 적용 → 가시 voxel에서만 loss 계산
     img_backbone=dict(
         type='ResNet',
         depth=50,
@@ -117,7 +139,7 @@ model = dict(
     ),
 )
 
-# ── 데이터 파이프라인 (원본과 동일) ──────────────────────────────────────────
+# ── 데이터 파이프라인 ─────────────────────────────────────────────────────────
 ida_aug_conf = {
     'resize_lim': (0.38, 0.55),
     'final_dim': (256, 704),
@@ -127,22 +149,28 @@ ida_aug_conf = {
     'rand_flip': False,
 }
 
+# 학습 시 mask_camera 로드 + BEVAug flip 보정 + Collect3D keys에 포함
 train_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=False, color_type='color'),
     dict(type='LoadMultiViewImageFromMultiSweeps', sweeps_num=_num_frames_ - 1),
-    dict(type='LoadOccGTFromFile', num_classes=len(occ_class_names)),
+    dict(type='LoadOccGTFromFile', num_classes=len(occ_class_names),
+         load_mask_camera=True),  # [변경] mask_camera 로드
+    dict(type='BEVAug', bda_aug_conf=bda_aug_conf, is_train=True),  # mask_camera도 flip
     dict(type='RandomTransformImage', ida_aug_conf=ida_aug_conf, training=True),
     dict(type='DefaultFormatBundle3D', class_names=det_class_names),
     dict(type='Collect3D',
-         keys=['img', 'voxel_semantics', 'voxel_instances', 'instance_class_ids'],
+         keys=['img', 'voxel_semantics', 'voxel_instances', 'instance_class_ids',
+               'mask_camera'],  # [변경] mask_camera 추가
          meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape',
                     'lidar2img', 'img_timestamp', 'ego2lidar'))
 ]
 
+# 평가 시에는 mask_camera 불필요 (OccupancyMetricHybrid가 직접 GT에서 로드)
 test_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=False, color_type='color'),
     dict(type='LoadMultiViewImageFromMultiSweeps', sweeps_num=_num_frames_ - 1, test_mode=True),
     dict(type='LoadOccGTFromFile', num_classes=len(occ_class_names)),
+    dict(type='BEVAug', bda_aug_conf=bda_aug_conf, is_train=False),
     dict(type='RandomTransformImage', ida_aug_conf=ida_aug_conf, training=False),
     dict(type='DefaultFormatBundle3D', class_names=det_class_names),
     dict(type='Collect3D',
@@ -151,9 +179,9 @@ test_pipeline = [
                     'lidar2img', 'img_timestamp', 'ego2lidar', 'index'))
 ]
 
-# ── DataLoader (새 mmengine 형식) ────────────────────────────────────────────
+# ── DataLoader ────────────────────────────────────────────────────────────────
 train_dataloader = dict(
-    batch_size=8,#2,
+    batch_size=1,
     num_workers=4,
     persistent_workers=True,
     sampler=dict(type='DistributedGroupSampler', seed=0),
@@ -203,7 +231,7 @@ val_evaluator = dict(
 )
 test_evaluator = val_evaluator
 
-# ── Optimizer & Scheduler (새 mmengine 형식) ─────────────────────────────────
+# ── Optimizer ─────────────────────────────────────────────────────────────────
 optim_wrapper = dict(
     type='OptimWrapper',
     optimizer=dict(
@@ -217,41 +245,42 @@ optim_wrapper = dict(
             'img_backbone': dict(lr_mult=0.1),
             'sampling_offset': dict(lr_mult=0.1),
         }),
+    accumulative_counts=2,
 )
 
 # 학습 설정
-train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=24, val_interval=24) #48, val_interval=48)
+train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=_total_epochs_, val_interval=_total_epochs_)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
-# LR Scheduler (CosineAnnealing + LinearWarmup)
+# ── LR Scheduler (iteration 기반 cosine annealing) ───────────────────────────
 param_scheduler = [
     dict(
         type='LinearLR',
-        start_factor=1.0 / 3,
+        start_factor=0.05,
+        end_factor=1.0,
         by_epoch=False,
         begin=0,
-        end=500,
+        end=_warmup_iters_,
     ),
     dict(
         type='CosineAnnealingLR',
-        begin=0,
-        by_epoch=True,
-        end=48,
-        eta_min_ratio=1e-3,
+        begin=_warmup_iters_,
+        end=_total_epochs_ * _num_iters_per_epoch_,
+        by_epoch=False,
+        eta_min=1e-6,
     ),
 ]
 
 # ── 체크포인트 & 로그 ──────────────────────────────────────────────────────────
 default_hooks = dict(
-    checkpoint=dict(type='CheckpointHook', interval=1, max_keep_ckpts=1),
+    checkpoint=dict(type='CheckpointHook', interval=1),
     logger=dict(type='LoggerHook', interval=50),
 )
 
 # ── 사전 학습 가중치 ────────────────────────────────────────────────────────────
 load_from = 'projects/SparseOcc_eccv/pretrain/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth'
 
-# checkpoint 로드 시 'backbone' → 'img_backbone' 키 리매핑 (원본 revise_keys와 동일)
 custom_hooks = [
     dict(type='ReviseCheckpointKeysHook',
          revise_keys=[('backbone', 'img_backbone')]),
@@ -264,8 +293,6 @@ env_cfg = dict(
     dist_cfg=dict(backend='nccl'),
 )
 log_level = 'INFO'
-work_dir = 'work_dirs/sparseocc_eccv_r50_256x704_8f_miou'
+work_dir = 'work_dirs/sparseocc_eccv_r50_256x704_8f_w_cam_mask_unified_miou'
 
-# worker seed 고정 (원본과 동일하게 np.random.seed(0) 적용)
-# worker_seed = num_workers*rank + worker_id + seed = 1*0 + 0 + 0 = 0
 randomness = dict(seed=0, deterministic=False)

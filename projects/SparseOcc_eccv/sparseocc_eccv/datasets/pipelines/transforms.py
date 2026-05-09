@@ -245,6 +245,89 @@ class RandomTransformImage(object):
 
 
 @PIPELINES.register_module()
+class BEVAug(object):
+    """BEV 공간 flip 증강 (X/Y 축 반전).
+
+    voxel_semantics와 voxel_instances를 flip하고, ego2lidar 행렬을
+    BDA 변환 행렬로 우측 곱하여 카메라 투영의 일관성을 유지한다.
+
+    SparseOcc 좌표계:
+      - sample_points: ego frame 기준 (pc_range = [-40,-40,-1, 40,40,5.4])
+      - 모델 내 투영: pixel = lidar2img @ ego2lidar @ p_ego
+      - BDA flip 후 보정: new_ego2lidar = ego2lidar @ bda_inv
+        (flip 행렬은 자기역원이므로 bda_inv = bda)
+
+    Args:
+        bda_aug_conf (dict): 'flip_dx_ratio', 'flip_dy_ratio' 포함.
+        is_train (bool): True이면 무작위 flip, False이면 항등 변환.
+    """
+
+    def __init__(self, bda_aug_conf, is_train=True):
+        self.bda_aug_conf = bda_aug_conf
+        self.is_train = is_train
+
+    def _sample_flip(self):
+        if self.is_train:
+            flip_dx = np.random.uniform() < self.bda_aug_conf.get('flip_dx_ratio', 0.5)
+            flip_dy = np.random.uniform() < self.bda_aug_conf.get('flip_dy_ratio', 0.5)
+        else:
+            flip_dx = False
+            flip_dy = False
+        return flip_dx, flip_dy
+
+    def _build_bda_mat(self, flip_dx, flip_dy):
+        """BDA 변환 행렬 (4×4 float64 numpy array) 생성.
+
+        flip 행렬은 자기역원이므로 bda_mat = bda_inv.
+        ego2lidar 보정: new_ego2lidar = ego2lidar @ bda_mat.
+        """
+        bda = np.eye(4, dtype=np.float64)
+        if flip_dx:
+            bda[0, 0] = -1.0  # X 축 반전
+        if flip_dy:
+            bda[1, 1] = -1.0  # Y 축 반전
+        return bda
+
+    def __call__(self, results):
+        flip_dx, flip_dy = self._sample_flip()
+
+        # ── voxel GT flip ──────────────────────────────────────────────────
+        if flip_dx:
+            if 'voxel_semantics' in results:
+                results['voxel_semantics'] = results['voxel_semantics'][::-1, :, :].copy()
+            if 'voxel_instances' in results:
+                results['voxel_instances'] = results['voxel_instances'][::-1, :, :].copy()
+            if 'mask_camera' in results:
+                results['mask_camera'] = results['mask_camera'][::-1, :, :].copy()
+
+        if flip_dy:
+            if 'voxel_semantics' in results:
+                results['voxel_semantics'] = results['voxel_semantics'][:, ::-1, :].copy()
+            if 'voxel_instances' in results:
+                results['voxel_instances'] = results['voxel_instances'][:, ::-1, :].copy()
+            if 'mask_camera' in results:
+                results['mask_camera'] = results['mask_camera'][:, ::-1, :].copy()
+
+        # ── ego2lidar 보정: new_ego2lidar = ego2lidar @ bda_mat ────────────
+        # SparseOcc transformer: final_proj = lidar2img @ ego2lidar @ p_ego
+        # BDA flip 후: p_ego_new = bda @ p_ego_old
+        # → pixel = lidar2img @ ego2lidar @ bda_inv @ p_ego_new
+        # → new_ego2lidar = ego2lidar @ bda_mat (bda_inv = bda, flip은 자기역원)
+        if flip_dx or flip_dy:
+            bda_mat = self._build_bda_mat(flip_dx, flip_dy)
+            if 'ego2lidar' in results:
+                results['ego2lidar'] = [
+                    m @ bda_mat for m in results['ego2lidar']
+                ]
+
+        # flip 상태 저장 (디버깅/후처리용)
+        results['bda_flip_dx'] = flip_dx
+        results['bda_flip_dy'] = flip_dy
+
+        return results
+
+
+@PIPELINES.register_module()
 class GlobalRotScaleTransImage(object):
     def __init__(self,
                  rot_range=[-0.3925, 0.3925],
@@ -291,3 +374,123 @@ class GlobalRotScaleTransImage(object):
 
         for view in range(len(results['lidar2img'])):
             results['lidar2img'][view] = (torch.tensor(results['lidar2img'][view]).float() @ scale_mat_inv).numpy()
+
+
+@PIPELINES.register_module()
+class PointToMultiViewDepth(object):
+    """LiDAR points를 각 카메라 이미지의 depth map으로 변환한다.
+
+    LoadPointsFromFile로 로드된 results['points']를 ego frame으로 변환한 후,
+    각 카메라의 lidar2img/ego2lidar 행렬로 투영하여
+    results['gt_depth'] = Tensor[N_cams, H_feat, W_feat]를 생성한다.
+    단, 이미지 크기는 랜덤 크롭/리사이즈 전 원본 기준이므로
+    RandomTransformImage 이전에 배치해야 한다.
+
+    Args:
+        grid_config (dict): depth 범위 설정, 예 ``dict(depth=[1.0, 45.0, 0.5])``.
+        downsample (int): 이미지 대비 depth map 해상도 배율 (기본 16).
+    """
+
+    def __init__(self, grid_config: dict, downsample: int = 16):
+        self.downsample = downsample
+        self.grid_config = grid_config
+
+    # ------------------------------------------------------------------
+    # 내부 메서드
+    # ------------------------------------------------------------------
+
+    def _points_to_ego(self, results):
+        """LiDAR points를 ego frame으로 변환. shape: (N, 3)."""
+        ego2lidar = np.asarray(results['ego2lidar'], dtype=np.float64)
+        if ego2lidar.ndim == 3:          # list of 6 identical matrices
+            ego2lidar = ego2lidar[0]
+        if ego2lidar.shape == (3, 4):
+            tmp = np.eye(4, dtype=np.float64)
+            tmp[:3, :] = ego2lidar
+            ego2lidar = tmp
+        lidar2ego = np.linalg.inv(ego2lidar)
+
+        pts = results['points']
+        p = pts.tensor[:, :3].numpy() if hasattr(pts, 'tensor') else np.asarray(pts)[:, :3]
+        ones = np.ones((p.shape[0], 1), dtype=np.float64)
+        return (lidar2ego @ np.hstack([p, ones]).T).T[:, :3]
+
+    def _points2depthmap(self, points_2d_z, height, width):
+        """(u, v, z) 배열을 downsampled depth map으로 변환."""
+        h_out = height // self.downsample
+        w_out = width // self.downsample
+        depth_map = np.zeros((h_out, w_out), dtype=np.float32)
+        d_min = self.grid_config['depth'][0]
+        d_max = self.grid_config['depth'][1]
+
+        coor = np.round(points_2d_z[:, :2] / self.downsample).astype(np.int32)
+        depth = points_2d_z[:, 2]
+        kept = (
+            (coor[:, 0] >= 0) & (coor[:, 0] < w_out) &
+            (coor[:, 1] >= 0) & (coor[:, 1] < h_out) &
+            (depth >= d_min) & (depth < d_max)
+        )
+        coor, depth = coor[kept], depth[kept]
+        if coor.size == 0:
+            return depth_map
+
+        ranks = coor[:, 0] + coor[:, 1] * w_out
+        order = np.argsort(ranks + depth / 100.0)
+        coor, depth, ranks = coor[order], depth[order], ranks[order]
+        keep_first = np.ones(len(ranks), dtype=bool)
+        keep_first[1:] = ranks[1:] != ranks[:-1]
+        coor, depth = coor[keep_first], depth[keep_first]
+        depth_map[coor[:, 1], coor[:, 0]] = depth
+        return depth_map
+
+    def __call__(self, results):
+        points_ego = self._points_to_ego(results)   # (N, 3)
+
+        # 이미지 크기 확인
+        if 'img' in results and len(results['img']) > 0:
+            img0 = results['img'][0]
+            h, w = img0.shape[0], img0.shape[1]
+        elif 'img_shape' in results:
+            sh = results['img_shape'][0]
+            h, w = sh[0], sh[1]
+        else:
+            raise KeyError("results에 'img' 또는 'img_shape'가 없습니다.")
+
+        # ego2lidar: 현재 프레임 (리스트라면 첫 번째)
+        ego2lidar = np.asarray(results['ego2lidar'], dtype=np.float64)
+        if ego2lidar.ndim == 3:
+            ego2lidar = ego2lidar[0]
+        if ego2lidar.shape == (3, 4):
+            tmp = np.eye(4, dtype=np.float64)
+            tmp[:3, :] = ego2lidar
+            ego2lidar = tmp
+
+        ones = np.ones((points_ego.shape[0], 1), dtype=np.float64)
+        p_homo = np.hstack([points_ego, ones]).T   # (4, N)
+
+        lidar2img_list = results['lidar2img']
+        num_cams = len(lidar2img_list)
+        depth_maps = []
+        for cid in range(num_cams):
+            l2i = np.asarray(lidar2img_list[cid], dtype=np.float64)
+            if l2i.shape == (3, 4):
+                tmp = np.eye(4, dtype=np.float64)
+                tmp[:3, :] = l2i
+                l2i = tmp
+            # ego frame → image: ego2img = lidar2img @ ego2lidar
+            ego2img = l2i @ ego2lidar
+            pts_cam = (ego2img @ p_homo).T       # (N, 4)
+            z = pts_cam[:, 2]
+            u = pts_cam[:, 0] / (z + 1e-6)
+            v = pts_cam[:, 1] / (z + 1e-6)
+            depth_maps.append(self._points2depthmap(
+                np.stack([u, v, z], axis=1), h, w))
+
+        results['gt_depth'] = torch.from_numpy(
+            np.stack(depth_maps, axis=0).astype(np.float32))   # [N_cams, H_feat, W_feat]
+        return results
+
+    def __repr__(self):
+        return (f'{self.__class__.__name__}('
+                f'downsample={self.downsample}, '
+                f'grid_config={self.grid_config})')

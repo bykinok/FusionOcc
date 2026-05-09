@@ -1,22 +1,30 @@
-"""SparseOcc_ori r50 NuScenes 704x256 8frames 설정 (mmengine 형식).
+"""SparseOcc_unified r50 NuScenes 704x256 8frames — w/ train camera mask + Depth SV (mmengine 형식).
 
-원본: Ref/SparseOcc_ori/configs/r50_nuimg_704x256_8f.py
-변경 사항:
-  - plugin/plugin_dir → custom_imports
-  - data dict → train_dataloader/val_dataloader/test_dataloader
-  - optimizer/optimizer_config/lr_config → optim_wrapper/param_scheduler
-  - runner → train_cfg/val_cfg/test_cfg
-  - 모델 정의, 파이프라인, 하이퍼파라미터는 원본과 동일하게 유지
+원본: projects/SparseOcc_eccv/configs/r50_nuimg_704x256_8f_w_cam_mask_unified_miou.py
+변경 사항 (depth supervision 추가):
+  1. [model] depth_supervision 추가
+     - type: BEVDetStyleAuxDepthHead (SparseOcc 내장, ASPP+BasicBlock+DCN)
+     - depth 범위: [1.0, 45.0, 0.5] → 88 bins
+     - feature_level=1 (FPN 2번째 레벨)
+     - loss_weight=0.5
+  2. [pipeline] LoadPointsFromFile + PointToMultiViewDepth 추가
+     → LiDAR points를 ego frame으로 변환 후 카메라별 depth map 생성
+  3. [Collect3D] gt_depth 키 추가
+  4. [work_dir] sparseocc_eccv_r50_256x704_8f_w_cam_mask_unified_w_DepthSV_miou
+
+Camera Mask + Depth Supervision 설계:
+  - Training occ loss: camera mask에 보이는 voxel에 대해서만 계산 (use_mask_camera=True)
+  - Depth loss: PointToMultiViewDepth → BEVDetStyleAuxDepthHead → BCE (loss_weight=0.5)
+  - Evaluation mIoU: camera mask 기준 (use_image_mask=True)
 """
 
-# 플러그인 로드 (새 mmengine custom_imports 방식)
 custom_imports = dict(
     imports=['projects.SparseOcc_eccv.sparseocc_eccv'],
     allow_failed_imports=False)
 
 default_scope = 'mmdet3d'
 
-# ── 기본 파라미터 (원본과 동일) ────────────────────────────────────────────────
+# ── 기본 파라미터 ─────────────────────────────────────────────────────────────
 dataset_type = 'NuSceneOcc'
 dataset_root = 'data/nuscenes/'
 occ_gt_root = 'data/nuscenes/gts'
@@ -60,7 +68,28 @@ _topk_training_ = [4000, 16000, 64000]
 _topk_testing_ = [2000, 8000, 32000]
 _topk_training_ = _topk_testing_
 
-# ── 모델 (원본과 동일) ────────────────────────────────────────────────────────
+# ── BEV 증강 설정 ─────────────────────────────────────────────────────────────
+bda_aug_conf = dict(
+    flip_dx_ratio=0.5,
+    flip_dy_ratio=0.5,
+)
+
+# ── Depth Supervision 설정 ─────────────────────────────────────────────────────
+# depth 범위 [d_min, d_max, step]: (45-1)/0.5 = 88 bins
+# BEVFormer 설정과 동일하게 유지
+depth_grid_config = dict(depth=[1.0, 45.0, 0.5])
+depth_downsample = 16          # 이미지 → depth map 다운샘플 배율
+
+# ── LR 스케줄 계산용 변수 ─────────────────────────────────────────────────────
+train_samples = 28130
+num_gpus = 8
+_total_epochs_ = 24
+_num_iters_per_epoch_ = train_samples // (num_gpus * 1)
+# BEVFormer 기준(num_gpus=2, warmup=500) 대비 epoch 비중이 동일하도록 비례 계산
+# 500 × (2 / num_gpus) = 500 × (2/8) = 125 iter
+_warmup_iters_ = round(500 * 2 / num_gpus)
+
+# ── 모델 ──────────────────────────────────────────────────────────────────────
 model = dict(
     type='SparseOcc',
     data_aug=dict(
@@ -68,7 +97,18 @@ model = dict(
         img_norm_cfg=img_norm_cfg,
         img_pad_cfg=dict(size_divisor=32)),
     use_grid_mask=False,
-    use_mask_camera=False,
+    use_mask_camera=True,   # 학습 loss: 카메라에 보이는 voxel만 사용
+    # ── Auxiliary Depth Supervision ─────────────────────────────────────────
+    depth_supervision=dict(
+        enabled=True,
+        type='BEVDetStyleAuxDepthHead',
+        in_channels=_dim_,
+        mid_channels=_dim_,
+        grid_config=depth_grid_config,
+        downsample=depth_downsample,
+        loss_weight=0.5,
+        feature_level=1,   # FPN 2번째 레벨 (0-indexed)
+    ),
     img_backbone=dict(
         type='ResNet',
         depth=50,
@@ -117,7 +157,7 @@ model = dict(
     ),
 )
 
-# ── 데이터 파이프라인 (원본과 동일) ──────────────────────────────────────────
+# ── 데이터 파이프라인 ─────────────────────────────────────────────────────────
 ida_aug_conf = {
     'resize_lim': (0.38, 0.55),
     'final_dim': (256, 704),
@@ -130,11 +170,19 @@ ida_aug_conf = {
 train_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=False, color_type='color'),
     dict(type='LoadMultiViewImageFromMultiSweeps', sweeps_num=_num_frames_ - 1),
-    dict(type='LoadOccGTFromFile', num_classes=len(occ_class_names)),
+    # LiDAR points 로드 (depth map 생성용, 학습에만 필요)
+    dict(type='LoadPointsFromFile', coord_type='LIDAR', load_dim=5, use_dim=3),
+    dict(type='LoadOccGTFromFile', num_classes=len(occ_class_names), load_mask_camera=True),
+    dict(type='BEVAug', bda_aug_conf=bda_aug_conf, is_train=True),
+    # LiDAR points → ego frame → 카메라별 depth map 생성 → results['gt_depth']
+    dict(type='PointToMultiViewDepth',
+         grid_config=depth_grid_config, downsample=depth_downsample),
     dict(type='RandomTransformImage', ida_aug_conf=ida_aug_conf, training=True),
     dict(type='DefaultFormatBundle3D', class_names=det_class_names),
     dict(type='Collect3D',
-         keys=['img', 'voxel_semantics', 'voxel_instances', 'instance_class_ids'],
+         keys=['img', 'voxel_semantics', 'voxel_instances', 'instance_class_ids',
+               'mask_camera',   # camera mask training용
+               'gt_depth'],     # depth supervision GT
          meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape',
                     'lidar2img', 'img_timestamp', 'ego2lidar'))
 ]
@@ -143,6 +191,7 @@ test_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=False, color_type='color'),
     dict(type='LoadMultiViewImageFromMultiSweeps', sweeps_num=_num_frames_ - 1, test_mode=True),
     dict(type='LoadOccGTFromFile', num_classes=len(occ_class_names)),
+    dict(type='BEVAug', bda_aug_conf=bda_aug_conf, is_train=False),
     dict(type='RandomTransformImage', ida_aug_conf=ida_aug_conf, training=False),
     dict(type='DefaultFormatBundle3D', class_names=det_class_names),
     dict(type='Collect3D',
@@ -151,9 +200,9 @@ test_pipeline = [
                     'lidar2img', 'img_timestamp', 'ego2lidar', 'index'))
 ]
 
-# ── DataLoader (새 mmengine 형식) ────────────────────────────────────────────
+# ── DataLoader ────────────────────────────────────────────────────────────────
 train_dataloader = dict(
-    batch_size=8,#2,
+    batch_size=1,
     num_workers=4,
     persistent_workers=True,
     sampler=dict(type='DistributedGroupSampler', seed=0),
@@ -203,7 +252,7 @@ val_evaluator = dict(
 )
 test_evaluator = val_evaluator
 
-# ── Optimizer & Scheduler (새 mmengine 형식) ─────────────────────────────────
+# ── Optimizer ─────────────────────────────────────────────────────────────────
 optim_wrapper = dict(
     type='OptimWrapper',
     optimizer=dict(
@@ -217,55 +266,51 @@ optim_wrapper = dict(
             'img_backbone': dict(lr_mult=0.1),
             'sampling_offset': dict(lr_mult=0.1),
         }),
+    accumulative_counts=8,
 )
 
-# 학습 설정
-train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=24, val_interval=24) #48, val_interval=48)
+train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=_total_epochs_, val_interval=_total_epochs_)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
-# LR Scheduler (CosineAnnealing + LinearWarmup)
+# ── LR Scheduler ─────────────────────────────────────────────────────────────
 param_scheduler = [
     dict(
         type='LinearLR',
-        start_factor=1.0 / 3,
+        start_factor=0.05,
+        end_factor=1.0,
         by_epoch=False,
         begin=0,
-        end=500,
+        end=_warmup_iters_,
     ),
     dict(
         type='CosineAnnealingLR',
-        begin=0,
-        by_epoch=True,
-        end=48,
-        eta_min_ratio=1e-3,
+        begin=_warmup_iters_,
+        end=_total_epochs_ * _num_iters_per_epoch_,
+        by_epoch=False,
+        eta_min=1e-6,
     ),
 ]
 
 # ── 체크포인트 & 로그 ──────────────────────────────────────────────────────────
 default_hooks = dict(
-    checkpoint=dict(type='CheckpointHook', interval=1, max_keep_ckpts=1),
+    checkpoint=dict(type='CheckpointHook', interval=1),
     logger=dict(type='LoggerHook', interval=50),
 )
 
-# ── 사전 학습 가중치 ────────────────────────────────────────────────────────────
 load_from = 'projects/SparseOcc_eccv/pretrain/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth'
 
-# checkpoint 로드 시 'backbone' → 'img_backbone' 키 리매핑 (원본 revise_keys와 동일)
 custom_hooks = [
     dict(type='ReviseCheckpointKeysHook',
          revise_keys=[('backbone', 'img_backbone')]),
 ]
 
-# ── 런타임 설정 ────────────────────────────────────────────────────────────────
 env_cfg = dict(
     cudnn_benchmark=False,
     mp_cfg=dict(mp_start_method='fork', opencv_num_threads=0),
     dist_cfg=dict(backend='nccl'),
 )
 log_level = 'INFO'
-work_dir = 'work_dirs/sparseocc_eccv_r50_256x704_8f_miou'
+work_dir = 'work_dirs/sparseocc_eccv_r50_256x704_8f_w_cam_mask_unified_w_DepthSV_miou'
 
-# worker seed 고정 (원본과 동일하게 np.random.seed(0) 적용)
-# worker_seed = num_workers*rank + worker_id + seed = 1*0 + 0 + 0 = 0
 randomness = dict(seed=0, deterministic=False)

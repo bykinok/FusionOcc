@@ -205,10 +205,11 @@ class LoadMultiViewImageFromMultiSweeps(object):
 
 @PIPELINES.register_module()
 class LoadOccGTFromFile(object):
-    def __init__(self, num_classes=18, inst_class_ids=[]):
+    def __init__(self, num_classes=18, inst_class_ids=[], load_mask_camera=False):
         self.num_classes = num_classes
         self.inst_class_ids = inst_class_ids
-    
+        self.load_mask_camera = load_mask_camera
+
     def __call__(self, results):
         occ_labels = np.load(results['occ_path'])
         semantics = occ_labels['semantics']  # [200, 200, 16]
@@ -250,5 +251,13 @@ class LoadOccGTFromFile(object):
         results['voxel_semantics'] = semantics
         results['voxel_instances'] = final_instances
         results['instance_class_ids'] = DC(to_tensor(final_instance_class_ids))
+
+        # camera mask 로딩 (선택적)
+        if self.load_mask_camera:
+            if 'mask_camera' in occ_labels.files:
+                results['mask_camera'] = occ_labels['mask_camera'].astype(bool)
+            else:
+                # mask_camera가 없으면 전체 True (모든 voxel 포함)
+                results['mask_camera'] = np.ones(semantics.shape, dtype=bool)
 
         return results

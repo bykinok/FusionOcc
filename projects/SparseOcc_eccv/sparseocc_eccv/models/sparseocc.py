@@ -29,6 +29,7 @@ class SparseOcc(MVXTwoStageDetector):
                  pretrained=None,
                  data_aug=None,
                  use_mask_camera=False,
+                 depth_supervision=None,
                  init_cfg=None,
                  data_preprocessor=None,
                  **kwargs):
@@ -58,6 +59,16 @@ class SparseOcc(MVXTwoStageDetector):
         self.fp16_enabled = False
         self.data_aug = data_aug
         self.color_aug = GpuPhotoMetricDistortion()
+
+        # Auxiliary depth supervision head (선택적)
+        self.depth_head = None
+        self.depth_feature_level = 1
+        if depth_supervision is not None and depth_supervision.get('enabled', False):
+            from mmdet3d.registry import MODELS as _MODELS
+            self.depth_feature_level = depth_supervision.get('feature_level', 1)
+            ds_cfg = {k: v for k, v in depth_supervision.items()
+                      if k not in ('enabled', 'feature_level')}
+            self.depth_head = _MODELS.build(ds_cfg)
 
         self.memory = {}
         self.queue = queue.Queue()
@@ -137,10 +148,23 @@ class SparseOcc(MVXTwoStageDetector):
 
         return img_feats_reshaped
 
-    def forward_pts_train(self, mlvl_feats, voxel_semantics, voxel_instances, instance_class_ids, mask_camera, img_metas):
+    def forward_pts_train(self, mlvl_feats, voxel_semantics, voxel_instances, instance_class_ids, mask_camera, img_metas, gt_depth=None):
         outs = self.pts_bbox_head(mlvl_feats, img_metas)
         loss_inputs = [voxel_semantics, voxel_instances, instance_class_ids, outs]
-        return self.pts_bbox_head.loss(*loss_inputs)
+        # use_mask_camera=True일 때만 loss에 mask_camera 전달
+        if self.use_mask_camera and mask_camera is not None:
+            losses = self.pts_bbox_head.loss(*loss_inputs, mask_camera=mask_camera)
+        else:
+            losses = self.pts_bbox_head.loss(*loss_inputs)
+
+        # Auxiliary depth supervision
+        if self.depth_head is not None and gt_depth is not None:
+            # mlvl_feats[level]: [B, T*N_cam, C, H, W] → 현재 프레임 6 카메라만 추출
+            curr_feats = mlvl_feats[self.depth_feature_level][:, :6, :, :, :]  # [B, 6, C, H, W]
+            depth_pred = self.depth_head(curr_feats)   # [B, 6, D, H, W]
+            losses['loss_depth'] = self.depth_head.get_depth_loss(gt_depth, depth_pred)
+
+        return losses
 
     # -----------------------------------------------------------------------
     # DC 객체 언래핑 헬퍼
@@ -212,6 +236,7 @@ class SparseOcc(MVXTwoStageDetector):
             voxel_semantics = _unwrap_and_stack(kwargs.get('voxel_semantics'))
             voxel_instances = _unwrap_and_stack(kwargs.get('voxel_instances'))
             mask_camera = _unwrap_and_stack(kwargs.get('mask_camera'))
+            gt_depth = _unwrap_and_stack(kwargs.get('gt_depth'))
             # instance_class_ids는 배치 아이템마다 길이가 다를 수 있고
             # loss_single 에서 리스트로 재할당하므로 반드시 리스트로 유지
             raw_icids = self._unwrap_dc(kwargs.get('instance_class_ids'))
@@ -233,6 +258,7 @@ class SparseOcc(MVXTwoStageDetector):
                 voxel_instances=voxel_instances,
                 instance_class_ids=instance_class_ids,
                 mask_camera=mask_camera,
+                gt_depth=gt_depth,
             )
         elif mode == 'predict':
             # 새 API: inputs/data_samples 형식
@@ -272,9 +298,9 @@ class SparseOcc(MVXTwoStageDetector):
         return self.predict(inputs, data_samples)
 
     @force_fp32(apply_to=('img',))
-    def forward_train(self, img_metas=None, img=None, voxel_semantics=None, voxel_instances=None, instance_class_ids=None, mask_camera=None, **kwargs):
+    def forward_train(self, img_metas=None, img=None, voxel_semantics=None, voxel_instances=None, instance_class_ids=None, mask_camera=None, gt_depth=None, **kwargs):
         img_feats = self.extract_feat(img=img, img_metas=img_metas)
-        return self.forward_pts_train(img_feats, voxel_semantics, voxel_instances, instance_class_ids, mask_camera, img_metas)
+        return self.forward_pts_train(img_feats, voxel_semantics, voxel_instances, instance_class_ids, mask_camera, img_metas, gt_depth=gt_depth)
 
     def forward_test(self, img_metas, img=None, **kwargs):
         from ..datasets.nuscenes_occ_dataset import _get_occ_class_names
@@ -421,6 +447,12 @@ class SparseOcc(MVXTwoStageDetector):
         if hasattr(batch_data_samples[0].gt_fields, 'mask_camera'):
             mask_camera = torch.stack([s.gt_fields.mask_camera for s in batch_data_samples])
 
+        gt_depth = None
+        if 'gt_depth' in batch_inputs_dict:
+            gt_depth = batch_inputs_dict['gt_depth']
+        elif hasattr(batch_data_samples[0].gt_fields, 'gt_depth'):
+            gt_depth = torch.stack([s.gt_fields.gt_depth for s in batch_data_samples])
+
         return self.forward_train(
             img_metas=img_metas,
             img=img,
@@ -428,6 +460,7 @@ class SparseOcc(MVXTwoStageDetector):
             voxel_instances=voxel_instances,
             instance_class_ids=instance_class_ids,
             mask_camera=mask_camera,
+            gt_depth=gt_depth,
         )
 
     def predict(self, batch_inputs_dict, batch_data_samples, **kwargs):
