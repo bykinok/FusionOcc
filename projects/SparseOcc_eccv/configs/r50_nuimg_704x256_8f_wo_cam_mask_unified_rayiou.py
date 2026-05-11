@@ -1,19 +1,9 @@
-"""SparseOcc_unified r50 NuScenes 704x256 8frames — w/ train camera mask (mmengine 형식).
+"""SparseOcc_unified r50 NuScenes 704x256 8frames 설정 (mmengine 형식) — RayIoU 평가.
 
 원본: projects/SparseOcc_eccv/configs/r50_nuimg_704x256_8f_wo_cam_mask_unified_miou.py
-변경 사항 (wo_cam_mask → w_cam_mask):
-  1. [model] use_mask_camera=True
-     → forward_pts_train에서 mask_camera를 loss에 전달하여 카메라에 보이는
-       voxel에 대해서만 loss를 계산
-  2. [pipeline/LoadOccGTFromFile] load_mask_camera=True
-     → labels.npz에서 mask_camera (bool [200,200,16]) 로드
-  3. [train_pipeline/BEVAug] mask_camera도 voxel_semantics와 동일하게 flip
-  4. [train_pipeline/Collect3D] mask_camera를 keys에 추가
-  5. [work_dir] sparseocc_eccv_r50_256x704_8f_w_cam_mask_unified_miou
-
-Camera mask policy:
-  - Training  : use_mask_camera=True → loss는 카메라 가시 voxel에서만 계산
-  - Evaluation: use_image_mask=True  → mIoU도 카메라 가시 voxel에서만 계산
+변경 사항 (miou → rayiou):
+  1. [val_evaluator] eval_metric='miou' → 'rayiou' (RayIoU@1/2/4 평가)
+  2. [work_dir] sparseocc_eccv_r50_256x704_8f_wo_cam_mask_unified_rayiou
 """
 
 # 플러그인 로드 (새 mmengine custom_imports 방식)
@@ -23,7 +13,7 @@ custom_imports = dict(
 
 default_scope = 'mmdet3d'
 
-# ── 기본 파라미터 ─────────────────────────────────────────────────────────────
+# ── 기본 파라미터 (원본과 동일) ────────────────────────────────────────────────
 dataset_type = 'NuSceneOcc'
 dataset_root = 'data/nuscenes/'
 occ_gt_root = 'data/nuscenes/gts'
@@ -79,8 +69,6 @@ num_gpus = 2                # 기본 GPU 수
 batch_size = 8              # GPU당 배치 크기
 _total_epochs_ = 24
 _num_iters_per_epoch_ = train_samples // (num_gpus * batch_size)
-# BEVFormer 기준(num_gpus=2, batch_size=1, warmup=500) 대비 epoch 비중이 동일하도록 비례 계산
-# 500 × (2×1) / (num_gpus×batch_size) = 500 × 2/16 = 62.5 → 63 iter
 _warmup_iters_ = max(1, round(500 * 2 / (num_gpus * batch_size)))
 
 # ── 모델 ──────────────────────────────────────────────────────────────────────
@@ -91,7 +79,7 @@ model = dict(
         img_norm_cfg=img_norm_cfg,
         img_pad_cfg=dict(size_divisor=32)),
     use_grid_mask=False,
-    use_mask_camera=True,  # [변경] 학습 시 camera mask 적용 → 가시 voxel에서만 loss 계산
+    use_mask_camera=False,
     img_backbone=dict(
         type='ResNet',
         depth=50,
@@ -150,23 +138,19 @@ ida_aug_conf = {
     'rand_flip': False,
 }
 
-# 학습 시 mask_camera 로드 + BEVAug flip 보정 + Collect3D keys에 포함
 train_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=False, color_type='color'),
     dict(type='LoadMultiViewImageFromMultiSweeps', sweeps_num=_num_frames_ - 1),
-    dict(type='LoadOccGTFromFile', num_classes=len(occ_class_names),
-         load_mask_camera=True),  # [변경] mask_camera 로드
-    dict(type='BEVAug', bda_aug_conf=bda_aug_conf, is_train=True),  # mask_camera도 flip
+    dict(type='LoadOccGTFromFile', num_classes=len(occ_class_names)),
+    dict(type='BEVAug', bda_aug_conf=bda_aug_conf, is_train=True),
     dict(type='RandomTransformImage', ida_aug_conf=ida_aug_conf, training=True),
     dict(type='DefaultFormatBundle3D', class_names=det_class_names),
     dict(type='Collect3D',
-         keys=['img', 'voxel_semantics', 'voxel_instances', 'instance_class_ids',
-               'mask_camera'],  # [변경] mask_camera 추가
+         keys=['img', 'voxel_semantics', 'voxel_instances', 'instance_class_ids'],
          meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape',
                     'lidar2img', 'img_timestamp', 'ego2lidar'))
 ]
 
-# 평가 시에는 mask_camera 불필요 (OccupancyMetricHybrid가 직접 GT에서 로드)
 test_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=False, color_type='color'),
     dict(type='LoadMultiViewImageFromMultiSweeps', sweeps_num=_num_frames_ - 1, test_mode=True),
@@ -227,7 +211,7 @@ val_evaluator = dict(
     use_lidar_mask=False,
     use_image_mask=True,
     dataset_name='occ3d',
-    eval_metric='miou',
+    eval_metric='rayiou',
     sort_by_timestamp=True,
 )
 test_evaluator = val_evaluator
@@ -249,7 +233,6 @@ optim_wrapper = dict(
     accumulative_counts=4,   # effective batch = batch_size(8) × num_gpus(2) × 4 = 64
 )
 
-# 학습 설정
 train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=_total_epochs_, val_interval=_total_epochs_)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
@@ -294,6 +277,6 @@ env_cfg = dict(
     dist_cfg=dict(backend='nccl'),
 )
 log_level = 'INFO'
-work_dir = 'work_dirs/sparseocc_eccv_r50_256x704_8f_w_cam_mask_unified_miou'
+work_dir = 'work_dirs/sparseocc_eccv_r50_256x704_8f_wo_cam_mask_unified_rayiou'
 
 randomness = dict(seed=0, deterministic=False)

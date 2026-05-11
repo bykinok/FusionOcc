@@ -77,12 +77,13 @@ bda_aug_conf = dict(
 # iteration 기반 cosine annealing의 end 값 계산에 사용
 # --cfg-options num_gpus=N 으로 실행 시 override 가능
 train_samples = 28130       # nuScenes train split 샘플 수
-num_gpus = 8                # 기본 GPU 수 (batch_size=8 → 실질적으로 1 GPU당 1샘플)
+num_gpus = 2                # 기본 GPU 수
+batch_size = 8              # GPU당 배치 크기
 _total_epochs_ = 24
-_num_iters_per_epoch_ = train_samples // (num_gpus * 1)  # batch_size=1 per GPU
-# BEVFormer 기준(num_gpus=2, warmup=500) 대비 epoch 비중이 동일하도록 비례 계산
-# 500 × (2 / num_gpus) = 500 × (2/8) = 125 iter
-_warmup_iters_ = round(500 * 2 / num_gpus)
+_num_iters_per_epoch_ = train_samples // (num_gpus * batch_size)
+# BEVFormer 기준(num_gpus=2, batch_size=1, warmup=500) 대비 epoch 비중이 동일하도록 비례 계산
+# 500 × (2×1) / (num_gpus×batch_size) = 500 × 2/16 = 62.5 → 63 iter
+_warmup_iters_ = max(1, round(500 * 2 / (num_gpus * batch_size)))
 
 # ── 모델 (원본과 동일) ────────────────────────────────────────────────────────
 model = dict(
@@ -182,7 +183,7 @@ test_pipeline = [
 
 # ── DataLoader (새 mmengine 형식) ────────────────────────────────────────────
 train_dataloader = dict(
-    batch_size=1,
+    batch_size=batch_size,
     num_workers=4,
     persistent_workers=True,
     sampler=dict(type='DistributedGroupSampler', seed=0),
@@ -233,7 +234,7 @@ val_evaluator = dict(
 test_evaluator = val_evaluator
 
 # ── Optimizer (unified 변경 사항: accumulative_counts=8 추가) ─────────────────
-# effective batch size = batch_size(1) × num_gpus(8) × accumulative_counts(8) = 64
+# effective batch size = batch_size(8) × num_gpus(2) × accumulative_counts(4) = 64
 # → 원본 ori_miou의 batch_size=8 × num_gpus=8 = 64와 동일한 effective batch 유지
 optim_wrapper = dict(
     type='OptimWrapper',
@@ -248,7 +249,7 @@ optim_wrapper = dict(
             'img_backbone': dict(lr_mult=0.1),
             'sampling_offset': dict(lr_mult=0.1),
         }),
-    accumulative_counts=8,  # unified 변경: gradient accumulation
+    accumulative_counts=4,   # effective batch = batch_size(8) × num_gpus(2) × 4 = 64
 )
 
 # 학습 설정

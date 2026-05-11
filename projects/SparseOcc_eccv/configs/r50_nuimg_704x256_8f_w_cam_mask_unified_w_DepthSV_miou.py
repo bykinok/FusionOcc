@@ -82,12 +82,13 @@ depth_downsample = 16          # 이미지 → depth map 다운샘플 배율
 
 # ── LR 스케줄 계산용 변수 ─────────────────────────────────────────────────────
 train_samples = 28130
-num_gpus = 8
+num_gpus = 2                # 기본 GPU 수
+batch_size = 8              # GPU당 배치 크기
 _total_epochs_ = 24
-_num_iters_per_epoch_ = train_samples // (num_gpus * 1)
-# BEVFormer 기준(num_gpus=2, warmup=500) 대비 epoch 비중이 동일하도록 비례 계산
-# 500 × (2 / num_gpus) = 500 × (2/8) = 125 iter
-_warmup_iters_ = round(500 * 2 / num_gpus)
+_num_iters_per_epoch_ = train_samples // (num_gpus * batch_size)
+# BEVFormer 기준(num_gpus=2, batch_size=1, warmup=500) 대비 epoch 비중이 동일하도록 비례 계산
+# 500 × (2×1) / (num_gpus×batch_size) = 500 × 2/16 = 62.5 → 63 iter
+_warmup_iters_ = max(1, round(500 * 2 / (num_gpus * batch_size)))
 
 # ── 모델 ──────────────────────────────────────────────────────────────────────
 model = dict(
@@ -202,7 +203,7 @@ test_pipeline = [
 
 # ── DataLoader ────────────────────────────────────────────────────────────────
 train_dataloader = dict(
-    batch_size=1,
+    batch_size=batch_size,
     num_workers=4,
     persistent_workers=True,
     sampler=dict(type='DistributedGroupSampler', seed=0),
@@ -266,7 +267,7 @@ optim_wrapper = dict(
             'img_backbone': dict(lr_mult=0.1),
             'sampling_offset': dict(lr_mult=0.1),
         }),
-    accumulative_counts=8,
+    accumulative_counts=4,   # effective batch = batch_size(8) × num_gpus(2) × 4 = 64
 )
 
 train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=_total_epochs_, val_interval=_total_epochs_)

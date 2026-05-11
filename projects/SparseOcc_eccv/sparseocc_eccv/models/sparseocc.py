@@ -149,6 +149,14 @@ class SparseOcc(MVXTwoStageDetector):
         return img_feats_reshaped
 
     def forward_pts_train(self, mlvl_feats, voxel_semantics, voxel_instances, instance_class_ids, mask_camera, img_metas, gt_depth=None):
+        # SparseOccTransformer.forward()가 mlvl_feats[lvl]을 in-place로 교체하여
+        # [B, T*N_cam, C, H, W] → [B*T*G, N_cam, H, W, C] (NHWC) 포맷으로 바뀜.
+        # depth head는 원본 [B, N_cam, C, H, W] 포맷이 필요하므로 transformer 호출 전에 저장.
+        if self.depth_head is not None and gt_depth is not None:
+            curr_feats = mlvl_feats[self.depth_feature_level][:, :6].clone()  # [B, 6, C, H, W]
+        else:
+            curr_feats = None
+
         outs = self.pts_bbox_head(mlvl_feats, img_metas)
         loss_inputs = [voxel_semantics, voxel_instances, instance_class_ids, outs]
         # use_mask_camera=True일 때만 loss에 mask_camera 전달
@@ -158,11 +166,12 @@ class SparseOcc(MVXTwoStageDetector):
             losses = self.pts_bbox_head.loss(*loss_inputs)
 
         # Auxiliary depth supervision
-        if self.depth_head is not None and gt_depth is not None:
-            # mlvl_feats[level]: [B, T*N_cam, C, H, W] → 현재 프레임 6 카메라만 추출
-            curr_feats = mlvl_feats[self.depth_feature_level][:, :6, :, :, :]  # [B, 6, C, H, W]
+        if curr_feats is not None:
             depth_pred = self.depth_head(curr_feats)   # [B, 6, D, H, W]
-            losses['loss_depth'] = self.depth_head.get_depth_loss(gt_depth, depth_pred)
+            # PointToMultiViewDepth는 T*N_cam 전체(48개) depth map을 생성하지만
+            # depth head는 현재 프레임 6 카메라만 예측하므로 앞 6개만 사용.
+            gt_depth_curr = gt_depth[:, :6] if gt_depth.ndim == 4 else gt_depth
+            losses['loss_depth'] = self.depth_head.get_depth_loss(gt_depth_curr, depth_pred)
 
         return losses
 

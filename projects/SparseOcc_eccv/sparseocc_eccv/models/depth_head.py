@@ -74,7 +74,7 @@ class AuxDepthHead(BaseModule):
             raise ValueError(
                 f'H or W too small for downsample={self.downsample}. '
                 f'Got H={H}, W={W}.')
-        gt_depths = gt_depths[..., :H_crop, :W_crop]
+        gt_depths = gt_depths[..., :H_crop, :W_crop].contiguous()
         H, W = H_crop, W_crop
 
         gt_depths = gt_depths.view(
