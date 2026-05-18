@@ -166,6 +166,7 @@ class BEVFormerOccHead(BaseModule):
                  use_mask=False,
                  positional_encoding=None,
                  temperature=None,
+                 ray_aux_loss=None,
                  **kwargs):
 
         self.bev_h = bev_h
@@ -189,6 +190,15 @@ class BEVFormerOccHead(BaseModule):
         super(BEVFormerOccHead, self).__init__()
 
         self.loss_occ = build_loss(loss_occ)
+
+        # Optional ray-aligned auxiliary loss.
+        # Disabled (self.ray_aux_loss = None) when ray_aux_loss is not set in config,
+        # preserving full backward-compatibility with existing checkpoints and configs.
+        if ray_aux_loss is not None:
+            self.ray_aux_loss = build_loss(ray_aux_loss)
+        else:
+            self.ray_aux_loss = None
+
         self.positional_encoding = build_positional_encoding(
             positional_encoding)
         self.transformer = build_transformer(transformer)
@@ -289,20 +299,152 @@ class BEVFormerOccHead(BaseModule):
              preds_dicts,
              gt_bboxes_ignore=None,
              img_metas=None):
+        """Compute occupancy losses.
 
-        loss_dict=dict()
-        occ=preds_dicts['occ']
-        
-        # Convert voxel_semantics to tensor if it's a list
+        Primary loss  : voxel-wise cross-entropy (loss_occ).
+        Auxiliary loss: ray-aligned loss (loss_ray) – only when
+                        ray_aux_loss is configured in the model config.
+
+        Args:
+            voxel_semantics : (B, X, Y, Z) int GT labels [0..17], or list of 1.
+            mask_camera     : (B, X, Y, Z) uint8 visibility mask, or list of 1.
+            preds_dicts     : dict with key 'occ' → (B, X, Y, Z, C) logits.
+            gt_bboxes_ignore: unused, kept for API compatibility.
+            img_metas       : list[dict] of length B.  Used to extract per-sample
+                              lidar origins via img_metas[b]['ego2lidar'].
+                              ego2lidar is the ego→lidar 4×4 matrix (built with
+                              inverse=True in nuscenes_occ.py).
+                              Lidar origin in ego frame = inv(ego2lidar)[:3, 3].
+
+        Returns:
+            loss_dict (dict):
+                'loss_occ'             – primary CE loss (always present)
+                'loss_ray'             – ray loss total  (only when enabled)
+                'ray_pre_free'         – pre-hit BCE value   (logging only)
+                'ray_hit_occ'          – first-hit BCE value (logging only)
+                'ray_hit_sem'          – first-hit CE value  (logging only)
+                'num_valid_rays'       – logging scalar      (only when enabled)
+                'num_pre_hit_voxels'   – logging scalar      (only when enabled)
+                'num_hit_voxels'       – logging scalar      (only when enabled)
+                'valid_ray_ratio'      – logging scalar      (only when enabled)
+                'avg_voxels_per_ray'   – logging scalar      (only when enabled)
+        """
+        loss_dict = dict()
+        occ = preds_dicts['occ']
+        # occ shape: (B, X=200, Y=200, Z=16, C=18)
+        # See TransformerOcc.forward (use_3d=True): permute(0,4,3,2,1) →
+        # (B, bev_w, bev_h, pillar_h, out_dim) → predicter → (B, X, Y, Z, C)
+
+        # Unwrap list wrappers coming from DataContainer collation
         if isinstance(voxel_semantics, list):
             voxel_semantics = voxel_semantics[0]
         if isinstance(mask_camera, list):
             mask_camera = mask_camera[0]
-        
-        assert voxel_semantics.min()>=0 and voxel_semantics.max()<=17
-        losses = self.loss_single(voxel_semantics,mask_camera,occ)
-        loss_dict['loss_occ']=losses
+
+        assert voxel_semantics.min() >= 0 and voxel_semantics.max() <= 17, (
+            f"voxel_semantics out of expected range [0,17]: "
+            f"min={voxel_semantics.min()}, max={voxel_semantics.max()}"
+        )
+
+        # ── Primary voxel-wise CE loss ───────────────────────────────────
+        loss_dict['loss_occ'] = self.loss_single(voxel_semantics, mask_camera, occ)
+
+        # ── Optional ray-aligned auxiliary loss ─────────────────────────
+        # Enabled only when `ray_aux_loss` is specified in config;
+        # zero impact on training otherwise (self.ray_aux_loss is None).
+        if self.ray_aux_loss is not None:
+            device = occ.device
+
+            # Prepare tensors: convert numpy → Tensor, move to device
+            if isinstance(voxel_semantics, np.ndarray):
+                voxel_semantics = torch.from_numpy(voxel_semantics)
+            if isinstance(mask_camera, np.ndarray):
+                mask_camera = torch.from_numpy(mask_camera)
+
+            vs_for_ray = voxel_semantics.to(device)
+            mc_for_ray = mask_camera.to(device)
+
+            # DataContainer collation unpacks the list to a single element,
+            # so when B=1, the shape can be (X, Y, Z) instead of (1, X, Y, Z).
+            # Restore the batch dim so ray_aux_loss always sees (B, X, Y, Z).
+            if vs_for_ray.dim() == 3:
+                vs_for_ray = vs_for_ray.unsqueeze(0)   # (1, X, Y, Z)
+            if mc_for_ray.dim() == 3:
+                mc_for_ray = mc_for_ray.unsqueeze(0)   # (1, X, Y, Z)
+
+            # ── Extract per-sample lidar origin from img_metas ──────────
+            # img_metas is list[dict] of length B (one dict per sample).
+            # ego2lidar is the ego→lidar 4×4 matrix (nuscenes_occ.py, inverse=True).
+            # Lidar origin in ego frame = inv(ego2lidar)[:3, 3]
+            #   = lidar2ego_translation  (the sensor mount offset in ego frame)
+            #
+            # Coordinate frame consistency:
+            #   Both the lidar origin and the occupancy grid (pc_range) are in
+            #   the NuScenes ego frame (x-forward, y-left, z-up).  No extra
+            #   rotation/translation is required.
+            lidar_origins = None
+            if img_metas is not None and len(img_metas) > 0:
+                origins_np = []
+                for meta in img_metas:
+                    if meta is not None and 'ego2lidar' in meta:
+                        ego2lidar = np.array(meta['ego2lidar'], dtype=np.float64)
+                        # inv(ego2lidar) = lidar2ego; its translation column is
+                        # the lidar sensor origin in ego frame.
+                        lidar2ego = np.linalg.inv(ego2lidar)
+                        origin    = lidar2ego[:3, 3].astype(np.float32)
+                        origins_np.append(origin)
+                    else:
+                        # Fallback when ego2lidar is missing (should not happen)
+                        origins_np.append(
+                            np.array([0.9858, 0.0, 1.8402], dtype=np.float32)
+                        )
+                if origins_np:
+                    lidar_origins = torch.from_numpy(
+                        np.stack(origins_np, axis=0)
+                    ).to(device)   # (B, 3)
+
+            # occ is already (B, X, Y, Z, C) on `device`
+            ray_loss_dict = self.ray_aux_loss(
+                occ_logits=occ,
+                voxel_semantics=vs_for_ray,
+                mask_camera=mc_for_ray,
+                lidar_origins=lidar_origins,
+            )
+
+            # Merge into loss_dict; logged automatically by mmengine LoggerHook.
+            # Keys without 'loss_' prefix are logged but NOT summed into
+            # the total backward loss (mmengine only sums 'loss_*' keys).
+            loss_dict['loss_ray']           = ray_loss_dict['loss_ray']
+            loss_dict['ray_pre_free']       = ray_loss_dict['ray_pre_free']
+            loss_dict['ray_hit_occ']        = ray_loss_dict['ray_hit_occ']
+            loss_dict['ray_hit_sem']        = ray_loss_dict['ray_hit_sem']
+            loss_dict['num_valid_rays']     = ray_loss_dict['num_valid_rays']
+            loss_dict['num_pre_hit_voxels'] = ray_loss_dict['num_pre_hit_voxels']
+            loss_dict['num_hit_voxels']     = ray_loss_dict['num_hit_voxels']
+            loss_dict['valid_ray_ratio']    = ray_loss_dict['valid_ray_ratio']
+            loss_dict['avg_voxels_per_ray'] = ray_loss_dict['avg_voxels_per_ray']
+
+            # Optional debug metrics (present only when ray_loss_debug=True)
+            for _dbg_key in (
+                'dbg_p_occ_pre',
+                'dbg_p_occ_hit',
+                'dbg_no_hit_frac',
+                'dbg_hit_depth',
+                'dbg_hit_class',
+            ):
+                if _dbg_key in ray_loss_dict:
+                    loss_dict[_dbg_key] = ray_loss_dict[_dbg_key]
+
         return loss_dict
+
+    def set_epoch(self, epoch: int) -> None:
+        """Propagate the current training epoch to the ray auxiliary loss.
+
+        Called by RayLossEpochHook at the start of each epoch.
+        No-op when ray_aux_loss is disabled.
+        """
+        if self.ray_aux_loss is not None and hasattr(self.ray_aux_loss, 'set_epoch'):
+            self.ray_aux_loss.set_epoch(epoch)
 
     def loss_single(self,voxel_semantics,mask_camera,preds):
         # Convert numpy arrays to torch tensors if needed
