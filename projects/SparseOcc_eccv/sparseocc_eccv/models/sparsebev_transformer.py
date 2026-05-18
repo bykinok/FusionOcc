@@ -338,7 +338,8 @@ class AdaptiveMixing(nn.Module):
         M = M.reshape(B*Q, G, self.eff_in_dim, self.eff_out_dim)
         S = S.reshape(B*Q, G, self.out_points, self.in_points)
 
-        out = torch.matmul(out, M)
+        # FP16 호환: sampling 결과(out/x)가 float32일 수 있으므로 M의 dtype으로 통일
+        out = torch.matmul(out.to(dtype=M.dtype), M)
         out = F.layer_norm(out, [out.size(-2), out.size(-1)])
         out = self.act(out)
 

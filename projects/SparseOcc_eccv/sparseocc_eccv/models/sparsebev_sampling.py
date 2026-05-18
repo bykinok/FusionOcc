@@ -84,13 +84,25 @@ def sampling_4d(sample_points, mlvl_feats, scale_weights, lidar2img, image_h, im
     B, Q, T, G, P, _ = sample_points.shape  # [B, Q, T, G, P, 4]
     N = 6
 
-    sample_points = sample_points.reshape(B, Q, T, G * P, 3)
-    
+    # FP16 호환: CUDA 커스텀 op(_ms_deform_attn_cuda_c2345_forward)이 Float32만 지원.
+    # 좌표 계산 정밀도 유지를 위해 sampling_4d 내 모든 연산을 float32로 수행하고,
+    # 최종 feature만 원래 dtype(Half 등)으로 복원한다.
+    feat_dtype = mlvl_feats[0].dtype
+    mlvl_feats = [f.float() for f in mlvl_feats]
+    sample_points = sample_points.float().reshape(B, Q, T, G * P, 3)
+    scale_weights = scale_weights.float()
+
     if DUMP.enabled:
         torch.save(sample_points,
                    '{}/sample_points_3d_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
 
     # get the projection matrix
+    # lidar2img를 float32 및 올바른 device로 변환
+    if not isinstance(lidar2img, torch.Tensor):
+        import numpy as np
+        lidar2img = torch.tensor(np.array(lidar2img), dtype=torch.float32, device=sample_points.device)
+    else:
+        lidar2img = lidar2img.to(device=sample_points.device, dtype=torch.float32)
     lidar2img = lidar2img[:, :(T*N), None, None, :, :]  # [B, TN, 1, 1, 4, 4]
     lidar2img = lidar2img.expand(B, T*N, Q, G * P, 4, 4)
     lidar2img = lidar2img.reshape(B, T, N, Q, G*P, 4, 4)
@@ -159,4 +171,5 @@ def sampling_4d(sample_points, mlvl_feats, scale_weights, lidar2img, image_h, im
     final = final.permute(0, 3, 2, 1, 5, 4)
     final = final.flatten(3, 4)  # [B, Q, G, FP, C]
 
-    return final
+    # CUDA op이 float32로 실행됐으므로 원래 feature dtype으로 복원
+    return final.to(dtype=feat_dtype)

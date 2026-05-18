@@ -102,7 +102,10 @@ class SparseVoxelDecoder(BaseModule):
         B = len(img_metas)
         interval = 2 ** self.num_layers
         query_coord = generate_grid(self.voxel_dim, interval).expand(B, -1, -1)  # [B, N, 3]
-        query_feat = torch.zeros([B, query_coord.shape[1], self.embed_dims], device=query_coord.device)  # [B, N, C]
+        # 모델 가중치 dtype에 맞게 초기화 (FP16 autocast 환경 호환)
+        param_dtype = next(self.parameters()).dtype
+        query_feat = torch.zeros([B, query_coord.shape[1], self.embed_dims],
+                                 device=query_coord.device, dtype=param_dtype)  # [B, N, C]
 
         for i, layer in enumerate(self.decoder_layers):
             DUMP.stage_count = i
@@ -198,12 +201,17 @@ class SparseVoxelDecoderLayer(BaseModule):
         self.ffn.init_weights()
 
     def forward(self, query_feat, query_bbox, mlvl_feats, img_metas):
+        # FP16 autocast 환경에서 query_bbox(float32)와 position_encoder 가중치(half)의
+        # dtype 불일치를 방지하기 위해 query_feat dtype으로 맞춤
+        query_bbox = query_bbox.to(dtype=query_feat.dtype)
         query_pos = self.position_encoder(query_bbox[..., :3])
         query_feat = query_feat + query_pos
 
         if self.self_attn is not None:
             query_feat = self.norm1(self.self_attn(query_bbox, query_feat))
         sampled_feat = self.sampling(query_bbox, query_feat, mlvl_feats, img_metas)
+        # FP16 호환: sampling 결과가 float32일 수 있으므로 query_feat dtype으로 통일
+        sampled_feat = sampled_feat.to(dtype=query_feat.dtype)
         query_feat = self.norm2(self.mixing(sampled_feat, query_feat))
         query_feat = self.norm3(self.ffn(query_feat))
 
