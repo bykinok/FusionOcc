@@ -30,6 +30,8 @@ class SparseOcc(MVXTwoStageDetector):
                  data_aug=None,
                  use_mask_camera=False,
                  depth_supervision=None,
+                 temperature=None,
+                 compute_uncertainty=False,
                  init_cfg=None,
                  data_preprocessor=None,
                  **kwargs):
@@ -59,6 +61,8 @@ class SparseOcc(MVXTwoStageDetector):
         self.fp16_enabled = False
         self.data_aug = data_aug
         self.color_aug = GpuPhotoMetricDistortion()
+        self.temperature = temperature
+        self.compute_uncertainty = compute_uncertainty
 
         # Auxiliary depth supervision head (선택적)
         self.depth_head = None
@@ -289,7 +293,13 @@ class SparseOcc(MVXTwoStageDetector):
             # img_metas 처리: list of dicts 보장
             if isinstance(img_metas, dict):
                 img_metas = [img_metas]
-            return self.forward_test(img_metas, img)
+            # export_occ_logits/compute_uncertainty 모드에서 GT 데이터가 필요하므로
+            # voxel_semantics·mask_camera를 forward_test에 그대로 전달
+            voxel_semantics_gt = self._unwrap_dc(kwargs.get('voxel_semantics'))
+            mask_camera_gt = self._unwrap_dc(kwargs.get('mask_camera'))
+            return self.forward_test(img_metas, img,
+                                     voxel_semantics=voxel_semantics_gt,
+                                     mask_camera=mask_camera_gt)
         elif mode == 'tensor':
             # 구버전 호환: return_loss 기반 dispatch
             if return_loss is not None:
@@ -325,6 +335,7 @@ class SparseOcc(MVXTwoStageDetector):
         occ_size = list(self.pts_bbox_head.occ_size)
         occ_class_names = self.pts_bbox_head.class_names
         free_id = len(occ_class_names) - 1
+        need_raw = getattr(self, 'export_occ_logits', False) or self.compute_uncertainty
 
         results = []
         for b in range(batch_size):
@@ -342,6 +353,99 @@ class SparseOcc(MVXTwoStageDetector):
                 'occ_loc': occ_loc[b:b+1],
             }
 
+            if need_raw and 'semseg_raw' in output:
+                # semseg_raw: [B, C, N_sparse] tensor  →  b번째 샘플: [C, N_sparse]
+                result['semseg_raw'] = output['semseg_raw'][b].cpu()
+                # int32로 저장 (uint8보다 안전, 200×200×16 좌표에서 int16도 충분하나 여유 확보)
+                result['sparse_indices'] = output['occ_loc'][b].cpu().numpy().astype(np.int32)
+
+            # export_occ_logits 모드 (구버전 API 경로): semseg_raw → occ_logits 변환 + GT 세팅
+            # predict()는 이 경로에서 호출되지 않으므로 여기서 직접 처리한다.
+            if getattr(self, 'export_occ_logits', False) and 'semseg_raw' in result:
+                semseg_raw = result.pop('semseg_raw')       # [C, N_sparse] CPU tensor
+                # pseudo-logit: log(semseg + ε)^T  →  [N_sparse, C] float32
+                result['occ_logits'] = (
+                    torch.log(semseg_raw.clamp(min=1e-8)).T.numpy().astype(np.float32)
+                )
+                # GT voxel_semantics[b] — tensor [B, H, W, Z] or list
+                vs_all = kwargs.get('voxel_semantics')
+                if vs_all is not None:
+                    try:
+                        vs = vs_all[b]
+                        result['voxel_semantics'] = (
+                            vs.cpu().numpy() if isinstance(vs, torch.Tensor) else np.asarray(vs)
+                        )
+                    except (IndexError, TypeError):
+                        pass
+                # mask_camera[b] — tensor [B, H, W, Z] or list
+                mc_all = kwargs.get('mask_camera')
+                if mc_all is not None:
+                    try:
+                        mc = mc_all[b]
+                        result['mask_camera'] = (
+                            mc.cpu().numpy() if isinstance(mc, torch.Tensor) else np.asarray(mc)
+                        ).astype(bool)
+                    except (IndexError, TypeError):
+                        pass
+
+            # compute_uncertainty 모드 (구버전 API 경로)
+            # predict()는 이 경로에서 호출되지 않으므로 여기서 직접 처리한다.
+            # export_occ_logits 블록이 semseg_raw를 pop하므로, 두 플래그가 동시에
+            # True이면 compute_uncertainty 블록은 semseg_raw가 없어 동작하지 않는다.
+            # (두 모드는 실험 단계가 달라 동시 사용하지 않는 것이 정상이다.)
+            if self.compute_uncertainty and 'semseg_raw' in result:
+                from .utils import sparse2dense as _s2d
+                semseg = result.pop('semseg_raw')          # [C_pred, N_sparse] CPU tensor
+                sparse_indices = result['sparse_indices']   # [N_sparse, 3] int32 numpy
+
+                occ_size_list = list(self.pts_bbox_head.occ_size)   # [200, 200, 16]
+                num_classes   = self.pts_bbox_head.num_classes       # 18 (free 포함)
+                free_id       = num_classes - 1                      # 17
+
+                # pseudo-logit 에 temperature scaling 적용
+                log_semseg = torch.log(semseg.clamp(min=1e-8))       # [C_pred, N_sparse]
+                T = self.temperature
+                if T is not None and float(T) != 1.0:
+                    log_semseg = log_semseg / float(T)
+
+                # semseg_raw 는 occupied(non-free) 클래스 C_pred=17 개의 logit 만 가짐.
+                # sparse2dense 의 dense_shape 마지막 차원은 num_classes=18 이어야 하므로
+                # 예측 voxel 에도 free class 채널(logit=-30, 사실상 확률 0)을 추가한다.
+                free_col = torch.full(
+                    (1, log_semseg.shape[1]), -30.0, dtype=log_semseg.dtype
+                )                                                     # [1, N_sparse]
+                log_semseg_18 = torch.cat(
+                    [log_semseg, free_col], dim=0
+                )                                                     # [18, N_sparse]
+
+                # 미예측 voxel 기본값: free class 고신뢰도 (logit=0, 나머지=-30)
+                default_logit = torch.full(
+                    (num_classes,), -30.0, dtype=log_semseg.dtype)
+                default_logit[free_id] = 0.0
+
+                sparse_idx_b   = torch.from_numpy(
+                    sparse_indices.astype(np.int64)).unsqueeze(0)    # [1, N_sparse, 3]
+                log_semseg_b   = log_semseg_18.T.unsqueeze(0)        # [1, N_sparse, 18]
+
+                dense_logit, _ = _s2d(
+                    sparse_idx_b, log_semseg_b,
+                    dense_shape=[*occ_size_list, num_classes],
+                    empty_value=default_logit,
+                )                                                     # [1, H, W, Z, 18]
+
+                dense_prob = (
+                    torch.softmax(dense_logit[0], dim=-1)
+                    .numpy().astype(np.float32)
+                )                                                     # [H, W, Z, C]
+
+                _eps = 1e-8
+                result['uncertainty_msp']     = (
+                    (1.0 - dense_prob.max(axis=-1)).astype(np.float32))
+                result['uncertainty_entropy'] = (
+                    -(dense_prob * np.log(dense_prob + _eps)).sum(axis=-1)
+                ).astype(np.float32)
+                result['softmax_probs']       = dense_prob
+
             if 'pano_inst' in output and 'pano_sem' in output:
                 result['pano_inst'] = output['pano_inst'].cpu().numpy().astype(np.int16)[b:b+1]
                 result['pano_sem'] = output['pano_sem'].cpu().numpy().astype(np.uint8)[b:b+1]
@@ -352,7 +456,8 @@ class SparseOcc(MVXTwoStageDetector):
 
     def simple_test_pts(self, x, img_metas, rescale=False):
         outs = self.pts_bbox_head(x, img_metas)
-        outs = self.pts_bbox_head.merge_occ_pred(outs)
+        need_raw = getattr(self, 'export_occ_logits', False) or self.compute_uncertainty
+        outs = self.pts_bbox_head.merge_occ_pred(outs, export_logits=need_raw)
         return outs
 
     def simple_test(self, img_metas, img=None, rescale=False):
@@ -479,6 +584,8 @@ class SparseOcc(MVXTwoStageDetector):
 
         results = self.forward_test(img_metas, img)
 
+        export = getattr(self, 'export_occ_logits', False)
+
         # Det3DDataSample에 결과 저장 (OccupancyMetricHybrid.process()가 직접 읽음)
         for i, (result, data_sample) in enumerate(zip(results, batch_data_samples)):
             # BaseDataElement.set_field로 data field에 등록
@@ -492,5 +599,96 @@ class SparseOcc(MVXTwoStageDetector):
                 name='index',
                 field_type='data',
             )
+
+            if export and 'semseg_raw' in result:
+                semseg = result['semseg_raw']       # [C, N_sparse] tensor
+                sparse_indices = result['sparse_indices']  # [N_sparse, 3] int32 numpy
+
+                # pseudo-logit: log(semseg + ε) → [N_sparse, C]
+                pseudo_logit = torch.log(semseg.clamp(min=1e-8)).T.numpy().astype(np.float32)
+
+                data_sample.set_field(value=pseudo_logit,   name='occ_logits',     field_type='data')
+                data_sample.set_field(value=sparse_indices, name='sparse_indices',  field_type='data')
+
+                # GT voxel_semantics
+                vs = None
+                if hasattr(data_sample, 'gt_fields') and hasattr(data_sample.gt_fields, 'voxel_semantics'):
+                    vs = data_sample.gt_fields.voxel_semantics
+                    if isinstance(vs, torch.Tensor):
+                        vs = vs.cpu().numpy()
+                data_sample.set_field(value=vs, name='voxel_semantics', field_type='data')
+
+                # mask_camera (없으면 None → export 스크립트에서 all-True 처리)
+                mc = None
+                if hasattr(data_sample, 'gt_fields') and hasattr(data_sample.gt_fields, 'mask_camera'):
+                    mc = data_sample.gt_fields.mask_camera
+                    if isinstance(mc, torch.Tensor):
+                        mc = mc.cpu().numpy()
+                data_sample.set_field(value=mc, name='mask_camera', field_type='data')
+
+            # compute_uncertainty=True: dense uncertainty map 계산 및 저장
+            # SavePredictionsEvaluator가 uncertainty_msp, uncertainty_entropy, softmax_probs를
+            # pkl로 저장하고 compute_metrics_from_file_v2.py가 이를 읽어 ECE/NLL/AUROC 계산
+            if self.compute_uncertainty and 'semseg_raw' in result:
+                from .utils import sparse2dense as _s2d
+                semseg = result['semseg_raw']          # [C_pred, N_sparse] CPU tensor
+                sparse_indices = result['sparse_indices']  # [N_sparse, 3] int32 numpy
+
+                occ_size = list(self.pts_bbox_head.occ_size)  # [200, 200, 16]
+                num_classes = self.pts_bbox_head.num_classes   # 18 (free 포함)
+                free_id = num_classes - 1                      # 17
+
+                # pseudo-logit with temperature scaling: log(semseg + ε) / T
+                log_semseg = torch.log(semseg.clamp(min=1e-8))  # [C_pred, N_sparse]
+                T = self.temperature
+                if T is not None and float(T) != 1.0:
+                    log_semseg = log_semseg / float(T)
+
+                # semseg_raw 는 C_pred=17 개의 logit만 가짐.
+                # 예측 voxel에도 free class 채널(logit=-30)을 추가해 18채널로 맞춤.
+                free_col = torch.full(
+                    (1, log_semseg.shape[1]), -30.0, dtype=log_semseg.dtype
+                )                                       # [1, N_sparse]
+                log_semseg_18 = torch.cat(
+                    [log_semseg, free_col], dim=0
+                )                                       # [18, N_sparse]
+
+                # 미예측 voxel은 free class 고신뢰도 기본값으로 채움
+                default_logit = torch.full((num_classes,), -30.0, dtype=log_semseg.dtype)
+                default_logit[free_id] = 0.0
+
+                # sparse → dense logit: [1, H, W, Z, 18]
+                sparse_idx_b = torch.from_numpy(
+                    sparse_indices.astype(np.int64)
+                ).unsqueeze(0)                           # [1, N_sparse, 3]
+                log_semseg_b = log_semseg_18.T.unsqueeze(0)  # [1, N_sparse, 18]
+
+                dense_logit, _ = _s2d(
+                    sparse_idx_b, log_semseg_b,
+                    dense_shape=[*occ_size, num_classes],
+                    empty_value=default_logit,
+                )  # [1, H, W, Z, 18]
+
+                dense_prob = (
+                    torch.softmax(dense_logit[0], dim=-1)
+                    .numpy().astype(np.float32)
+                )  # [H, W, Z, C]
+
+                _eps = 1e-8
+                data_sample.set_field(
+                    value=(1.0 - dense_prob.max(axis=-1)).astype(np.float32),
+                    name='uncertainty_msp',
+                    field_type='data',
+                )
+                data_sample.set_field(
+                    value=(-(dense_prob * np.log(dense_prob + _eps)).sum(axis=-1)).astype(np.float32),
+                    name='uncertainty_entropy',
+                    field_type='data',
+                )
+                data_sample.set_field(
+                    value=dense_prob,
+                    name='softmax_probs',
+                    field_type='data',
+                )
 
         return batch_data_samples

@@ -79,10 +79,16 @@ class LoadMultiViewImageFromMultiSweeps(object):
     def __init__(self,
                  sweeps_num=5,
                  color_type='color',
-                 test_mode=False):
+                 test_mode=False,
+                 online_mode=False):
         self.sweeps_num = sweeps_num
         self.color_type = color_type
         self.test_mode = test_mode
+        # online_mode=True 일 때만 load_online() 경로를 사용한다.
+        # 기존 코드는 world_size==1 이면 자동으로 load_online()을 호출했으나,
+        # 이는 FPS 측정 전용 경로로 실제 이미지를 로드하지 않아 1-GPU 추론 시
+        # IndexError 를 유발한다. 명시적 플래그로 대체한다.
+        self.online_mode = online_mode
 
         self.train_interval = [4, 8]
         self.test_interval = 6
@@ -196,8 +202,9 @@ class LoadMultiViewImageFromMultiSweeps(object):
         if self.sweeps_num == 0:
             return results
 
-        world_size = get_dist_info()[1]
-        if world_size == 1 and self.test_mode:
+        if self.online_mode and self.test_mode:
+            # FPS 측정 전용: 이미지를 실제로 로드하지 않고 메타데이터만 처리.
+            # 일반 추론(1-GPU 포함)에서는 online_mode=False(기본값)를 사용한다.
             return self.load_online(results)
         else:
             return self.load_offline(results)

@@ -50,13 +50,20 @@ if ENGINE_METRICS is not None and DET3D_METRICS is not None:
                 idx = data_sample.get('index') if isinstance(data_sample, dict) else getattr(data_sample, 'index', None)
                 if occ is None or idx is None:
                     continue
-                pred_dict = {'occ_results': occ, 'index': idx}
 
                 def _get(key):
                     """Retrieve a field from both dict-type and object-type data_samples."""
                     if isinstance(data_sample, dict):
                         return data_sample.get(key)
                     return getattr(data_sample, key, None)
+
+                # occ_results 와 index 는 compute_metrics_from_file_v2.py 의
+                # _process_one_chunk 에서 occ_results[i] / index[i] 형태로 접근하므로
+                # 반드시 list 로 래핑해야 한다. (uncertainty 필드도 동일 규칙)
+                pred_dict = {
+                    'occ_results': occ if isinstance(occ, (list, tuple)) else [occ],
+                    'index': idx if isinstance(idx, (list, tuple)) else [idx],
+                }
 
                 flow = _get('flow_results')
                 if flow is not None:

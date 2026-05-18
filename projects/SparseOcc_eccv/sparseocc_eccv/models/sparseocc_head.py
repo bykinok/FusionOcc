@@ -108,33 +108,38 @@ class SparseOccHead(nn.Module):
 
         return loss_dict
     
-    def merge_occ_pred(self, outs):
+    def merge_occ_pred(self, outs, export_logits=False):
         mask_cls = outs['class_preds'][-1].sigmoid()
         mask_pred = outs['mask_preds'][-1].sigmoid()
         occ_indices = outs['occ_preds'][-1][0]
-        
-        sem_pred = self.merge_semseg(mask_cls, mask_pred)  # [B, C, N]
+
+        sem_pred, semseg_full = self.merge_semseg(mask_cls, mask_pred, export_logits=export_logits)
         outs['sem_pred'] = sem_pred
         outs['occ_loc'] = occ_indices
+        if export_logits:
+            outs['semseg_raw'] = semseg_full  # [B, C, N_sparse] — free class 포함
 
         if self.panoptic:
             pano_inst, pano_sem = self.merge_panoseg(mask_cls, mask_pred)  # [B, C, N]
             outs['pano_inst'] = pano_inst
             outs['pano_sem'] = pano_sem
-        
+
         return outs
-    
-    def merge_semseg(self, mask_cls, mask_pred):
+
+    def merge_semseg(self, mask_cls, mask_pred, export_logits=False):
         valid_mask = mask_cls.max(dim=-1).values > self.score_threshold
         mask_cls[~valid_mask] = 0.0
 
-        semseg = torch.einsum("bqc,bqn->bcn", mask_cls, mask_pred)
-        if semseg.shape[1] == self.num_classes:
-            semseg = semseg[:, :-1]
-        
-        cls_score, cls_id = torch.max(semseg, dim=1)
+        semseg_full = torch.einsum("bqc,bqn->bcn", mask_cls, mask_pred)  # [B, C, N_sparse]
+        # free class(마지막) 제외한 slice로 argmax 수행
+        semseg_for_argmax = semseg_full[:, :-1] if semseg_full.shape[1] == self.num_classes else semseg_full
+
+        cls_score, cls_id = torch.max(semseg_for_argmax, dim=1)
         cls_id[cls_score < 0.01] = self.num_classes - 1
-        return cls_id         # B, N
+
+        if export_logits:
+            return cls_id, semseg_full  # [B, N],  [B, C, N_sparse]
+        return cls_id, None  # semseg_full 즉시 참조 해제
     
     def merge_panoseg(self, mask_cls, mask_pred):
         pano_inst, pano_sem = [], []

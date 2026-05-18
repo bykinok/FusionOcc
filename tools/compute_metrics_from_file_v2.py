@@ -71,6 +71,7 @@ def main():
     # Resolve ann_file / data_root from config
     ann_file = args.ann_file
     data_root = args.data_root
+    occ_gt_root = None  # GT 폴더 (token→scene 매핑에 사용)
     if ann_file is None and hasattr(cfg, 'test_evaluator') and isinstance(cfg.test_evaluator, dict):
         ann_file = cfg.test_evaluator.get('ann_file')
     if ann_file is None and hasattr(cfg, 'val_evaluator') and isinstance(cfg.val_evaluator, dict):
@@ -79,6 +80,19 @@ def main():
         data_root = cfg.test_evaluator.get('data_root', '')
     if data_root is None and hasattr(cfg, 'val_evaluator') and isinstance(cfg.val_evaluator, dict):
         data_root = cfg.val_evaluator.get('data_root', '')
+    # occ_gt_root: val_evaluator 또는 test_evaluator 또는 dataset config에서 추출
+    for ev_key in ('val_evaluator', 'test_evaluator'):
+        ev = getattr(cfg, ev_key, None)
+        if isinstance(ev, dict) and ev.get('occ_gt_root'):
+            occ_gt_root = ev['occ_gt_root']
+            break
+    if occ_gt_root is None:
+        for dl_key in ('val_dataloader', 'test_dataloader'):
+            dl = getattr(cfg, dl_key, None)
+            if isinstance(dl, dict) and isinstance(dl.get('dataset'), dict):
+                occ_gt_root = dl['dataset'].get('occ_gt_root')
+                if occ_gt_root:
+                    break
     if not ann_file:
         for key in ('test_dataloader', 'val_dataloader'):
             dl = getattr(cfg, key, None)
@@ -872,6 +886,37 @@ def main():
         point_cloud_range=[-40.0, -40.0, -1.0, 40.0, 40.0, 5.4],
         compute_uncertainty_metrics=True,
     )
+
+    # data_infos에 occ_path가 없을 경우 occ_gt_root를 이용해 보강
+    # (SparseOcc 등 일부 모델은 ann_file에 occ_path 필드가 없음)
+    if occ_gt_root and hasattr(metric, 'data_infos') and metric.data_infos:
+        import glob as _glob
+        _need_enrich = any(
+            not info.get('occ3d_gt_path') and not info.get('occ_path') and not info.get('occ_gt_path')
+            for info in metric.data_infos[:10]
+        )
+        if _need_enrich:
+            _token2scene = {}
+            for _npz in _glob.glob(os.path.join(occ_gt_root, '*/*/*.npz')):
+                _parts = _npz.replace('\\', '/').split('/')
+                if len(_parts) >= 3:
+                    _token2scene[_parts[-2]] = _parts[-3]
+            _enriched = 0
+            for _info in metric.data_infos:
+                if not isinstance(_info, dict):
+                    continue
+                if _info.get('occ3d_gt_path') or _info.get('occ_path') or _info.get('occ_gt_path'):
+                    continue
+                _tok = _info.get('token', _info.get('sample_idx', ''))
+                _scene = _token2scene.get(str(_tok), '')
+                if _scene:
+                    _info['occ_path'] = os.path.join(occ_gt_root, _scene, str(_tok))
+                    _enriched += 1
+            print(f"[occ_path 보강] {_enriched}/{len(metric.data_infos)} data_infos에 occ_path 추가 "
+                  f"(occ_gt_root={occ_gt_root})")
+            if _enriched == 0:
+                print("  Warning: occ_path를 추가하지 못했습니다. "
+                      "occ_gt_root 경로와 ann_file의 token 필드를 확인하세요.")
 
     if not hasattr(metric, 'compute_metrics_from_file'):
         raise SystemExit(
