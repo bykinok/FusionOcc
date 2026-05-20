@@ -183,6 +183,7 @@ data_root = './data/nuscenes/'
 occ_root = data_root
 
 use_mask_camera = True
+use_mask_camera_eval = False  # RayIoU 평가: GT 마스킹 없이 원본 voxel label 유지
 use_mask_camera_1_2 = False
 use_mask_camera_1_4 = False
 use_mask_camera_1_8 = False
@@ -251,7 +252,7 @@ val_dataloader = dict(
         occ_size=occ_size,
         use_ego_frame=True,
         classes=class_names,
-        use_mask_camera=use_mask_camera,
+        use_mask_camera=use_mask_camera_eval,  # RayIoU: GT 마스킹 없이 원본 voxel label 유지 (False)
         use_mask_camera_1_2=use_mask_camera_1_2,
         use_mask_camera_1_4=use_mask_camera_1_4,
         use_mask_camera_1_8=use_mask_camera_1_8,
@@ -285,7 +286,7 @@ test_dataloader = dict(
         occ_size=occ_size,
         use_ego_frame=True,
         classes=class_names,
-        use_mask_camera=use_mask_camera,
+        use_mask_camera=use_mask_camera_eval,  # RayIoU: GT 마스킹 없이 원본 voxel label 유지 (False)
         use_mask_camera_1_2=use_mask_camera_1_2,
         use_mask_camera_1_4=use_mask_camera_1_4,
         use_mask_camera_1_8=use_mask_camera_1_8,
@@ -303,7 +304,7 @@ val_evaluator = [
         data_root=data_root,
         class_names=class_names,
         eval_metric='rayiou',
-        sort_by_timestamp=False,
+        sort_by_timestamp=True,
     )
 ]
 test_evaluator = [
@@ -317,7 +318,7 @@ test_evaluator = [
         data_root=data_root,
         class_names=class_names,
         eval_metric='rayiou',
-        sort_by_timestamp=False,
+        sort_by_timestamp=True,
     )
 ]
 
