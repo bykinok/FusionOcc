@@ -856,28 +856,43 @@ def main():
                         if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d,
                                           nn.BatchNorm3d))
                     )
-                    # spconv implicit_gemm은 fp16을 지원하지 않으므로
-                    # spconv를 사용하는 LiDAR/레이더 관련 모듈만 fp32로 유지.
-                    # pts_backbone 등 일반 ResNet(BEVFormer 등)은 spconv 미사용이므로
-                    # FP16 변환 대상 → spconv 레이어 존재 여부를 확인 후 조건부 FP32 유지.
+                    # spconv implicit_gemm은 fp16을 지원하지 않으므로 LiDAR/레이더
+                    # 파이프라인 전체를 fp32로 유지해야 한다.
+                    #
+                    # 문제 패턴 (수정 전):
+                    #   pts_voxel_encoder (PcPreprocessor, spconv 없음) → fp16 유지
+                    #     → vw_feature (fp16 텐서)
+                    #   pts_backbone (SemanticBranch, spconv 있음) → fp32 복원
+                    #     → torch.mm(fp16_features, fp32_weight) → RuntimeError
+                    #
+                    # 해결책:
+                    #   파이프라인 단위(pts/radar)로 묶어 하나라도 spconv가 있으면
+                    #   파이프라인 내 모든 모듈을 fp32로 유지 → dtype 일관성 보장.
+                    #   BEVFormer 등 spconv 없는 pts_backbone은 영향 없음.
                     def _has_spconv(mod):
                         """모듈 내 spconv 레이어 포함 여부 반환."""
                         for m in mod.modules():
-                            mod_cls = type(m)
-                            if 'spconv' in mod_cls.__module__:
+                            if 'spconv' in type(m).__module__:
                                 return True
                         return False
 
-                    for _attr in ('pts_voxel_encoder', 'pts_middle_encoder',
-                                  'pts_backbone',
-                                  'radar_voxel_encoder', 'radar_backbone',
-                                  'radar_middle_encoder'):
-                        _mod = getattr(_model, _attr, None)
-                        if _mod is not None:
-                            if _has_spconv(_mod):
-                                _mod.float()
-                            # spconv 없는 모듈(BEVFormer pts_backbone 등 일반 ResNet)은
-                            # model.half()로 이미 FP16 변환됐으므로 그대로 유지
+                    def _restore_pipeline_if_spconv(attr_list):
+                        """파이프라인 내 모듈 중 하나라도 spconv를 포함하면
+                        파이프라인 전체를 fp32로 복원한다."""
+                        mods = [
+                            (a, getattr(_model, a, None)) for a in attr_list
+                        ]
+                        mods = [(a, m) for a, m in mods if m is not None]
+                        if any(_has_spconv(m) for _, m in mods):
+                            for _, m in mods:
+                                m.float()
+
+                    _restore_pipeline_if_spconv([
+                        'pts_voxel_encoder', 'pts_middle_encoder', 'pts_backbone',
+                    ])
+                    _restore_pipeline_if_spconv([
+                        'radar_voxel_encoder', 'radar_backbone', 'radar_middle_encoder',
+                    ])
 
                     # ── img_backbone forward_pre_hook: fp32 입력 → fp16 자동 캐스팅 ──
                     # 원인: model.half()로 backbone 가중치가 fp16이 된 상태에서
