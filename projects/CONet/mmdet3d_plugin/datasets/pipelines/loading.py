@@ -54,6 +54,12 @@ class LoadOccupancy(object):
                 f"got '{mask_mode}'."
             )
         self.mask_mode = mask_mode
+        self.grid_size = np.array(grid_size)
+        self.unoccupied = unoccupied
+        self.pc_range = np.array(pc_range)
+        self.voxel_size = (self.pc_range[3:] - self.pc_range[:3]) / self.grid_size
+        self.gt_resize_ratio = gt_resize_ratio
+        self.use_vel = use_vel
 
     def _apply_mask(self, semantics: np.ndarray, cam_mask: np.ndarray) -> np.ndarray:
         """Return masked semantics (255=ignore) based on mask_mode or use_camera_mask."""
@@ -82,13 +88,6 @@ class LoadOccupancy(object):
         else:
             raise ValueError(f"Unknown mask_mode: '{mode}'")
 
-        self.grid_size = np.array(grid_size)
-        self.unoccupied = unoccupied
-        self.pc_range = np.array(pc_range)
-        self.voxel_size = (self.pc_range[3:] - self.pc_range[:3]) / self.grid_size
-        self.gt_resize_ratio = gt_resize_ratio
-        self.use_vel = use_vel
-    
     def __call__(self, results):
         # occ3d 형식 지원: pkl 파일의 occ_path 키 사용
         if self.use_occ3d and 'occ_path' in results:
