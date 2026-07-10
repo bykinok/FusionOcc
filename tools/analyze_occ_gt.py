@@ -7,7 +7,7 @@ Usage:
     
 Example:
     python tools/analyze_occ_gt.py \
-        --pkl-path data/nuscenes/nuscenes_infos_train_occ.pkl
+        --pkl-path data/nuscenes/fusionocc-nuscenes_infos_train.pkl
 """
 
 import argparse
@@ -18,6 +18,9 @@ from tqdm import tqdm
 from collections import defaultdict
 
 
+DIST_RANGES = ['0-20m', '20-35m', '35m+']
+
+
 # OCC3D 클래스 정의 (NuScenes occupancy)
 CLASS_NAMES = [
     'others', 'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle',
@@ -25,6 +28,30 @@ CLASS_NAMES = [
     'driveable_surface', 'other_flat', 'sidewalk',
     'terrain', 'manmade', 'vegetation', 'free'
 ]
+
+
+def get_distance_grid(shape, voxel_size=0.4):
+    """
+    voxel grid의 각 위치에 대한 ego 중심 기준 XY 평면 거리 배열 생성.
+    shape: (W, H, D) 형태의 semantics 배열 크기
+    voxel_size: 미터 단위 voxel 크기 (NuScenes OCC3D 기본값 0.4m)
+    """
+    W, H, D = shape
+    cx, cy = W / 2.0, H / 2.0
+    xs = (np.arange(W) - cx + 0.5) * voxel_size
+    ys = (np.arange(H) - cy + 0.5) * voxel_size
+    xx, yy = np.meshgrid(xs, ys, indexing='ij')  # (W, H)
+    dist_2d = np.sqrt(xx**2 + yy**2)
+    return np.broadcast_to(dist_2d[:, :, np.newaxis], shape)
+
+
+def dist_range_masks(dist_grid):
+    """거리 구간별 bool 마스크 반환 (0-20m, 20-35m, 35m+)"""
+    return {
+        '0-20m':  dist_grid <= 20,
+        '20-35m': (dist_grid > 20) & (dist_grid <= 35),
+        '35m+':   dist_grid > 35,
+    }
 
 
 def load_pkl(pkl_path):
@@ -85,6 +112,13 @@ def analyze_occ_gt(pkl_data, pkl_dir, max_samples=None):
     class_counts_per_sample = []
     samples_with_gt = 0
     samples_without_gt = 0
+
+    # 거리 구간별 클래스 카운터 (총합 / camera mask)
+    class_counts_total_by_dist   = {r: defaultdict(int) for r in DIST_RANGES}
+    class_counts_camera_by_dist  = {r: defaultdict(int) for r in DIST_RANGES}
+
+    # 거리 grid 캐시 (같은 shape의 반복 연산 방지)
+    _dist_cache = {}
     
     print("\nAnalyzing OCC GT data...")
     
@@ -136,14 +170,26 @@ def analyze_occ_gt(pkl_data, pkl_dir, max_samples=None):
             mask_lidar = occ_gt.get('mask_lidar', None)
             
             samples_with_gt += 1
-            
+
+            # 거리 grid (shape 단위로 캐시)
+            shape_key = gt_semantics.shape
+            if shape_key not in _dist_cache:
+                _dist_cache[shape_key] = dist_range_masks(get_distance_grid(shape_key))
+            d_masks = _dist_cache[shape_key]
+
             # 1. 원본 클래스별 갯수 계산
             sample_counts = {}
             for class_id in range(len(CLASS_NAMES)):
                 count = np.sum(gt_semantics == class_id)
                 class_counts_total[class_id] += count
                 sample_counts[class_id] = count
-            
+
+            # 1-dist. 원본 거리 구간별 클래스 카운트
+            for rng, rmask in d_masks.items():
+                seg_r = gt_semantics[rmask]
+                for class_id in range(len(CLASS_NAMES)):
+                    class_counts_total_by_dist[rng][class_id] += int(np.sum(seg_r == class_id))
+
             # 2. camera_mask 적용 후 클래스별 갯수 계산
             if mask_camera is not None:
                 mask_camera_bool = mask_camera.astype(bool)
@@ -151,7 +197,14 @@ def analyze_occ_gt(pkl_data, pkl_dir, max_samples=None):
                 for class_id in range(len(CLASS_NAMES)):
                     count = np.sum(gt_semantics_camera == class_id)
                     class_counts_camera_mask[class_id] += count
-            
+
+                # 2-dist. camera_mask + 거리 구간별 클래스 카운트
+                for rng, rmask in d_masks.items():
+                    combined = rmask & mask_camera_bool
+                    seg_cr = gt_semantics[combined]
+                    for class_id in range(len(CLASS_NAMES)):
+                        class_counts_camera_by_dist[rng][class_id] += int(np.sum(seg_cr == class_id))
+
             # 3. lidar_mask 적용 후 클래스별 갯수 계산
             if mask_lidar is not None:
                 mask_lidar_bool = mask_lidar.astype(bool)
@@ -175,6 +228,8 @@ def analyze_occ_gt(pkl_data, pkl_dir, max_samples=None):
         'class_counts_total': class_counts_total,
         'class_counts_camera_mask': class_counts_camera_mask,
         'class_counts_lidar_mask': class_counts_lidar_mask,
+        'class_counts_total_by_dist': class_counts_total_by_dist,
+        'class_counts_camera_by_dist': class_counts_camera_by_dist,
         'class_counts_per_sample': class_counts_per_sample,
         'samples_with_gt': samples_with_gt,
         'samples_without_gt': samples_without_gt,
@@ -182,11 +237,51 @@ def analyze_occ_gt(pkl_data, pkl_dir, max_samples=None):
     }
 
 
+def _print_dist_table(title, counts_by_dist):
+    """거리 구간별 클래스 카운트 테이블 출력"""
+    col_w = 16
+    header = f"{'Class ID':<10} {'Class Name':<25}"
+    for rng in DIST_RANGES:
+        header += f" {rng:>{col_w}}"
+    header += f" {'Total':>{col_w}}"
+    sep = "-" * (10 + 25 + (col_w + 1) * (len(DIST_RANGES) + 1))
+
+    print(f"\n{title}")
+    print(header)
+    print(sep)
+
+    grand_total = 0
+    range_totals = {r: 0 for r in DIST_RANGES}
+
+    for class_id in range(len(CLASS_NAMES)):
+        class_name = CLASS_NAMES[class_id]
+        row = f"{class_id:<10} {class_name:<25}"
+        row_sum = 0
+        for rng in DIST_RANGES:
+            cnt = counts_by_dist[rng].get(class_id, 0)
+            row += f" {cnt:>{col_w},}"
+            row_sum += cnt
+            range_totals[rng] += cnt
+        row += f" {row_sum:>{col_w},}"
+        grand_total += row_sum
+        print(row)
+
+    print(sep)
+    foot = f"{'Total':<10} {'':<25}"
+    for rng in DIST_RANGES:
+        foot += f" {range_totals[rng]:>{col_w},}"
+    foot += f" {grand_total:>{col_w},}"
+    print(foot)
+    print("=" * (10 + 25 + (col_w + 1) * (len(DIST_RANGES) + 1)))
+
+
 def print_statistics(results):
     """분석 결과 출력"""
     class_counts_total = results['class_counts_total']
     class_counts_camera_mask = results['class_counts_camera_mask']
     class_counts_lidar_mask = results['class_counts_lidar_mask']
+    class_counts_total_by_dist  = results.get('class_counts_total_by_dist', {})
+    class_counts_camera_by_dist = results.get('class_counts_camera_by_dist', {})
     samples_with_gt = results['samples_with_gt']
     samples_without_gt = results['samples_without_gt']
     total_samples = results['total_samples']
@@ -216,7 +311,12 @@ def print_statistics(results):
     print("-"*80)
     print(f"{'Total':<10} {'':<25} {total_voxels:>15,} {100.0:>11.2f}%")
     print("="*80)
-    
+
+    # 1-dist. 원본 거리별 분류
+    if class_counts_total_by_dist:
+        _print_dist_table("[1-dist] 원본 - 거리 구간별 Count (0-20m / 20-35m / 35m+)",
+                          class_counts_total_by_dist)
+
     # 1-1. 원본 통계 (free 제외)
     print(f"\n[1-1] 원본 (free 제외)")
     print(f"{'Class ID':<10} {'Class Name':<25} {'Count':>15} {'Percentage':>12}")
@@ -252,7 +352,12 @@ def print_statistics(results):
         print("-"*80)
         print(f"{'Total':<10} {'':<25} {total_voxels_camera:>15,} {100.0:>11.2f}%")
         print("="*80)
-        
+
+        # 2-dist. camera_mask 거리별 분류
+        if class_counts_camera_by_dist:
+            _print_dist_table("[2-dist] camera_mask - 거리 구간별 Count (0-20m / 20-35m / 35m+)",
+                              class_counts_camera_by_dist)
+
         # 2-1. camera_mask 적용 (free 제외)
         print(f"\n[2-1] camera_mask 적용 (free 제외)")
         print(f"{'Class ID':<10} {'Class Name':<25} {'Count':>15} {'Percentage':>12}")
