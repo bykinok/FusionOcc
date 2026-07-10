@@ -18,8 +18,168 @@ from mmdet3d.registry import TRANSFORMS
 
 from torchvision.transforms.functional import rotate
 
+def build_distance_aware_semantics(
+    semantics: np.ndarray,
+    mask_camera: np.ndarray,
+    mode: str,
+    free_class_id: int = 17,
+    dist_threshold_c: float = 35.0,
+    dist_threshold_d: float = 20.0,
+    dist_threshold_d_prime: float = 35.0,
+    pc_range_x: float = 80.0,
+) -> np.ndarray:
+    """Build distance-aware masked semantics for ablation study.
+
+    The masking is applied by setting non-supervised voxels to 255
+    (ignore_index), consistent with the rest of the codebase.
+
+    condition_C (occupied-only distance mask):
+        - Occupied voxels within dist_threshold_c: always supervised
+          (force mask=1 regardless of mask_camera).
+        - Occupied voxels beyond dist_threshold_c: obey original mask_camera.
+        - Free voxels: obey original mask_camera (untouched).
+
+    condition_D (free-only distance mask):
+        - Free voxels within dist_threshold_d: always supervised
+          (force mask=1 regardless of mask_camera).
+        - Free voxels beyond dist_threshold_d: obey original mask_camera.
+        - Occupied voxels: obey original mask_camera (untouched).
+
+    condition_D_prime (free-only extended distance mask):
+        - Free voxels within dist_threshold_d_prime: always supervised
+          (force mask=1 regardless of mask_camera).
+        - Free voxels beyond dist_threshold_d_prime: obey original mask_camera.
+        - Occupied voxels: obey original mask_camera (untouched).
+        - Extends condition_D by expanding free-voxel supervision from 20 m
+          (dist_threshold_d) to 35 m (dist_threshold_d_prime), verifying
+          whether mid-range (20–35 m) free voxels contribute to RayIoU.
+
+    condition_D_full (free-only full-range supervision):
+        - ALL free voxels: always supervised (force mask=1 regardless of
+          mask_camera), at every distance.
+        - Occupied voxels: obey original mask_camera (untouched).
+        - Fully restores free voxel supervision across all distances,
+          verifying Hypothesis 2 at its extreme: whether complete free-voxel
+          supervision recovers RayIoU to the baseline_without_mask level.
+
+    condition_C_full (occupied-only full-range supervision):
+        - ALL occupied voxels: always supervised (force mask=1 regardless of
+          mask_camera), at every distance.
+        - Free voxels: obey original mask_camera (untouched).
+        - Symmetric counterpart of condition_D_full; fully restores occupied
+          voxel supervision across all distances.
+
+    Args:
+        semantics: (X, Y, Z) uint8 array, raw class ids (no 255s).
+        mask_camera: (X, Y, Z) bool array, True = visible by camera.
+        mode: 'condition_C', 'condition_D', 'condition_D_prime',
+            'condition_D_full', or 'condition_C_full'.
+        free_class_id: Class id for free/empty space (default 17 for occ3d).
+        dist_threshold_c: Metres, occupied-voxel distance threshold (condition_C).
+        dist_threshold_d: Metres, free-voxel distance threshold (condition_D).
+        dist_threshold_d_prime: Metres, free-voxel distance threshold
+            (condition_D_prime). Default 35.0 m.
+        pc_range_x: Total range in X (and Y) in metres.  Default 80.0
+            (covers [-40, 40]).  Used to derive voxel size from grid shape.
+
+    Returns:
+        Modified semantics array (copy) with 255 at non-supervised positions.
+    """
+    semantics = semantics.copy()
+    X, Y, Z = semantics.shape
+
+    # Voxel size in metres (assumes square grid, same size in X and Y)
+    voxel_size = pc_range_x / X  # e.g. 80/200 = 0.4 m for full-res GT
+
+    # Horizontal distance from ego (grid center) for each (X, Y) position
+    # Ego is at the centre of the grid, between indices (X/2 - 1) and (X/2).
+    ego_i = (X - 1) / 2.0   # 99.5 for X=200
+    ego_j = (Y - 1) / 2.0   # 99.5 for Y=200
+    ix = np.arange(X, dtype=np.float32)
+    jy = np.arange(Y, dtype=np.float32)
+    dx = (ix - ego_i) * voxel_size          # (X,)
+    dy = (jy - ego_j) * voxel_size          # (Y,)
+    dist_xy = np.sqrt(dx[:, None] ** 2 + dy[None, :] ** 2)  # (X, Y)
+    # Broadcast to (X, Y, Z) — distance is the same for all Z at a given (X,Y)
+    dist_map = np.broadcast_to(dist_xy[:, :, None], (X, Y, Z))
+
+    is_free = semantics == free_class_id        # (X, Y, Z) bool
+    is_occupied = ~is_free                      # (X, Y, Z) bool
+    invisible = ~mask_camera.astype(bool)       # True where NOT visible
+
+    if mode == 'condition_C':
+        # Voxels to ignore = invisible AND (free OR far-occupied)
+        is_far_occupied = is_occupied & (dist_map >= dist_threshold_c)
+        to_ignore = invisible & (is_free | is_far_occupied)
+    elif mode == 'condition_D':
+        # Voxels to ignore = invisible AND (occupied OR far-free)
+        is_far_free = is_free & (dist_map >= dist_threshold_d)
+        to_ignore = invisible & (is_occupied | is_far_free)
+    elif mode == 'condition_D_prime':
+        # Same structure as condition_D, but free-voxel supervision extended
+        # from dist_threshold_d (20 m) to dist_threshold_d_prime (35 m).
+        # Voxels to ignore = invisible AND (occupied OR far-free)
+        is_far_free = is_free & (dist_map >= dist_threshold_d_prime)
+        to_ignore = invisible & (is_occupied | is_far_free)
+    elif mode == 'condition_D_full':
+        # All invisible free voxels are supervised regardless of distance.
+        # Voxels to ignore = invisible AND occupied (free voxels never ignored)
+        to_ignore = invisible & is_occupied
+    elif mode == 'condition_C_full':
+        # All invisible occupied voxels are supervised regardless of distance.
+        # Voxels to ignore = invisible AND free (occupied voxels never ignored)
+        to_ignore = invisible & is_free
+    else:
+        raise ValueError(
+            f"build_distance_aware_semantics: unknown mode='{mode}'. "
+            "Expected 'condition_C', 'condition_D', 'condition_D_prime', "
+            "'condition_D_full', or 'condition_C_full'."
+        )
+
+    semantics[to_ignore] = 255
+    return semantics
+
+
 @TRANSFORMS.register_module(name='STCOccLoadOccGTFromFileCVPR2023')
 class LoadOccGTFromFileCVPR2023(object):
+    """Load Occ3D-nuScenes GT labels and apply training visibility masking.
+
+    mask_mode controls how non-visible voxels are treated during training:
+        'baseline_with_mask'    – identical to ignore_invisible=True (default).
+                                  All non-visible voxels → 255 (ignored).
+        'baseline_without_mask' – identical to ignore_invisible=False.
+                                  All voxels supervised regardless of visibility.
+        'condition_C'           – occupied voxels within dist_threshold_c metres
+                                  are always supervised; farther occupied + all
+                                  free voxels obey original mask_camera.
+        'condition_D'           – free voxels within dist_threshold_d metres are
+                                  always supervised; farther free + all occupied
+                                  voxels obey original mask_camera.
+        'condition_D_prime'     – free voxels within dist_threshold_d_prime metres
+                                  are always supervised (extends condition_D from
+                                  20 m to 35 m); farther free + all occupied
+                                  voxels obey original mask_camera.
+        'condition_D_full'      – ALL free voxels are always supervised regardless
+                                  of distance; occupied voxels obey original
+                                  mask_camera.
+        'condition_C_full'      – ALL occupied voxels are always supervised
+                                  regardless of distance; free voxels obey
+                                  original mask_camera. Symmetric counterpart
+                                  of condition_D_full.
+
+    Eval is unaffected: OccupancyMetric loads mask_camera independently.
+    """
+
+    _VALID_MASK_MODES = frozenset([
+        'baseline_with_mask',
+        'baseline_without_mask',
+        'condition_C',
+        'condition_D',
+        'condition_D_prime',
+        'condition_D_full',
+        'condition_C_full',
+    ])
+
     def __init__(self,
                  scale_1_2=False,
                  scale_1_4=False,
@@ -29,15 +189,56 @@ class LoadOccGTFromFileCVPR2023(object):
                  flow_gt_path=None,
                  ignore_invisible=False,
                  group_list=None,
+                 mask_mode='baseline_with_mask',
+                 free_class_id=17,
+                 dist_threshold_c=35.0,
+                 dist_threshold_d=20.0,
+                 dist_threshold_d_prime=35.0,
+                 pc_range_x=80.0,
                  ):
         self.scale_1_2 = scale_1_2
         self.scale_1_4 = scale_1_4
         self.scale_1_8 = scale_1_8
-        self.ignore_invisible = ignore_invisible
         self.group_list = group_list
         self.load_mask = load_mask
         self.load_flow = load_flow
         self.flow_gt_path = flow_gt_path
+        self.free_class_id = free_class_id
+        self.dist_threshold_c = dist_threshold_c
+        self.dist_threshold_d = dist_threshold_d
+        self.dist_threshold_d_prime = dist_threshold_d_prime
+        self.pc_range_x = pc_range_x
+
+        # mask_mode takes priority; ignore_invisible kept for back-compat
+        if mask_mode not in self._VALID_MASK_MODES:
+            raise ValueError(
+                f"mask_mode must be one of {sorted(self._VALID_MASK_MODES)}, "
+                f"got '{mask_mode}'."
+            )
+        self.mask_mode = mask_mode
+        # Derive ignore_invisible flag for legacy code paths
+        self.ignore_invisible = (mask_mode == 'baseline_with_mask') or ignore_invisible
+
+    def _apply_mask(self, semantics: np.ndarray, voxel_mask: np.ndarray) -> np.ndarray:
+        """Apply the configured masking mode to a semantics array."""
+        if self.mask_mode == 'baseline_with_mask':
+            semantics = semantics.copy()
+            semantics[voxel_mask == 0] = 255
+        elif self.mask_mode == 'baseline_without_mask':
+            pass  # no modification
+        else:
+            # condition_C, condition_D, or condition_D_prime
+            semantics = build_distance_aware_semantics(
+                semantics=semantics,
+                mask_camera=voxel_mask,
+                mode=self.mask_mode,
+                free_class_id=self.free_class_id,
+                dist_threshold_c=self.dist_threshold_c,
+                dist_threshold_d=self.dist_threshold_d,
+                dist_threshold_d_prime=self.dist_threshold_d_prime,
+                pc_range_x=self.pc_range_x,
+            )
+        return semantics
 
     def __call__(self, results):
         # Safely access occ_gt_path, check for occ_gt_path or occ_path
@@ -64,14 +265,13 @@ class LoadOccGTFromFileCVPR2023(object):
                 f"Please check if the occupancy GT data exists.\n"
                 f"Expected path: {occ_gt_path}/labels.npz"
             )
-        
+
         occ_labels = np.load(occ_gt_label)
         semantics = occ_labels['semantics']
         if self.load_mask:
             voxel_mask = occ_labels['mask_camera']
             results['voxel_mask_camera'] = voxel_mask.astype(bool)
-            if self.ignore_invisible:
-                semantics[voxel_mask==0] = 255
+            semantics = self._apply_mask(semantics, voxel_mask)
         results['voxel_semantics'] = semantics
 
         if self.scale_1_2:
@@ -81,13 +281,12 @@ class LoadOccGTFromFileCVPR2023(object):
                     f"This file is required for multi-scale supervision.\n"
                     f"Expected path: {occ_gt_path}/labels_1_2.npz"
                 )
-            
+
             occ_labels_1_2 = np.load(occ_gt_label_1_2)
             semantics_1_2 = occ_labels_1_2['semantics']
             if self.load_mask and 'mask_camera' in occ_labels_1_2.files:
                 voxel_mask = occ_labels_1_2['mask_camera']
-                if self.ignore_invisible:
-                    semantics_1_2[voxel_mask==0] = 255
+                semantics_1_2 = self._apply_mask(semantics_1_2, voxel_mask)
                 results['voxel_mask_camera_1_2'] = voxel_mask
             results['voxel_semantics_1_2'] = semantics_1_2
 
@@ -98,13 +297,12 @@ class LoadOccGTFromFileCVPR2023(object):
                     f"This file is required for multi-scale supervision.\n"
                     f"Expected path: {occ_gt_path}/labels_1_4.npz"
                 )
-            
+
             occ_labels_1_4 = np.load(occ_gt_label_1_4)
             semantics_1_4 = occ_labels_1_4['semantics']
             if self.load_mask and 'mask_camera' in occ_labels_1_4.files:
                 voxel_mask = occ_labels_1_4['mask_camera']
-                if self.ignore_invisible:
-                    semantics_1_4[voxel_mask==0] = 255
+                semantics_1_4 = self._apply_mask(semantics_1_4, voxel_mask)
                 results['voxel_mask_camera_1_4'] = voxel_mask
             results['voxel_semantics_1_4'] = semantics_1_4
 
@@ -115,13 +313,12 @@ class LoadOccGTFromFileCVPR2023(object):
                     f"This file is required for multi-scale supervision.\n"
                     f"Expected path: {occ_gt_path}/labels_1_8.npz"
                 )
-            
+
             occ_labels_1_8 = np.load(occ_gt_label_1_8)
             semantics_1_8 = occ_labels_1_8['semantics']
             if self.load_mask and 'mask_camera' in occ_labels_1_8.files:
                 voxel_mask = occ_labels_1_8['mask_camera']
-                if self.ignore_invisible:
-                    semantics_1_8[voxel_mask==0] = 255
+                semantics_1_8 = self._apply_mask(semantics_1_8, voxel_mask)
                 results['voxel_mask_camera_1_8'] = voxel_mask
             results['voxel_semantics_1_8'] = semantics_1_8
 

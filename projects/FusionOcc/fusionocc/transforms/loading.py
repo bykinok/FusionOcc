@@ -487,10 +487,175 @@ class PrepareImageSeg(object):
         return results
 
 
+def _build_distance_mask(
+    semantics: np.ndarray,
+    mask_camera: np.ndarray,
+    mode: str,
+    free_class_id: int = 17,
+    dist_threshold_c: float = 35.0,
+    dist_threshold_d: float = 20.0,
+    dist_threshold_d_prime: float = 35.0,
+    pc_range_x: float = 80.0,
+) -> np.ndarray:
+    """Build a modified mask_camera for distance-aware ablation study.
+
+    FusionOcc uses mask_camera as a per-voxel binary weight in the loss, so
+    conditions are implemented by forcing mask_camera=1 for the voxels that
+    should always be supervised, rather than setting voxel_semantics to 255
+    (which would conflict with the model's assertion that all class ids are
+    in [0, 17]).
+
+    condition_C (occupied-only distance mask):
+        - Occupied voxels within dist_threshold_c metres: force mask_camera=1.
+        - Everything else: obey original mask_camera.
+
+    condition_D (free-only distance mask):
+        - Free voxels within dist_threshold_d metres: force mask_camera=1.
+        - Everything else: obey original mask_camera.
+
+    condition_D_prime (free-only extended distance mask):
+        - Free voxels within dist_threshold_d_prime metres: force mask_camera=1.
+        - Everything else: obey original mask_camera.
+        - Extends condition_D from 20 m to 35 m to verify whether mid-range
+          (20–35 m) free voxel supervision also contributes to RayIoU.
+
+    condition_D_full (free-only full-range supervision):
+        - ALL free voxels at every distance: force mask_camera=1.
+        - Occupied voxels: obey original mask_camera.
+        - Fully restores free voxel supervision across all distances.
+
+    condition_C_full (occupied-only full-range supervision):
+        - ALL occupied voxels at every distance: force mask_camera=1.
+        - Free voxels: obey original mask_camera.
+        - Symmetric counterpart of condition_D_full for occupied voxels.
+
+    Returns a modified copy of mask_camera (uint8, same shape as semantics).
+    """
+    mask_camera = mask_camera.copy().astype(np.uint8)
+    X, Y, Z = semantics.shape
+
+    voxel_size = pc_range_x / X
+    ego_i = (X - 1) / 2.0
+    ego_j = (Y - 1) / 2.0
+    ix = np.arange(X, dtype=np.float32)
+    jy = np.arange(Y, dtype=np.float32)
+    dx = (ix - ego_i) * voxel_size
+    dy = (jy - ego_j) * voxel_size
+    dist_xy = np.sqrt(dx[:, None] ** 2 + dy[None, :] ** 2)
+    dist_map = np.broadcast_to(dist_xy[:, :, None], (X, Y, Z))
+
+    is_free = semantics == free_class_id
+    is_occupied = ~is_free
+
+    if mode == 'condition_C':
+        # Near occupied voxels: always supervised
+        force_supervised = is_occupied & (dist_map < dist_threshold_c)
+    elif mode == 'condition_D':
+        # Near free voxels: always supervised
+        force_supervised = is_free & (dist_map < dist_threshold_d)
+    elif mode == 'condition_D_prime':
+        # Near free voxels (extended threshold): always supervised
+        force_supervised = is_free & (dist_map < dist_threshold_d_prime)
+    elif mode == 'condition_D_full':
+        # All free voxels regardless of distance: always supervised
+        force_supervised = is_free
+    elif mode == 'condition_C_full':
+        # All occupied voxels regardless of distance: always supervised
+        force_supervised = is_occupied
+    else:
+        raise ValueError(
+            f"_build_distance_mask: unknown mode='{mode}'. "
+            "Expected 'condition_C', 'condition_D', 'condition_D_prime', "
+            "'condition_D_full', or 'condition_C_full'."
+        )
+
+    mask_camera[force_supervised] = 1
+    return mask_camera
+
+
 @TRANSFORMS.register_module()
 class LoadOccGTFromFile(object):
-    """Load occupancy ground truth from file (same as original)."""
-    
+    """Load occupancy ground truth from file with optional training-time mask.
+
+    FusionOcc applies mask_camera as a per-voxel binary weight in the loss
+    (loss_single). mask_mode modifies mask_camera in the pipeline to control
+    which voxels are supervised during training:
+
+        'baseline_with_mask'    – mask_camera unchanged (model applies it as-is).
+        'baseline_without_mask' – mask_camera forced to all-ones (every voxel
+                                  supervised regardless of camera visibility).
+        'condition_C'           – Occupied voxels within dist_threshold_c metres
+                                  are always supervised (mask_camera forced to 1);
+                                  farther occupied + all free voxels obey the
+                                  original mask_camera.
+        'condition_D'           – Free voxels within dist_threshold_d metres are
+                                  always supervised (mask_camera forced to 1);
+                                  farther free + all occupied voxels obey the
+                                  original mask_camera.
+        'condition_D_prime'     – Free voxels within dist_threshold_d_prime metres
+                                  are always supervised (mask_camera forced to 1);
+                                  farther free + all occupied voxels obey the
+                                  original mask_camera. Extends condition_D from
+                                  20 m to 35 m.
+        'condition_D_full'      – ALL free voxels at every distance are always
+                                  supervised (mask_camera forced to 1); occupied
+                                  voxels obey the original mask_camera.
+        'condition_C_full'      – ALL occupied voxels at every distance are
+                                  always supervised (mask_camera forced to 1);
+                                  free voxels obey the original mask_camera.
+                                  Symmetric counterpart of condition_D_full.
+
+    Eval is unaffected: the evaluator loads mask_camera independently.
+    """
+
+    _VALID_MASK_MODES = frozenset([
+        'baseline_with_mask',
+        'baseline_without_mask',
+        'condition_C',
+        'condition_D',
+        'condition_D_prime',
+        'condition_D_full',
+        'condition_C_full',
+    ])
+
+    def __init__(self,
+                 mask_mode='baseline_with_mask',
+                 free_class_id=17,
+                 dist_threshold_c=35.0,
+                 dist_threshold_d=20.0,
+                 dist_threshold_d_prime=35.0,
+                 pc_range_x=80.0):
+        if mask_mode not in self._VALID_MASK_MODES:
+            raise ValueError(
+                f"mask_mode must be one of {sorted(self._VALID_MASK_MODES)}, "
+                f"got '{mask_mode}'."
+            )
+        self.mask_mode = mask_mode
+        self.free_class_id = free_class_id
+        self.dist_threshold_c = dist_threshold_c
+        self.dist_threshold_d = dist_threshold_d
+        self.dist_threshold_d_prime = dist_threshold_d_prime
+        self.pc_range_x = pc_range_x
+
+    def _apply_mask(self, semantics, mask_camera):
+        """Return (potentially modified) mask_camera based on mask_mode."""
+        if self.mask_mode == 'baseline_with_mask':
+            pass  # mask_camera unchanged; model applies it in loss_single
+        elif self.mask_mode == 'baseline_without_mask':
+            mask_camera = np.ones_like(mask_camera, dtype=np.uint8)
+        else:
+            mask_camera = _build_distance_mask(
+                semantics=semantics,
+                mask_camera=mask_camera,
+                mode=self.mask_mode,
+                free_class_id=self.free_class_id,
+                dist_threshold_c=self.dist_threshold_c,
+                dist_threshold_d=self.dist_threshold_d,
+                dist_threshold_d_prime=self.dist_threshold_d_prime,
+                pc_range_x=self.pc_range_x,
+            )
+        return mask_camera
+
     def __call__(self, results):
         """Load occupancy ground truth data."""
         occ_gt_path = results['occ_gt_path']
@@ -500,6 +665,8 @@ class LoadOccGTFromFile(object):
         semantics = occ_labels['semantics']
         mask_lidar = occ_labels['mask_lidar']
         mask_camera = occ_labels['mask_camera']
+
+        mask_camera = self._apply_mask(semantics, mask_camera)
 
         results['voxel_semantics'] = semantics
         results['mask_lidar'] = mask_lidar
