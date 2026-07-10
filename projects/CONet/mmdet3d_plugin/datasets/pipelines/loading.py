@@ -16,10 +16,30 @@ import copy
 
 @PIPELINES.register_module(force=True)
 class LoadOccupancy(object):
+    """Load occupancy GT with optional distance-aware mask_mode for occ3d format.
+
+    mask_mode controls which voxels are supervised during training (occ3d format only).
+    Non-supervised voxels are set to 255 (ignore label):
+        None / 'baseline_with_mask'    – identical to use_camera_mask=True.
+        'baseline_without_mask'        – identical to use_camera_mask=False.
+        'condition_C_full'             – ALL occupied voxels supervised;
+                                         invisible free voxels → 255.
+        'condition_D_full'             – ALL free voxels supervised;
+                                         invisible occupied voxels → 255.
+
+    When mask_mode is set, it takes priority over use_camera_mask.
+    """
+
+    _VALID_MASK_MODES = frozenset([
+        'baseline_with_mask',
+        'baseline_without_mask',
+        'condition_C_full',
+        'condition_D_full',
+    ])
 
     def __init__(self, to_float32=True, use_semantic=False, occ_path=None, grid_size=[512, 512, 40], unoccupied=0,
-            pc_range=[-51.2, -51.2, -5.0, 51.2, 51.2, 3.0], gt_resize_ratio=1, cal_visible=False, use_vel=False, 
-            use_occ3d=False, use_camera_mask=True):
+            pc_range=[-51.2, -51.2, -5.0, 51.2, 51.2, 3.0], gt_resize_ratio=1, cal_visible=False, use_vel=False,
+            use_occ3d=False, use_camera_mask=True, mask_mode=None, free_class_id=17):
         self.to_float32 = to_float32
         self.use_semantic = use_semantic
         self.occ_path = occ_path
@@ -27,6 +47,40 @@ class LoadOccupancy(object):
         self.use_occ3d = use_occ3d
         # Occ3D: when True, invisible voxels (mask_camera=0) → 255 so loss is only on visible
         self.use_camera_mask = use_camera_mask if use_occ3d else False
+        self.free_class_id = free_class_id
+        if mask_mode is not None and mask_mode not in self._VALID_MASK_MODES:
+            raise ValueError(
+                f"mask_mode must be one of {sorted(self._VALID_MASK_MODES)} or None, "
+                f"got '{mask_mode}'."
+            )
+        self.mask_mode = mask_mode
+
+    def _apply_mask(self, semantics: np.ndarray, cam_mask: np.ndarray) -> np.ndarray:
+        """Return masked semantics (255=ignore) based on mask_mode or use_camera_mask."""
+        mode = self.mask_mode
+        if mode is None or mode == 'baseline_with_mask':
+            if self.use_camera_mask and cam_mask is not None:
+                return np.where(cam_mask, semantics, 255).astype(np.uint8)
+            else:
+                return semantics.astype(np.uint8)
+        elif mode == 'baseline_without_mask':
+            return semantics.astype(np.uint8)
+        elif mode == 'condition_C_full':
+            # ALL occupied voxels supervised; only invisible FREE voxels → 255
+            if cam_mask is not None:
+                is_occupied = (semantics != self.free_class_id)
+                supervised = cam_mask.astype(bool) | is_occupied
+                return np.where(supervised, semantics, 255).astype(np.uint8)
+            return semantics.astype(np.uint8)
+        elif mode == 'condition_D_full':
+            # ALL free voxels supervised; only invisible OCCUPIED voxels → 255
+            if cam_mask is not None:
+                is_free = (semantics == self.free_class_id)
+                supervised = cam_mask.astype(bool) | is_free
+                return np.where(supervised, semantics, 255).astype(np.uint8)
+            return semantics.astype(np.uint8)
+        else:
+            raise ValueError(f"Unknown mask_mode: '{mode}'")
 
         self.grid_size = np.array(grid_size)
         self.unoccupied = unoccupied
@@ -200,11 +254,8 @@ class LoadOccupancy(object):
         if 'mask_camera' in occ_labels.files:
             occ_cam_mask = occ_labels['mask_camera']  # [200, 200, 16] boolean mask
         
-        # Apply camera mask when requested: invisible voxels → 255 (ignore in loss/eval)
-        if occ_cam_mask is not None and self.use_camera_mask:
-            gt_occ = np.where(occ_cam_mask, occ_semantics, 255).astype(np.uint8)
-        else:
-            gt_occ = occ_semantics.astype(np.uint8)
+        # Apply mask based on mask_mode (overrides use_camera_mask when set)
+        gt_occ = self._apply_mask(occ_semantics, occ_cam_mask)
         
         # Store dense GT (original occ3d format: 0=others, 1-16=semantic, 17=free, 255=ignore)
         results['voxel_semantics'] = gt_occ  # For compatibility with SurroundOcc/TPVFormer

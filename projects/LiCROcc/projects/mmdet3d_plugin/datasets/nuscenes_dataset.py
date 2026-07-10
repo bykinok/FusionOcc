@@ -139,6 +139,8 @@ class nuScenesDataset(Dataset):
         use_mask_camera_1_4=False,
         use_mask_camera_1_8=False,
         ann_file=None,
+        mask_mode=None,
+        free_class_id=17,
     ):
         super().__init__()
         
@@ -196,6 +198,19 @@ class nuScenesDataset(Dataset):
         self.use_mask_camera_1_2 = use_mask_camera_1_2
         self.use_mask_camera_1_4 = use_mask_camera_1_4
         self.use_mask_camera_1_8 = use_mask_camera_1_8
+        _VALID_MASK_MODES = frozenset([
+            'baseline_with_mask',
+            'baseline_without_mask',
+            'condition_C_full',
+            'condition_D_full',
+        ])
+        if mask_mode is not None and mask_mode not in _VALID_MASK_MODES:
+            raise ValueError(
+                f"mask_mode must be one of {sorted(_VALID_MASK_MODES)} or None, "
+                f"got '{mask_mode}'."
+            )
+        self.mask_mode = mask_mode
+        self.free_class_id = free_class_id
 
         if ann_file is not None:
             data_path = ann_file
@@ -409,6 +424,39 @@ class nuScenesDataset(Dataset):
         depth_map[coor[:, 1], coor[:, 0]] = depth
         return depth_map
 
+    def _apply_mask(self, semantics: np.ndarray, cam_mask: np.ndarray) -> np.ndarray:
+        """Return masked semantics (255=ignore) based on mask_mode or use_mask_camera.
+
+        mask_mode takes priority over use_mask_camera when set:
+            None / 'baseline_with_mask'  – same as use_mask_camera=True.
+            'baseline_without_mask'      – same as use_mask_camera=False.
+            'condition_C_full'           – ALL occupied supervised; invisible free → 255.
+            'condition_D_full'           – ALL free supervised; invisible occupied → 255.
+        """
+        mode = self.mask_mode
+        if mode is None or mode == 'baseline_with_mask':
+            if self.use_mask_camera and cam_mask is not None:
+                return np.where(cam_mask, semantics, 255).astype(np.uint8)
+            else:
+                return semantics.copy().astype(np.uint8)
+        elif mode == 'baseline_without_mask':
+            return semantics.copy().astype(np.uint8)
+        elif mode == 'condition_C_full':
+            # ALL occupied voxels supervised; only invisible FREE voxels → 255
+            if cam_mask is not None:
+                is_occupied = (semantics != self.free_class_id)
+                supervised = cam_mask.astype(bool) | is_occupied
+                return np.where(supervised, semantics, 255).astype(np.uint8)
+            return semantics.copy().astype(np.uint8)
+        elif mode == 'condition_D_full':
+            # ALL free voxels supervised; only invisible OCCUPIED voxels → 255
+            if cam_mask is not None:
+                is_free = (semantics == self.free_class_id)
+                supervised = cam_mask.astype(bool) | is_free
+                return np.where(supervised, semantics, 255).astype(np.uint8)
+            return semantics.copy().astype(np.uint8)
+        else:
+            raise ValueError(f"Unknown mask_mode: '{mode}'")
 
     def load_occ3d_gt(self, info, flip_type):
         """
@@ -458,11 +506,8 @@ class nuScenesDataset(Dataset):
             )
         occ3d_cam_mask = occ3d_data['mask_camera']  # (200, 200, 16), may be bool or uint8 0/1
         
-        # Apply camera mask if enabled (SurroundOcc: np.where avoids ~uint8 indexing as 255)
-        if self.use_mask_camera:
-            target = np.where(occ3d_cam_mask, occ3d_semantic, 255).astype(np.uint8)
-        else:
-            target = occ3d_semantic.copy().astype(np.uint8)
+        # Apply camera mask / mask_mode (mask_mode takes priority over use_mask_camera)
+        target = self._apply_mask(occ3d_semantic, occ3d_cam_mask)
         # Assert occ3d GT shape (200, 200, 16) to match loss dimensions
         expected_shape = (self.sizes[0], self.sizes[1], self.sizes[2])
         assert target.shape == expected_shape, (

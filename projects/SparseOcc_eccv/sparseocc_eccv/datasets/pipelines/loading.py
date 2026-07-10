@@ -212,10 +212,61 @@ class LoadMultiViewImageFromMultiSweeps(object):
 
 @PIPELINES.register_module()
 class LoadOccGTFromFile(object):
-    def __init__(self, num_classes=18, inst_class_ids=[], load_mask_camera=False):
+    """Load occupancy GT with optional distance-aware mask_camera modification.
+
+    mask_mode controls which voxels are supervised during training by modifying
+    mask_camera (forcing mask_camera=1 for voxels that should always be supervised):
+        None / 'baseline_with_mask'    – mask_camera unchanged (default).
+        'baseline_without_mask'        – mask_camera forced to all-ones.
+        'condition_C_full'             – ALL occupied voxels: force mask_camera=1;
+                                         free voxels obey original mask_camera.
+        'condition_D_full'             – ALL free voxels: force mask_camera=1;
+                                         occupied voxels obey original mask_camera.
+
+    When mask_mode is set, load_mask_camera is implicitly enabled.
+    Eval is unaffected: evaluator loads mask_camera independently.
+    """
+
+    _VALID_MASK_MODES = frozenset([
+        'baseline_with_mask',
+        'baseline_without_mask',
+        'condition_C_full',
+        'condition_D_full',
+    ])
+
+    def __init__(self, num_classes=18, inst_class_ids=[], load_mask_camera=False,
+                 mask_mode=None, free_class_id=17):
         self.num_classes = num_classes
         self.inst_class_ids = inst_class_ids
-        self.load_mask_camera = load_mask_camera
+        self.free_class_id = free_class_id
+        if mask_mode is not None and mask_mode not in self._VALID_MASK_MODES:
+            raise ValueError(
+                f"mask_mode must be one of {sorted(self._VALID_MASK_MODES)} or None, "
+                f"got '{mask_mode}'."
+            )
+        self.mask_mode = mask_mode
+        # mask_mode requires mask_camera to be loaded
+        self.load_mask_camera = load_mask_camera or (mask_mode is not None)
+
+    def _apply_mask_mode(self, mask_camera: np.ndarray, semantics: np.ndarray) -> np.ndarray:
+        """Modify mask_camera according to mask_mode."""
+        mode = self.mask_mode
+        if mode is None or mode == 'baseline_with_mask':
+            return mask_camera
+        elif mode == 'baseline_without_mask':
+            return np.ones_like(mask_camera, dtype=bool)
+        elif mode == 'condition_C_full':
+            # ALL occupied voxels: force mask_camera=1
+            mask_camera = mask_camera.copy()
+            mask_camera[semantics != self.free_class_id] = True
+            return mask_camera
+        elif mode == 'condition_D_full':
+            # ALL free voxels: force mask_camera=1
+            mask_camera = mask_camera.copy()
+            mask_camera[semantics == self.free_class_id] = True
+            return mask_camera
+        else:
+            raise ValueError(f"Unknown mask_mode: '{mode}'")
 
     def __call__(self, results):
         occ_labels = np.load(results['occ_path'])
@@ -259,12 +310,12 @@ class LoadOccGTFromFile(object):
         results['voxel_instances'] = final_instances
         results['instance_class_ids'] = DC(to_tensor(final_instance_class_ids))
 
-        # camera mask 로딩 (선택적)
+        # camera mask 로딩 및 mask_mode 적용
         if self.load_mask_camera:
             if 'mask_camera' in occ_labels.files:
-                results['mask_camera'] = occ_labels['mask_camera'].astype(bool)
+                mask_camera = occ_labels['mask_camera'].astype(bool)
             else:
-                # mask_camera가 없으면 전체 True (모든 voxel 포함)
-                results['mask_camera'] = np.ones(semantics.shape, dtype=bool)
+                mask_camera = np.ones(semantics.shape, dtype=bool)
+            results['mask_camera'] = self._apply_mask_mode(mask_camera, semantics)
 
         return results

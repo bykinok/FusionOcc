@@ -892,22 +892,76 @@ class LoadOccupancy(BaseTransform):
     This transform loads occupancy ground truth from occ3d format (labels.npz)
     and converts it to the format required by the model.
     
+    mask_mode controls which voxels are supervised during training by modifying
+    voxel_semantic_mask (sets non-supervised positions to 255=ignore_label):
+        None / 'baseline_with_mask'    – identical to use_camera_mask=True.
+                                         Invisible voxels → 255 (default).
+        'baseline_without_mask'        – identical to use_camera_mask=False.
+                                         All voxels supervised regardless of visibility.
+        'condition_C_full'             – ALL occupied voxels supervised; invisible
+                                         free voxels → 255.
+        'condition_D_full'             – ALL free voxels supervised; invisible
+                                         occupied voxels → 255.
+
+    When mask_mode is set, it takes priority over use_camera_mask.
+    
     Args:
         use_occ3d (bool): Whether to use occ3d format. Defaults to False.
         pc_range (list): Point cloud range [x_min, y_min, z_min, x_max, y_max, z_max].
         use_camera_mask (bool): Whether to apply camera mask (set invisible voxels to 255).
-            If True, voxels not visible from camera are marked as ignore (255).
-            If False, all voxels keep their original labels. Defaults to True.
+            Ignored when mask_mode is explicitly set. Defaults to True.
+        mask_mode (str | None): Distance-aware masking mode. When set, overrides
+            use_camera_mask. Defaults to None (uses use_camera_mask).
+        free_class_id (int): Class ID for free/empty space. Defaults to 17.
     """
+
+    _VALID_MASK_MODES = frozenset([
+        'baseline_with_mask',
+        'baseline_without_mask',
+        'condition_C_full',
+        'condition_D_full',
+    ])
     
     def __init__(self,
                  use_occ3d: bool = False,
                  pc_range: Optional[list] = None,
-                 use_camera_mask: bool = True):
+                 use_camera_mask: bool = True,
+                 mask_mode: Optional[str] = None,
+                 free_class_id: int = 17):
         super().__init__()
         self.use_occ3d = use_occ3d
         self.pc_range = pc_range
         self.use_camera_mask = use_camera_mask
+        self.free_class_id = free_class_id
+        if mask_mode is not None and mask_mode not in self._VALID_MASK_MODES:
+            raise ValueError(
+                f"mask_mode must be one of {sorted(self._VALID_MASK_MODES)} or None, "
+                f"got '{mask_mode}'."
+            )
+        self.mask_mode = mask_mode
+
+    def _apply_mask(self, gt_occ: np.ndarray, cam_mask: np.ndarray) -> np.ndarray:
+        """Return voxel_semantic_mask based on mask_mode or use_camera_mask."""
+        mode = self.mask_mode
+        if mode is None or mode == 'baseline_with_mask':
+            if self.use_camera_mask:
+                return np.where(cam_mask, gt_occ, 255).astype(np.uint8)
+            else:
+                return gt_occ.astype(np.uint8)
+        elif mode == 'baseline_without_mask':
+            return gt_occ.astype(np.uint8)
+        elif mode == 'condition_C_full':
+            # ALL occupied voxels supervised; only invisible FREE voxels → 255
+            is_occupied = (gt_occ != self.free_class_id)
+            supervised = cam_mask.astype(bool) | is_occupied
+            return np.where(supervised, gt_occ, 255).astype(np.uint8)
+        elif mode == 'condition_D_full':
+            # ALL free voxels supervised; only invisible OCCUPIED voxels → 255
+            is_free = (gt_occ == self.free_class_id)
+            supervised = cam_mask.astype(bool) | is_free
+            return np.where(supervised, gt_occ, 255).astype(np.uint8)
+        else:
+            raise ValueError(f"Unknown mask_mode: '{mode}'")
     
     def transform(self, results: dict) -> dict:
         """Transform function to load occupancy data.
@@ -986,15 +1040,9 @@ class LoadOccupancy(BaseTransform):
             gt_occ = occ_3d_semantic.astype(np.int32)
             
             # Create voxel_semantic_mask for TPVFormer loss calculation
-            # Optionally apply camera mask based on config
-            if self.use_camera_mask:
-                # Apply camera mask: invisible voxels → 255 (ignore label)
-                voxel_semantic_mask = np.where(occ_3d_cam_mask, gt_occ, 255).astype(np.uint8)
-                occ_3d_gt_masked = np.where(occ_3d_cam_mask, gt_occ, 255).astype(np.uint8)
-            else:
-                # No camera mask: use all voxels
-                voxel_semantic_mask = gt_occ.astype(np.uint8)
-                occ_3d_gt_masked = gt_occ.astype(np.uint8)
+            # mask_mode (if set) overrides use_camera_mask
+            voxel_semantic_mask = self._apply_mask(gt_occ, occ_3d_cam_mask)
+            occ_3d_gt_masked = voxel_semantic_mask.copy()
             
             results['voxel_semantic_mask'] = voxel_semantic_mask
             occ_3d_gt_masked = torch.from_numpy(occ_3d_gt_masked)
