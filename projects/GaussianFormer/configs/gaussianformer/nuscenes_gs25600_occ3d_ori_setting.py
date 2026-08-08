@@ -44,8 +44,12 @@ test_pipeline = [
     dict(type='NuScenesAdaptor', use_ego=True, num_cams=6),
 ]
 
+# batch_size=4: see configs/gaussianformer/nuscenes_gs25600.py's comment --
+# same model architecture/geometry-independent memory footprint (measured
+# 16.67GB allocated / 17.04GB reserved at batch_size=1), sized for a 95GB
+# training GPU at ~65% peak utilization. Not verified at actual 95GB scale.
 train_dataloader = dict(
-    batch_size=1,
+    batch_size=4,
     num_workers=2,
     drop_last=True,
     persistent_workers=True,

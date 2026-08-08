@@ -47,8 +47,14 @@ test_pipeline = [
     dict(type='NuScenesAdaptor', use_ego=True, num_cams=6),
 ]
 
+# batch_size=4: see configs/gaussianformer/nuscenes_gs25600.py's comment --
+# measured 16.67GB allocated / 17.04GB reserved at batch_size=1, sized for a
+# 95GB training GPU at ~65% peak utilization. accumulative_counts below is
+# reduced from 8 to 2 to compensate, keeping the "unified" recipe's
+# effective batch size (num_gpus * batch_size * accumulative_counts) at 16,
+# same as every other project's unified config -- see that block's comment.
 train_dataloader = dict(
-    batch_size=1,
+    batch_size=4,
     num_workers=2,
     drop_last=True,
     persistent_workers=True,
@@ -109,7 +115,7 @@ max_epochs = 24
 # `--cfg-options num_gpus=N` if training on a different GPU count.
 train_samples = 28130
 num_gpus = 2
-samples_per_gpu = 1
+samples_per_gpu = 4  # matches train_dataloader.batch_size above
 num_iters_per_epoch = train_samples // (num_gpus * samples_per_gpu)
 
 # lr=2e-4 (not GaussianFormer's own 4e-4, kept in _ori_setting.py) is the
@@ -120,7 +126,10 @@ optim_wrapper = dict(
     type='OptimWrapper',
     optimizer=dict(type='AdamW', lr=2e-4, weight_decay=0.01),
     paramwise_cfg=dict(custom_keys={'img_backbone': dict(lr_mult=0.1)}),
-    accumulative_counts=8,
+    # accumulative_counts=2 (not every other project's 8): batch_size went
+    # 1->4 above, so 2*4*2=16 keeps the same effective batch size (=16)
+    # those other projects' 2(gpu)*1(batch)*8(accum) also produces.
+    accumulative_counts=2,
     clip_grad=dict(max_norm=35, norm_type=2))
 param_scheduler = [
     # start_factor=0.05 -> warmup starts at 1e-5 (0.05 * 2e-4), matching the
