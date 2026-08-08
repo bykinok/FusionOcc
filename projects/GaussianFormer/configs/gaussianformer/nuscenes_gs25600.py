@@ -50,18 +50,8 @@ test_pipeline = [
     dict(type='NuScenesAdaptor', use_ego=False, num_cams=6),
 ]
 
-# batch_size=4: measured real forward+backward+optimizer.step() peak memory
-# at batch_size=1 on this exact config is 16.67GB allocated / 17.04GB
-# reserved (RTX 3090, torch.cuda.max_memory_{allocated,reserved}()); memory
-# scales ~linearly with batch_size here (no batch-independent sparse
-# structure), confirmed by batch_size=2 OOMing on a 24GB GPU. Extrapolating
-# (~2GB fixed model/optimizer/CUDA-context overhead + ~15GB/sample) to a
-# 95GB GPU targeting ~65% peak utilization for fragmentation/eval-time
-# headroom: 2 + 15*4 = 62GB. Not verified at actual 95GB scale (only 24GB
-# GPUs available here) -- watch for OOM on the first real run and back off
-# to 3 if needed.
 train_dataloader = dict(
-    batch_size=4,
+    batch_size=1,
     num_workers=2,
     drop_last=True,
     persistent_workers=True,
