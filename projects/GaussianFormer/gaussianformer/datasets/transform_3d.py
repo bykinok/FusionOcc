@@ -494,7 +494,20 @@ class LoadOccupancyOcc3D(object):
             (only invisible *free* voxels get excluded).
             'condition_D_full': all *free* voxels are always included (only
             invisible *occupied* voxels get excluded) -- mirror of C.
-        use_ego: mirrors LoadOccupancySurroundOcc's use_ego flag.
+        use_ego: NOTE this is the *opposite* sense of
+            `LoadOccupancySurroundOcc`'s same-named flag, because the two
+            GTs have opposite native frames. SurroundOcc GT is natively
+            LIDAR-frame, so its `use_ego=True` converts lidar->ego. Occ3D GT
+            (`_PC_RANGE` above) is natively **ego**-frame already, so here
+            `use_ego=False` (the default, and the only value every
+            `_occ3d*.py` config actually uses) leaves `occ_xyz` as-is in its
+            native ego frame -- required to match `GaussianLifterV2`'s
+            `anchor_pts`, which are also ego-frame when the pipeline's
+            `NuScenesAdaptor(use_ego=True)` supplies `ego2img`. Setting this
+            `use_ego=True` instead converts `occ_xyz` *into LIDAR frame*
+            (via `results['ego2lidar']`, forward direction) -- only useful
+            paired with a `NuScenesAdaptor(use_ego=False)` (`lidar2img`)
+            pipeline, which no existing `_occ3d*.py` config does.
     """
 
     _PC_RANGE = [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]
@@ -554,9 +567,15 @@ class LoadOccupancyOcc3D(object):
 
         xyz = self.xyz.copy()
         if not self.use_ego:
+            # Occ3D GT is natively ego-frame -- no conversion needed.
             occ_xyz = xyz[..., :3]
         else:
-            ego2lidar = np.linalg.inv(results['ego2lidar'])  # 4, 4
+            # Convert the ego-frame grid into LIDAR frame: `ego2lidar` maps
+            # ego points to lidar points directly (see nuscenes_dataset.py's
+            # `ego2lidar = inv(lidar2ego)`), so apply it forward -- do NOT
+            # invert it again here (that previously applied lidar2ego to an
+            # already-ego-frame grid, i.e. a backwards/double transform).
+            ego2lidar = results['ego2lidar']  # 4, 4
             occ_xyz = ego2lidar[None, None, None, ...] @ xyz[..., None]
             occ_xyz = np.squeeze(occ_xyz, -1)[..., :3]
         results['occ_xyz'] = occ_xyz
