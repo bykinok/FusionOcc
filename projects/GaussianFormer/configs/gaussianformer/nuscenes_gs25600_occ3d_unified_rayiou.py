@@ -19,5 +19,5 @@ return_keys = [
 val_dataloader = dict(dataset=dict(pipeline=test_pipeline, return_keys=return_keys))
 test_dataloader = val_dataloader
 
-val_evaluator = dict(type='GaussianFormerRayIoUMetric')
+val_evaluator = dict(type='GaussianFormerRayIoUMetric', _delete_=True)
 test_evaluator = val_evaluator
