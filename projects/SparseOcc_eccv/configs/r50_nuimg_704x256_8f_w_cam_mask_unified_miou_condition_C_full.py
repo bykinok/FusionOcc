@@ -241,7 +241,7 @@ optim_wrapper = dict(
             'img_backbone': dict(lr_mult=0.1),
             'sampling_offset': dict(lr_mult=0.1),
         }),
-    accumulative_counts=4,
+    accumulative_counts=1,
 )
 
 train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=_total_epochs_, val_interval=_total_epochs_)

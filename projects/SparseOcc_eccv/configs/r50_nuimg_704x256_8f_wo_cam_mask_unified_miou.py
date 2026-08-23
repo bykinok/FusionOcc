@@ -5,7 +5,7 @@
   1. [pipeline] BEVAug 추가 (BEV X/Y flip 증강, flip_dx_ratio=0.5, flip_dy_ratio=0.5)
      - voxel_semantics, voxel_instances를 flip
      - ego2lidar를 BDA 행렬로 보정하여 카메라 투영 일관성 유지
-  2. [optim_wrapper] accumulative_counts=8 추가
+  2. [optim_wrapper] accumulative_counts=1 추가
      → effective batch size = batch_size × num_gpus × accumulative_counts
   3. [param_scheduler] iteration 기반 cosine annealing으로 변경
      - warmup: start_factor=0.05 (1e-5/2e-4), by_epoch=False, end=500 iter
@@ -233,9 +233,9 @@ val_evaluator = dict(
 )
 test_evaluator = val_evaluator
 
-# ── Optimizer (unified 변경 사항: accumulative_counts=8 추가) ─────────────────
-# effective batch size = batch_size(8) × num_gpus(2) × accumulative_counts(4) = 64
-# → 원본 ori_miou의 batch_size=8 × num_gpus=8 = 64와 동일한 effective batch 유지
+# ── Optimizer (unified 변경 사항: accumulative_counts=1) ─────────────────
+# effective batch size = batch_size(8) × num_gpus(2) × accumulative_counts(1) = 16
+# → 다른 unified config(BEVFormer/FusionOcc/SurroundOcc 등)와 동일한 effective batch(16)로 통일
 optim_wrapper = dict(
     type='OptimWrapper',
     optimizer=dict(
@@ -249,7 +249,7 @@ optim_wrapper = dict(
             'img_backbone': dict(lr_mult=0.1),
             'sampling_offset': dict(lr_mult=0.1),
         }),
-    accumulative_counts=4,   # effective batch = batch_size(8) × num_gpus(2) × 4 = 64
+    accumulative_counts=1,   # effective batch = batch_size(8) × num_gpus(2) × 1 = 16
 )
 
 # 학습 설정
