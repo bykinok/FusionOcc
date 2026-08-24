@@ -306,8 +306,28 @@ def main():
                 shuffle=False,  # CRITICAL: Must be False for reproducible results
             )
             # Also update dataset test_mode to ensure consistent behavior
+            # (일부 데이터셋, 예: GaussianFormer 자체 NuScenesDataset은 test_mode
+            # 인자를 받지 않고 phase= 로 train/val을 구분하므로, 실제로 이 인자를
+            # 지원하는 데이터셋 클래스에서만 설정한다. 그렇지 않으면
+            # "unexpected keyword argument 'test_mode'"로 데이터셋 빌드가 실패한다.)
             if hasattr(cfg, 'test_dataloader') and hasattr(cfg.test_dataloader, 'dataset'):
-                cfg.test_dataloader.dataset.test_mode = True
+                _ds_type = cfg.test_dataloader.dataset.get('type') if hasattr(
+                    cfg.test_dataloader.dataset, 'get'
+                ) else getattr(cfg.test_dataloader.dataset, 'type', None)
+                _supports_test_mode = True
+                if _ds_type is not None:
+                    try:
+                        from mmengine.registry import DATASETS as _DATASETS_REG
+                        _ds_cls = _DATASETS_REG.get(_ds_type)
+                        if _ds_cls is not None:
+                            import inspect as _inspect_ds
+                            _supports_test_mode = 'test_mode' in _inspect_ds.signature(
+                                _ds_cls.__init__
+                            ).parameters
+                    except Exception:
+                        _supports_test_mode = True
+                if _supports_test_mode:
+                    cfg.test_dataloader.dataset.test_mode = True
             # Store max_samples in cfg for later use
             cfg.max_samples_limit = args.max_samples
 
@@ -918,7 +938,27 @@ def main():
                         f' img_backbone fp16 hook 등록 ({len(_hook_handles)}개).'
                         if _hook_handles else ''
                     )
-                    if hasattr(_model, 'extract_img_feat'):
+                    if hasattr(_model, 'forward_bev'):
+                        # GaussianFormer(BEVSegmentor) 스타일: forward_bev(imgs=..., metas=...,
+                        # points=..., **kwargs). 원본 fp32 imgs 텐서가 extract_img_feat()의
+                        # self.img_backbone 뿐 아니라 lifter(GaussianLifterV2) 내부의 별도
+                        # initialize_backbone(kwargs['imgs']를 직접 소비)에도 그대로 전달되므로,
+                        # extract_img_feat만 패치하면 lifter 쪽에서
+                        # "Input type (FloatTensor) != weight type (HalfTensor)" 오류가 난다.
+                        # 두 소비처의 공통 진입점인 forward_bev에서 한 번만 캐스팅한다.
+                        _orig_forward_bev = _model.forward_bev
+                        def _make_fp16_forward_bev_patch(orig):
+                            def _patched(imgs=None, **kw):
+                                if isinstance(imgs, torch.Tensor):
+                                    imgs = imgs.to(torch.float16)
+                                return orig(imgs=imgs, **kw)
+                            return _patched
+                        _model.forward_bev = _make_fp16_forward_bev_patch(_orig_forward_bev)
+                        _patch_note += (
+                            ' forward_bev fp16 캐스팅 패치 적용'
+                            ' (extract_img_feat + lifter.initialize_backbone 공통 입력).'
+                        )
+                    elif hasattr(_model, 'extract_img_feat'):
                         _orig_extract = _model.extract_img_feat
                         _sig_params = list(
                             _inspect.signature(_orig_extract).parameters.keys()
@@ -967,6 +1007,13 @@ def main():
                 # · STCOcc: 수치 민감 연산 자동 FP32 처리
                 # · 기타 모델: deformable attention @custom_fwd 정상 동작
                 def _fp16_run():
+                    # mmengine TestLoop.run_iter()는 자체적으로
+                    # `with autocast(enabled=self.fp16):`로 매 스텝을 감싸는데
+                    # self.fp16 기본값이 False라서, 안쪽의 enabled=False가
+                    # 바깥쪽 아래 autocast()를 완전히 무력화시킨다
+                    # (nn.Linear 등에서 "float != c10::Half" 로 표면화됨).
+                    # 여기서 미리 True로 맞춰 실제로 autocast가 적용되게 한다.
+                    runner.test_loop.fp16 = True
                     with torch.cuda.amp.autocast():  # type: ignore[attr-defined]
                         runner.test()
                 _run_with_metrics("FP16 inference", _fp16_run)
@@ -1142,6 +1189,9 @@ def main():
                     _int8_desc = 'img_backbone/neck/bev_encoder_backbone=INT8, 나머지=FP16'
                 print(f'\n==> INT8 TRT + FP16 추론 시작 ({_int8_desc})\n')
                 def _int8_run():
+                    # 위 _fp16_run과 동일한 이유로 mmengine TestLoop의 기본
+                    # autocast(enabled=False)가 아래 autocast()를 무력화하는 것을 방지.
+                    runner.test_loop.fp16 = True
                     with torch.cuda.amp.autocast():  # type: ignore[attr-defined]
                         runner.test()
                 _run_with_metrics("INT8+FP16 inference", _int8_run)

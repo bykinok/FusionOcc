@@ -243,11 +243,13 @@ class GaussianLifterV2(BaseLifter):
                     num_subsets = 3
                     sublens = torch.linspace(0, scan.shape[0], num_subsets + 1, dtype=torch.int, device=scan.device)[1:]
                     new_sublens = torch.linspace(0, self.num_anchor, num_subsets + 1, dtype=torch.int, device=scan.device)[1:]
-                    scanidx = farthest_point_sampling(scan, sublens, new_sublens)
+                    # farthest_point_sampling의 CUDA 커널은 float32 텐서만 지원하므로
+                    # (FP16 추론 시 autocast로 scan이 half가 될 수 있음) 명시적으로 캐스팅한다.
+                    scanidx = farthest_point_sampling(scan.float(), sublens, new_sublens)
                 else:
                     # breakpoint()
                     scanidx = farthest_point_sampling(
-                        scan, 
+                        scan.float(),
                         torch.tensor([scan.shape[0]], device=scan.device, dtype=torch.int),
                         torch.tensor([self.num_anchor], device=scan.device, dtype=torch.int))
                 scan = scan[scanidx, :]

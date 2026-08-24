@@ -80,11 +80,14 @@ class GaussianHead(BaseTaskHead):
         return gt_xyz, gt_label
 
     def prepare_gaussian_args(self, gaussians):
-        means = gaussians.means # b, g, 3
-        scales = gaussians.scales # b, g, 3
-        rotations = gaussians.rotations # b, g, 4
-        opacities = gaussians.semantics # b, g, c
-        origi_opa = gaussians.opacities # b, g, 1
+        # local_aggregate(_prob) CUDA 커널과 CPU Cov.inverse()는 float32만
+        # 지원하므로 (FP16 추론 시 encoder 출력이 autocast로 half가 될 수 있음)
+        # 여기서 명시적으로 캐스팅해 아래 전체 계산을 float32로 고정한다.
+        means = gaussians.means.float() # b, g, 3
+        scales = gaussians.scales.float() # b, g, 3
+        rotations = gaussians.rotations.float() # b, g, 4
+        opacities = gaussians.semantics.float() # b, g, c
+        origi_opa = gaussians.opacities.float() # b, g, 1
         if origi_opa.numel() == 0:
             origi_opa = torch.ones_like(opacities[..., :1], requires_grad=False)
         if self.with_emtpy:
@@ -109,14 +112,19 @@ class GaussianHead(BaseTaskHead):
                 opacities = torch.cat([opacities, torch.zeros_like(opacities[..., :1])], dim=-1)
 
         bs, g, _ = means.shape
-        S = torch.zeros(bs, g, 3, 3, dtype=means.dtype, device=means.device)
-        S[..., 0, 0] = scales[..., 0]
-        S[..., 1, 1] = scales[..., 1]
-        S[..., 2, 2] = scales[..., 2]
-        R = get_rotation_matrix(rotations) # b, g, 3, 3
-        M = torch.matmul(S, R)
-        Cov = torch.matmul(M.transpose(-1, -2), M)
-        CovInv = Cov.cpu().inverse().cuda() # b, g, 3, 3
+        # autocast는 matmul류 연산을 실제 입력 dtype과 무관하게 강제로 half로
+        # 캐스팅하므로, 위에서 .float()를 해 둬도 M/Cov가 다시 half가 되어
+        # 아래 CPU inverse()(half 미지원)에서 터진다. FP16 추론에서도 이 블록만은
+        # 명시적으로 autocast를 끄고 float32로 계산한다.
+        with torch.cuda.amp.autocast(enabled=False):
+            S = torch.zeros(bs, g, 3, 3, dtype=torch.float32, device=means.device)
+            S[..., 0, 0] = scales[..., 0]
+            S[..., 1, 1] = scales[..., 1]
+            S[..., 2, 2] = scales[..., 2]
+            R = get_rotation_matrix(rotations) # b, g, 3, 3
+            M = torch.matmul(S, R)
+            Cov = torch.matmul(M.transpose(-1, -2), M)
+            CovInv = Cov.cpu().inverse().cuda() # b, g, 3, 3
         return means, origi_opa, opacities, scales, CovInv
 
     def forward(
