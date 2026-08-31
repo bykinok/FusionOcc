@@ -391,8 +391,15 @@ class SSC_RS(MVXTwoStageDetector):
                 pc_ibatch.append(pc_i)
                 indicator.append(pc_i.size(0) + indicator[-1]) 
             pc = torch.cat(pc_ibatch, dim=0) 
-        vw_feature, coord_ind, full_coord, info = self.pts_voxel_encoder(pc, indicator)  # N, C; B, C, W, H, D       
-        ss_out_dict = self.pts_backbone(vw_feature, coord_ind, full_coord, info)  # B, C, D, H, W
+        # spconv의 SparseConvFunction은 amp.custom_fwd(cast_inputs=torch.float16)로
+        # 구현되어 있어, 바깥에서 torch.cuda.amp.autocast()가 켜져 있으면(예: --fp16 평가)
+        # pts_voxel_encoder/pts_backbone 파라미터를 fp32로 되돌려 놔도 spconv 연산의
+        # 입력이 fp16으로 강제 캐스팅된다. implicit_gemm이 해당 fp16 설정에 대한
+        # 튜닝 프로파일을 찾지 못해 "can't find suitable algorithm" 에러가 발생하므로,
+        # spconv를 포함하는 이 구간만 autocast를 명시적으로 비활성화한다.
+        with torch.cuda.amp.autocast(enabled=False):
+            vw_feature, coord_ind, full_coord, info = self.pts_voxel_encoder(pc, indicator)  # N, C; B, C, W, H, D
+            ss_out_dict = self.pts_backbone(vw_feature, coord_ind, full_coord, info)  # B, C, D, H, W
 
         occupancy = []
         for x in img_metas:
@@ -431,8 +438,11 @@ class SSC_RS(MVXTwoStageDetector):
                 pc_ibatch.append(pc_i)
                 indicator.append(pc_i.size(0) + indicator[-1]) 
             pc = torch.cat(pc_ibatch, dim=0) 
-        vw_feature, coord_ind, full_coord, info = self.radar_voxel_encoder(pc, indicator)  # N, C; B, C, W, H, D       
-        ss_out_dict = self.radar_backbone(vw_feature, coord_ind, full_coord, info)  # B, C, D, H, W
+        # step()과 동일한 이유(spconv의 amp.custom_fwd(cast_inputs=torch.float16))로,
+        # radar_backbone(spconv 포함) 구간만 autocast를 명시적으로 비활성화한다.
+        with torch.cuda.amp.autocast(enabled=False):
+            vw_feature, coord_ind, full_coord, info = self.radar_voxel_encoder(pc, indicator)  # N, C; B, C, W, H, D
+            ss_out_dict = self.radar_backbone(vw_feature, coord_ind, full_coord, info)  # B, C, D, H, W
 
         occupancy = []
         for x in img_metas:
@@ -975,7 +985,7 @@ class SSC_RS(MVXTwoStageDetector):
 
         # if self.use_lidar:
         #     outs, _, _,_ = self.step(points, img_metas, img_feats)
-        
+
         if self.use_radar:
             if self.use_lidar:
                 if self.use_image_for_distill: # img_feats_distill

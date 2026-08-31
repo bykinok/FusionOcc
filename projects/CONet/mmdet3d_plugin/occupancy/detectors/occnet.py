@@ -810,7 +810,11 @@ class OccNet(BaseModel):
                 pred_f = F.interpolate(pred_c, size=list(gt_shape), mode='trilinear', align_corners=False)
                 
                 # Override fine coordinates with refined predictions
-                pred_f[:, :, fine_coord[0], fine_coord[1], fine_coord[2]] = fine_pred.permute(1, 0).unsqueeze(0)
+                # autocast 활성화 여부에 따라 coarse(pred_c 기반 pred_f)와 fine(occ_head
+                # cascade 출력) 브랜치의 실제 dtype이 서로 달라질 수 있어(fp32 vs fp16)
+                # index_put 대상과 소스의 dtype을 명시적으로 맞춘다.
+                pred_f[:, :, fine_coord[0], fine_coord[1], fine_coord[2]] = \
+                    fine_pred.permute(1, 0).unsqueeze(0).to(pred_f.dtype)
             else:
                 pred_f = output['output_voxels_fine'][0]
             SC_metric, _ = self.evaluation_semantic(pred_f, gt_occ, eval_type='SC', visible_mask=visible_mask)

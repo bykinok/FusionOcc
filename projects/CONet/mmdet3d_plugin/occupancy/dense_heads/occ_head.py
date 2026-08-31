@@ -273,29 +273,41 @@ class OccHead(nn.Module):
                         post_trans_b = transform[4].unsqueeze(0) if transform[4].dim() == 2 else transform[4][b:b+1]
                         bda_for_projection = transform[5][None] if transform[5].dim() == 2 else transform[5][b:b+1]
                         
-                        img_uv, img_mask = project_points_on_img(new_coord, rots=rots_b, trans=trans_b,
-                                    intrins=intrins_b, post_rots=post_rots_b,
-                                    post_trans=post_trans_b, bda_mat=bda_for_projection,
-                                    W_img=W_img_val, H_img=H_img_val,
-                                    pts_range=self.point_cloud_range, W_occ=W_new, H_occ=H_new, D_occ=D_new)  # [n_cam, 1, N, 2], [N, n_cam]
-                        for img_feat in img_feats:
-                            # img_feat[b]: [n_cam, C, H, W], img_uv: [n_cam, 1, N, 2]
-                            # fp16 grid_sample + sum(cameras) 시 fp16 오버플로우로 NaN 발생 가능
-                            # → grid_sample 및 카메라 누적은 fp32로 수행
-                            _feat_dtype = img_feat[b].dtype
-                            sampled_img_feat = F.grid_sample(img_feat[b].float().contiguous(), img_uv.float().contiguous(), align_corners=True, mode='bilinear', padding_mode='zeros')
-                            # sampled_img_feat: [n_cam, C, 1, N]
-                            
-                            # img_mask: [B, N, n_cam] -> [n_cam, B, N] -> squeeze to [n_cam, N]
-                            img_mask_reshaped = img_mask.permute(2, 0, 1).squeeze(1)  # [n_cam, N]
-                            
-                            sampled_img_feat = sampled_img_feat * img_mask_reshaped.float()[:, None, None, :]  # [n_cam, C, 1, N]
-                            sampled_img_feat = sampled_img_feat.sum(0)  # [C, 1, N]  fp32 누적으로 오버플로우 방지
-                            sampled_img_feat = sampled_img_feat[:, 0, :]  # [C, N]
-                            sampled_img_feat = self.img_mlp(sampled_img_feat.permute(1, 0).to(_feat_dtype))  # [N, C]
-                            
-                            append_feats.append(sampled_img_feat)  # N C
-                            assert torch.isnan(sampled_img_feat).sum().item() == 0
+                        # 카메라 투영(project_points_on_img)의 행렬곱/나눗셈, grid_sample,
+                        # 카메라 누적, img_mlp(GroupNorm 포함)까지 이 블록 전체는 fp16
+                        # 정밀도로는 NaN/Inf가 나기 쉬운 연산이라 항상 fp32로 계산해왔다.
+                        # 그런데 autocast가 켜져 있으면(--fp16 평가) autocast가 matmul 등을
+                        # 자동으로 fp16으로 재캐스팅해버려 명시적 .float() 캐스팅이 무력화되고
+                        # NaN이 재발한다. 이 블록 전체에서 autocast를 명시적으로 꺼서
+                        # 항상 진짜 fp32로 계산되도록 보장한다.
+                        with torch.cuda.amp.autocast(enabled=False):
+                            img_uv, img_mask = project_points_on_img(new_coord, rots=rots_b, trans=trans_b,
+                                        intrins=intrins_b, post_rots=post_rots_b,
+                                        post_trans=post_trans_b, bda_mat=bda_for_projection,
+                                        W_img=W_img_val, H_img=H_img_val,
+                                        pts_range=self.point_cloud_range, W_occ=W_new, H_occ=H_new, D_occ=D_new)  # [n_cam, 1, N, 2], [N, n_cam]
+                            for img_feat in img_feats:
+                                # img_feat[b]: [n_cam, C, H, W], img_uv: [n_cam, 1, N, 2]
+                                # fp16 grid_sample + sum(cameras) 시 fp16 오버플로우로 NaN 발생 가능
+                                # → grid_sample 및 카메라 누적은 fp32로 수행
+                                sampled_img_feat = F.grid_sample(img_feat[b].float().contiguous(), img_uv.float().contiguous(), align_corners=True, mode='bilinear', padding_mode='zeros')
+                                # sampled_img_feat: [n_cam, C, 1, N]
+
+                                # img_mask: [B, N, n_cam] -> [n_cam, B, N] -> squeeze to [n_cam, N]
+                                img_mask_reshaped = img_mask.permute(2, 0, 1).squeeze(1)  # [n_cam, N]
+
+                                sampled_img_feat = sampled_img_feat * img_mask_reshaped.float()[:, None, None, :]  # [n_cam, C, 1, N]
+                                sampled_img_feat = sampled_img_feat.sum(0)  # [C, 1, N]  fp32 누적으로 오버플로우 방지
+                                sampled_img_feat = sampled_img_feat[:, 0, :]  # [C, N]
+                                # autocast가 켜져 있으면 상위(img_backbone/neck) 연산 경로에
+                                # 포함된 GroupNorm/LayerNorm 등이 fp32 출력을 낼 수 있어
+                                # img_feat의 dtype이 더 이상 fp16이라고 보장할 수 없다.
+                                # img_mlp의 실제 파라미터 dtype에 맞춰 캐스팅해 dtype mismatch를 방지한다.
+                                _mlp_dtype = next(self.img_mlp.parameters()).dtype
+                                sampled_img_feat = self.img_mlp(sampled_img_feat.permute(1, 0).to(_mlp_dtype))  # [N, C]
+
+                                append_feats.append(sampled_img_feat)  # N C
+                                assert torch.isnan(sampled_img_feat).sum().item() == 0
                     
                     fine_output = self.fine_mlp(torch.cat(append_feats, dim=1))
                     output['fine_output'].append(fine_output)
