@@ -44,6 +44,14 @@ def main():
                         help='Override config options, e.g. test_evaluator.ann_file=other.pkl')
     parser.add_argument('--verbose', action='store_true',
                         help='Print all metric keys (radius/height/class breakdown). Default: summary only.')
+    parser.add_argument('--sort-by-timestamp', dest='sort_by_timestamp', action='store_true', default=True,
+                        help='Sort ann_file data_infos by timestamp before matching pred index (default: True). '
+                             'Only correct if the model\'s dataset ALSO iterates in timestamp order at prediction '
+                             'time (true for SparseOcc/NuSceneOcc). Use --no-sort-by-timestamp for datasets '
+                             '(e.g. GaussianFormer) whose ann_file is already stored in prediction-index order — '
+                             're-sorting by timestamp there scrambles the pred<->GT correspondence entirely.')
+    parser.add_argument('--no-sort-by-timestamp', dest='sort_by_timestamp', action='store_false',
+                        help='Keep ann_file data_infos in their original (unsorted) order. See --sort-by-timestamp.')
     args = parser.parse_args()
 
     from mmengine.config import Config
@@ -61,6 +69,7 @@ def main():
     # Resolve ann_file and data_root from config if not provided
     ann_file = args.ann_file
     data_root = args.data_root
+    occ_gt_root = None  # GT 폴더 (token→scene 매핑에 사용, occ_path 보강용)
     if ann_file is None and hasattr(cfg, 'test_evaluator') and isinstance(cfg.test_evaluator, dict):
         ann_file = cfg.test_evaluator.get('ann_file')
     if ann_file is None and hasattr(cfg, 'val_evaluator') and isinstance(cfg.val_evaluator, dict):
@@ -69,6 +78,19 @@ def main():
         data_root = cfg.test_evaluator.get('data_root', '')
     if data_root is None and hasattr(cfg, 'val_evaluator') and isinstance(cfg.val_evaluator, dict):
         data_root = cfg.val_evaluator.get('data_root', '')
+    # occ_gt_root: val_evaluator 또는 test_evaluator 또는 dataset config에서 추출
+    for ev_key in ('val_evaluator', 'test_evaluator'):
+        ev = getattr(cfg, ev_key, None)
+        if isinstance(ev, dict) and ev.get('occ_gt_root'):
+            occ_gt_root = ev['occ_gt_root']
+            break
+    if occ_gt_root is None:
+        for dl_key in ('val_dataloader', 'test_dataloader'):
+            dl = getattr(cfg, dl_key, None)
+            if isinstance(dl, dict) and isinstance(dl.get('dataset'), dict):
+                occ_gt_root = dl['dataset'].get('occ_gt_root')
+                if occ_gt_root:
+                    break
     if not ann_file:
         for key in ('test_dataloader', 'val_dataloader'):
             dl = getattr(cfg, key, None)
@@ -114,10 +136,42 @@ def main():
         data_root=data_root or '',
         dataset_name='occ3d',
         eval_metric='miou',
-        sort_by_timestamp=True,
+        sort_by_timestamp=args.sort_by_timestamp,
         point_cloud_range=[-40.0, -40.0, -1.0, 40.0, 40.0, 5.4],
         compute_uncertainty_metrics=True,  # 파일 기반 스크립트에서는 uncertainty 메트릭 계산
     )
+
+    # data_infos에 occ_path가 없을 경우 occ_gt_root를 이용해 보강
+    # (SparseOcc_eccv 등 일부 프로젝트는 ann_file에 occ_path 필드가 없고,
+    #  occ_gt_root + token→scene 매핑으로 런타임에 구축해야 함)
+    if occ_gt_root and hasattr(metric, 'data_infos') and metric.data_infos:
+        import glob
+        need_enrich = any(
+            not info.get('occ3d_gt_path') and not info.get('occ_path') and not info.get('occ_gt_path')
+            for info in metric.data_infos[:10]
+        )
+        if need_enrich:
+            token2scene = {}
+            for npz_path in glob.glob(os.path.join(occ_gt_root, '*/*/*.npz')):
+                parts = npz_path.replace('\\', '/').split('/')
+                if len(parts) >= 3:
+                    token2scene[parts[-2]] = parts[-3]
+            enriched = 0
+            for info in metric.data_infos:
+                if not isinstance(info, dict):
+                    continue
+                if info.get('occ3d_gt_path') or info.get('occ_path') or info.get('occ_gt_path'):
+                    continue
+                token = info.get('token', info.get('sample_idx', ''))
+                scene = token2scene.get(str(token), '')
+                if scene:
+                    info['occ_path'] = os.path.join(occ_gt_root, scene, str(token))
+                    enriched += 1
+            print(f"[occ_path 보강] {enriched}/{len(metric.data_infos)} data_infos에 occ_path 추가 "
+                  f"(occ_gt_root={occ_gt_root})")
+            if enriched == 0:
+                print("  Warning: occ_path를 추가하지 못했습니다. "
+                      "occ_gt_root 경로와 ann_file의 token 필드를 확인하세요.")
 
     if not hasattr(metric, 'compute_metrics_from_file'):
         raise SystemExit("OccupancyMetric does not have compute_metrics_from_file. Update STCOcc metric.")

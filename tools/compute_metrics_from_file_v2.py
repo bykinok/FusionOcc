@@ -55,6 +55,14 @@ def main():
                         help='Override config options, e.g. test_evaluator.ann_file=other.pkl')
     parser.add_argument('--verbose', action='store_true',
                         help='Print all metric keys. Default: summary only.')
+    parser.add_argument('--sort-by-timestamp', dest='sort_by_timestamp', action='store_true', default=True,
+                        help='Sort ann_file data_infos by timestamp before matching pred index (default: True). '
+                             'Only correct if the model\'s dataset ALSO iterates in timestamp order at prediction '
+                             'time (true for SparseOcc/NuSceneOcc). Use --no-sort-by-timestamp for datasets '
+                             '(e.g. GaussianFormer) whose ann_file is already stored in prediction-index order — '
+                             're-sorting by timestamp there scrambles the pred<->GT correspondence entirely.')
+    parser.add_argument('--no-sort-by-timestamp', dest='sort_by_timestamp', action='store_false',
+                        help='Keep ann_file data_infos in their original (unsorted) order. See --sort-by-timestamp.')
     args = parser.parse_args()
 
     from mmengine.config import Config
@@ -882,7 +890,7 @@ def main():
         data_root=data_root or '',
         dataset_name='occ3d',
         eval_metric='miou',
-        sort_by_timestamp=True,
+        sort_by_timestamp=args.sort_by_timestamp,
         point_cloud_range=[-40.0, -40.0, -1.0, 40.0, 40.0, 5.4],
         compute_uncertainty_metrics=True,
     )
