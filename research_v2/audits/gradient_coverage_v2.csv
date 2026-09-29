@@ -1,0 +1,21 @@
+loss_name,test_name,status,detail
+CE_focal_primitive,lambda1_equivalence,PASS,value_match=True grad_match=True max_grad_diff=0.000e+00
+sem_scal,lambda1_equivalence,PASS,value_match=True (6.100930 vs 6.100930) grad_match=True max_grad_diff=0.000e+00
+geo_scal,lambda1_equivalence,PASS,value_match=True (2.813300 vs 2.813300) grad_match=True max_grad_diff=0.000e+00
+sem_scal,lambda0_zero_gradient,PASS,n_invfree_voxels=11 max_abs_grad_at_invfree=0.000e+00
+geo_scal,lambda0_zero_gradient,PASS,n_invfree_voxels=11 max_abs_grad_at_invfree=0.000e+00
+CE_focal_primitive,lambda0_zero_gradient,PASS,n_invfree_voxels=11 max_abs_grad_at_invfree=0.000e+00
+ALL,edge_case_all_ignore,FAIL,sem_scal=EXCEPTION(division by zero); geo_scal=finite; CE_focal=finite
+ALL,edge_case_no_free,PASS,sem_scal=finite; geo_scal=finite; CE_focal=finite
+ALL,edge_case_no_occupied,FAIL,sem_scal=EXCEPTION(division by zero); geo_scal=finite; CE_focal=finite
+ALL,edge_case_all_visible,PASS,sem_scal=finite; geo_scal=finite; CE_focal=finite
+ALL,edge_case_all_invisible,PASS,sem_scal=finite; geo_scal=finite; CE_focal=finite
+ALL,edge_case_missing_class_5,PASS,sem_scal=finite; geo_scal=finite; CE_focal=finite
+sem_scal,gradient_norms_lambda0.25,INFO,free_visible=2.2320e-04 occupied_visible=6.9683e-03 inv_occupied=8.0318e-03 inv_free=5.6629e-05
+geo_scal,gradient_norms_lambda0.25,INFO,free_visible=1.5522e-01 occupied_visible=2.4194e-04 inv_occupied=2.4630e-04 inv_free=3.9214e-02
+CE_focal_primitive,gradient_norms_lambda0.25,INFO,free_visible=6.1556e-03 occupied_visible=5.8845e-03 inv_occupied=6.0051e-03 inv_free=1.5048e-03
+sem_scal,allterm_harddrop,PASS,via ignore_index relabel (not voxel_weight=0): max_abs_grad_at_invfree=0.000e+00
+geo_scal,allterm_harddrop,PASS,via ignore_index relabel (not voxel_weight=0): max_abs_grad_at_invfree=0.000e+00
+CE_focal_primitive,allterm_harddrop,PASS,via ignore_index relabel (not voxel_weight=0): max_abs_grad_at_invfree=0.000e+00
+lovasz,allterm_harddrop,NOT_TESTED,"lovasz_softmax honors ignore_index=255 when its INPUT TARGET carries it (dataset-level baseline_with_mask path), but get_voxel_loss's lambda_inv_free mechanism never mutates the target passed to lovasz_softmax at any lambda -- so in the ACTUAL training code path, lovasz's invisible-free gradient is never dropped by lambda, hard or soft, at any lambda<1."
+lovasz,relative_share_vs_lambda,CHECKED,"lovasz_norm=2.4051e-04 (constant, unweighted at every lambda); other3_combined_norm: lambda=1.0->6.0363e-02, lambda=0.25->4.6649e-02, lambda=0.0->0.0000e+00; lovasz_share_of_total: lambda=1.0->0.004, lambda=0.25->0.005, lambda=0.0->1.000; monotonic_increase_as_lambda_decreases=True (template said not to ASSUME this -- this run's synthetic data CONFIRMS the direction, real training-batch magnitudes may differ; treat as directionally-checked not proven in general)"

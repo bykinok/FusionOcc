@@ -1,0 +1,55 @@
+{
+  "profile_id": "screen_e12_v1",
+  "resolved_at": "2026-09-27",
+  "source_configs_example": "projects/STCOcc/configs/stcocc_r50_704x256_16f_occ3d_e12_stage1_nomask.py (all Stage1/2 configs share this structure, differing only in mask_mode / lambda_inv_free / Collect3D keys)",
+
+  "optimizer_updates": {
+    "total_epoch": 12,
+    "num_iters_per_epoch": 1758,
+    "total_optimizer_updates": 21096,
+    "derivation": "num_iters_per_epoch = 28130 // (num_gpus=2 * samples_per_gpu=8); total = 12 * 1758",
+    "effective_batch": 16,
+    "gradient_accumulation": "none (accumulative_counts not set / default 1)"
+  },
+
+  "lr_schedule": {
+    "warmup": "LinearLR start_factor=0.001, by_epoch=False, begin=0, end=200 iters",
+    "main": "StepLR by_epoch=False, step_size=total_epoch*num_iters_per_epoch=21096, gamma=0.1",
+    "interpretation": "StepLR with step_size == total run length means the LR NEVER actually steps down within the 12-epoch run -- gamma=0.1 only fires exactly at the final boundary iteration. Effectively constant LR=1e-4 for the whole run after warmup, given this profile's total-length definition. This is NOT a compressed 36-epoch schedule and NOT the front portion of a 36-epoch schedule either -- it is a schedule whose length parameter is DEFINED IN TERMS OF total_epoch=12 itself (self-referential: step_size depends on the same total_epoch used for max_iters). Needs explicit confirmation against native_full_v1's actual 36-epoch config to know whether native_full also self-references or uses a fixed absolute step_size independent of epoch count -- RESOLVE_DURING_P0/P1, currently PENDING (native repo not fetched in this audit per spec 1.2 'do not overwrite with official repo, use actual local config/log' -- and no native_full config exists locally yet)."
+  },
+
+  "amp_syncbn_ema_freeze": {
+    "amp": "OFF -- optim_wrapper type='OptimWrapper' (not AmpOptimWrapper); no --amp flag used in any training invocation this session. Loss functions (geo_scal/sem_scal/lovasz) additionally force torch.amp.autocast(...,enabled=False) internally regardless, so even if AMP were enabled elsewhere those 3 losses would still run FP32.",
+    "syncbn": "NOT explicitly configured (no SyncBN conversion in configs); img_backbone norm_cfg=BN2d (per-GPU BatchNorm, not synchronized across the 2 DDP ranks). norm_eval=False, frozen_stages=-1 (entire backbone trainable, BN in train mode).",
+    "ema": "custom_hooks=[MEGVIIEMAHook(init_updates=10560, interval=2*num_iters_per_epoch=3516)] IS ACTIVE on every Stage1/Stage2 config in this work.",
+    "ema_finding": "CRITICAL AUDIT FINDING: every evaluation run in this session's prior work (Stage1 nomask/cameramask, Stage2 l000/l025/l050/l075) evaluated the RAW checkpoint (iter_21096.pth), never the EMA checkpoint (iter_21096_ema.pth), even though both exist on disk for every run. If the intended/native STCOcc protocol reports EMA-averaged weights as the canonical final model (a common reason to add an EMA hook named after the org that popularized it in this codebase lineage), then EVERY absolute number in the prior summary.csv and in the report already shared with the user's professor may be measured on the wrong checkpoint variant. Because the same mistake was applied UNIFORMLY across every compared run (all baselines and all lambda points), the RELATIVE ranking/trend across lambda is likely still informative, but ABSOLUTE numbers should not be treated as the final 'native protocol' result until this is resolved. RESOLUTION NEEDED: (a) confirm from STCOcc's official repo/paper (or from re-deriving 'init_updates=10560' -- for effective_batch=16 that's 10560/1758 ≈ 6.0 epochs-worth) whether EMA or raw weights are the reported model, and (b) re-evaluate at least one representative checkpoint's EMA variant to quantify the delta before treating current numbers as anything beyond 'screen_e12_v1, raw-weight, single-seed' evidence.",
+    "backbone_pretrained": "load_from='projects/STCOcc/pretrain/forward_projection-r50-4d-stereo-pretrained.pth' for every run (same initialization across all compared runs, consistent with spec 3.1's initialization-match requirement)."
+  },
+
+  "frame_input": {
+    "raw_stereo_adjacent_frames": "multi_adj_frame_id_cfg=(1,2,1) -> num_adj=1 (only ONE adjacent frame feeds the forward-projection stereo depth cost-volume, not 16).",
+    "temporal_history_buffer": "history_frame_num=[16,8,4] -- the '16-frame' in this model's name refers to a RECURRENT history buffer maintained by the backward-projection/temporal-fusion cascade (3 stages, history length 16 at full res down to 4 at 1/8 res), NOT 16 raw images stacked into the image backbone at once. This distinction matters for any later cross-model frame-count comparison (spec 3.1's 'padding/repeated frame을 별도 관측으로 세지 않는다').",
+    "sequence_sampling": "InfiniteGroupEachSampleInBatchSampler + use_sequence_group_flag=True + sequences_split_num=2 (train) / 1 (test) -- scene-continuous sampling so the recurrent history buffer stays valid across steps; NOT independently verified in this audit beyond reading the config (would need an actual dataloader trace, PENDING)."
+  },
+
+  "loss_scope": {
+    "heads": "single primary occupancy_head",
+    "scales_supervised": "4 (1/1, 1/2, 1/4, 1/8) via num_stage=3 backward-projection cascade, each with its own focal_loss instance sharing the same self.class_weights",
+    "per_scale_loss_coefficient": "intermediate_pred_loss_weight, unchanged by this work",
+    "lambda_inv_free_scope": "applied identically at all 4 scales WHEN the corresponding voxel_mask_camera[_1_x] key was collected (Stage2 configs only); Stage1 configs never collect these keys so lambda logic never activates for Stage1 runs (confirmed: Stage1 configs' model dict does not even pass lambda_inv_free/use_camera_mask, defaulting to lambda_inv_free=1.0 -> weight branch skipped -> byte-for-byte legacy path)."
+  },
+
+  "evaluation_protocol": {
+    "eval_metric_paths": "TWO separate evaluator passes per checkpoint: eval_metric='miou' (+model.compute_uncertainty=True for AUROC/ECE/NLL) and eval_metric='rayiou' (separate config file, no uncertainty flag).",
+    "checkpoint_used_for_eval": "raw iter_21096.pth (see ema_finding above).",
+    "val_set": "official Occ3D-nuScenes val, all 6019 samples, no split -- NOT the calibration/development/confirmation scene-partition this new spec requires. See decisions.jsonl for the resulting reusability classification.",
+    "single_process_eval_confirmed": "every tools/test.py invocation this session omitted --launcher, i.e. ran single-process (world_size=1) -- rules out distributed-sampler-padding duplicate-evaluation risk (spec 4.2 item 10) for all existing numbers.",
+    "metric_equivalence_evidence": "empirically demonstrated in-session (not just claimed): the live/direct evaluator path (tools/test.py mIoU-only, no prediction save) gave mIoU=30.05 for stage1_nomask with ZERO 'Failed to load GT' warnings. The file-based streaming path (tools/compute_metrics_from_file.py, used to also get AUROC/ECE/NLL cheaply) FIRST produced mIoU that diverged and thousands of 'Failed to load GT' warnings due to a spurious leading batch-dim bug in SavePredictionsEvaluator (see loss_inventory.json is unrelated -- bug was in projects/BEVFormer/datasets/save_predictions_metric.py). After fixing that bug and re-running inference+file-based-eval from scratch, the file-based path reproduced mIoU=30.05 EXACTLY with ZERO warnings, matching the live path bit-for-bit on the reported metric. This constitutes a real (not assumed) before/after shape-bug verification and a real (not assumed) metric-equivalence check between the two evaluator code paths, satisfying spec 4.2 items 9 and 3.3's 'saved prediction 저장 버그 수정 전후' requirement -- for this ONE pair of runs. Not yet repeated for every checkpoint (would require re-running the pre-fix buggy code, which no longer makes sense to do)."
+  },
+
+  "amp_numerical_stability": "N/A for this profile -- AMP is OFF end-to-end (see amp_syncbn_ema_freeze.amp), so there is no FP32-vs-AMP delta to characterize for screen_e12_v1. Would become relevant only if native_full_v1 turns out to use AMP.",
+
+  "ddp_reduction": "NOT independently verified (spec 4.2 item 7) -- requires an actual 2-GPU fixed-batch comparison. PENDING, no GPU designated for this audit per user instruction.",
+
+  "resume_equivalence": "NOT tested (spec 4.2 item 8) -- no resume was ever exercised for any of the 6 prior runs (all ran to completion in one shot). PENDING."
+}

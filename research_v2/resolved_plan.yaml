@@ -1,0 +1,247 @@
+# Frozen snapshot of research_v2/plan.yaml as of 2026-09-27 (resource-authorization pass).
+# plan.yaml is the live/editable plan; this file pins what was approved.
+# approved_plan_sha256 still null (no formal --approve-plan hash workflow invoked;
+# approval here is the user's plain-language authorization recorded inline in plan.yaml,
+# see sites/runtime/stages.E1/E2 fields below).
+schema_version: 2
+project: stcocc_selective_free_supervision_diagnostic_first
+created_date: '2026-09-27'
+resolved_during: P0-v2
+
+execution:
+  default_mode: audit_only
+  require_execute_flag: true
+  require_plan_hash_approval: true
+  approved_plan_sha256: null              # UNRESOLVED
+  max_concurrent_training_jobs: 1
+  max_retries_identical_infra_failure: 1
+  allow_environment_reinstall: false
+  allow_destructive_file_changes: false
+  allow_remote_push: false
+  allow_external_model_download: false
+  max_concurrent_evaluation_jobs: 1
+  require_approval_for_expensive_evaluation: true
+  require_stage_review: true
+  automatic_sgh_implementation: false
+  automatic_method_paper_abandonment: false
+
+paths:
+  repository_root: /workspace/FusionOcc
+  output_root: research_v2
+  legacy_summary_csv: /NAS/work_dirs/stcocc_e12_eval/summary.csv   # CONFIRMED EXISTS (unchanged since v1)
+  legacy_checkpoint_glob: /NAS/work_dirs/stcocc_r50_704x256_16f_occ3d_e12_stage*  # CONFIRMED (6 local + 1 remote, see research/resolved_paths.json)
+  evaluator: projects/STCOcc/tools/eval_all_metrics.py   # RESOLVED, same as v1. E2 gap CLOSED 2026-09-27: OccupancyMetric.rayiou_decompose_by_origin flag (default False, no behavior change) added -- see reports/E2_execution_plan.md. E1 gap: bias-injection sweep implemented as a standalone post-hoc script (research_v2/tools/bias_frontier_sweep.py) operating on exported logits, not wired into eval_all_metrics.py itself (mIoU-only; RayIoU still needs the CUDA DVR renderer, out of scope for this script) -- see reports/E1_execution_plan.md
+  train_entrypoint: tools/dist_train.sh (wraps tools/train.py --launcher pytorch)   # RESOLVED, unchanged from v1
+
+sites:
+  local:
+    gpu_ids_available: [0, 1]           # CONFIRMED via nvidia-smi 2026-09-27: both idle (0 MiB used)
+    gpu_ids_designated_for_training: []       # RESOLVED: none -- no training authorized this pass (E1/E2 are diagnostic-only)
+    gpu_ids_designated_for_evaluation: [0, 1] # RESOLVED per user authorization 2026-09-27 ("문제가 되지 않는 한 자원을 충분히 활용해줘")
+  remote_mando_h100_2:
+    ssh_alias: mando-h100_2
+    container: occfrmwrk_h100_2_new
+    gpu_ids_available: [0, 1]           # CONFIRMED via ssh nvidia-smi 2026-09-27: both idle
+    gpu_ids_designated_for_training: []       # RESOLVED: none -- no training authorized this pass
+    gpu_ids_designated_for_evaluation: [0, 1] # RESOLVED per user authorization 2026-09-27
+
+runtime:
+  gpu_ids: {local: [0, 1], remote_mando_h100_2: [0, 1]}   # RESOLVED for E1/E2 evaluation use; no training gpu_ids set (no training this pass)
+  expected_world_size: 2
+  max_gpu_hours: 0                      # RESOLVED: 0 -- no training stage (E3+) authorized this pass
+  max_disk_gb: 2000                     # RESOLVED: 2TB cap on /NAS (30TB free measured 2026-09-27), logits written to /NAS not local overlay (local disk only 86GB free)
+  free_disk_reserve_gb: {local: 30000, remote_mando_h100_2: 11000}  # RESOLVED (carried from v1, re-usable, filesystem hasn't changed)
+  do_not_interrupt_existing_jobs: true
+  use_existing_environment: true        # RESOLVED: torch 2.4.0+cu124, mmcv 2.1.0, mmdet3d 1.3.0, mmengine 0.10.3
+  max_evaluation_gpu_hours: 40           # RESOLVED per user authorization 2026-09-27 -- generous cap for E1 (logit export + bias sweep) + E2 (regression + decomposition runs), well above the ~5-17 GPU-hour estimate in E1/E2 execution plans
+  max_evaluation_jobs: 20                # RESOLVED per user authorization 2026-09-27
+  evaluation_is_not_cost_free: true      # acknowledged -- E1 needs chunked GPU inference for logits when not cached, E2's DVR renderer is GPU-only (see loss_inventory_v2_addendum.json rayiou_origin_builder_audit.finding_3)
+
+profiles:
+  legacy_e12:
+    source: "projects/STCOcc/configs/stcocc_r50_704x256_16f_occ3d_e12_stage{1,2}_*.py (14 files, unchanged since v1, none overwrote a prior config)"
+    reported_epochs: 12
+    reported_effective_batch: 16
+    immutable: true
+  screen_e12_v2:
+    base_config: "SAME FILES as legacy_e12 -- see protocol_manifest.json v2_profile_naming. No separate v2 config was created; the rename is a bookkeeping decision, not a code change."
+    total_optimizer_updates: 21096
+    loss_policy_id: controlled_partial_v1   # resolved identically to v1 -- no distinct legacy_partial policy exists in this repo
+    same_initialization_for_comparisons: true
+  native_full_v2:
+    base_config: "LEADING CANDIDATE, NOT FROZEN: projects/STCOcc/configs/stcocc_r50_704x256_16f_occ3d_36e_miou_ori_setting.py (+ wo_train_cam_mask sibling). Carried forward from v1's sources.md correction, unchanged."
+    total_optimizer_updates: null          # UNRESOLVED (depends on freezing base_config)
+    reported_epoch_target: 36
+    confirm_from_actual_native_recipe: true  # STILL PENDING
+
+data:
+  dataset: Occ3D_nuScenes
+  expected_official_val_samples: 6019
+  freeze_training_split: true
+  partition_unit: scene
+  partition_seed: 20260927
+  val_calibration_fraction: 0.20
+  val_development_fraction: 0.40
+  val_confirmation_fraction: 0.40
+  prior_full_val_exposure: true
+  label_confirmation_as_pristine_test: false
+  require_split_hash: true
+  require_temporal_scene_boundary_check: true
+  split_policy: reuse_existing_frozen_scene_split_else_retrospective_val_20_40_40
+  split_status: "GENERATED 2026-09-27 -- research_v2/splits/stcocc-nuscenes_infos_val_{calibration,development,confirmation}.pkl (30/60/60 scenes, 1202/2410/2407 samples), hash in research_v2/splits/split_manifest_materialized.json. Unrelated pre-existing 50/50 calib/eval pkls (data/nuscenes/stcocc-nuscenes_infos_val_{calib,eval}.pkl) from a prior, different calibration study were NOT reused (different fractions/scope)."
+  fresh_train_holdout_for_existing_checkpoints: false
+  train_holdout_change_requires_comparable_retraining: true
+  allow_automatic_resplit: false
+  new_candidate_selection_on_confirmation: false
+
+loss_policy:
+  mode: controlled_partial_v1
+  actual_classification_kind: "sigmoid focal loss (mmcv.ops.sigmoid_focal_loss / py_sigmoid_focal_loss CPU fallback), confirmed by code reading, NOT plain softmax CE"
+  free_index: 17
+  ignore_indices: [255]
+  applied_heads: "single primary occupancy_head, 4 scales (1/1,1/2,1/4,1/8)"
+  classification_reduction: "weighted mean over included voxels, reduces to plain mean at voxel_weight=None/all-ones (bit-identical, re-verified in this pass: test_lambda1_equivalence still PASS)"
+  sem_scal_weighting: weighted_sufficient_statistics    # RESOLVED, matches template
+  geo_scal_weighting: weighted_sufficient_statistics    # RESOLVED, matches template
+  lovasz: unchanged_and_explicitly_reported             # RESOLVED -- confirmed never reweighted at any lambda, quantified via lovasz_relative_share test this pass
+  preserve_legacy_partial_as_separate_policy: true      # N/A, no distinct legacy_partial exists (unchanged conclusion from v1)
+  require_all_ones_gradient_equivalence: true           # SATISFIED (re-verified this pass)
+  require_per_loss_gradient_coverage_test: true         # SATISFIED for CE/sem_scal/geo_scal; Lovasz/CustomFocalLoss-CUDA-term still not directly unit-tested (same v1 gap)
+  assume_lower_lambda_increases_lovasz_relative_effect: false   # per template's instruction NOT to assume -- CHECKED THIS PASS instead (see loss_inventory_v2_addendum.json lovasz_relative_share_vs_lambda): confirmed true directionally on synthetic data, magnitude not extrapolated to real batches
+  measure_per_loss_gradient_norms: true    # DONE this pass, see gradient_coverage_v2.csv
+  allterm_harddrop_is_separate_diagnostic: true   # DONE this pass via ignore_index-relabel mechanism, distinct from voxel_weight=0
+
+selection:
+  primary_checkpoint: last_epoch
+  primary_checkpoint_variant: "UNRESOLVED -- raw vs EMA, unchanged HIGH-severity open item from v1 (D03)"
+  criteria_provenance: "v1 provisional operating margins, not official acceptance criteria (verbatim template field, acknowledged, unchanged)"
+  freeze_before_new_results: true
+  compare_same_ray_constraints: true
+  finite_grid_frontier_is_upper_bound: false
+  frontier_above_interpretation: SUPPORTS_ADDITIONAL_TRAINING_EFFECT_IN_CHECKED_SCOPE
+  frontier_matched_interpretation: ADDITIONAL_TRAINING_EFFECT_NOT_ESTABLISHED
+  no_auto_mechanism_rejection: true
+  raymean_max_drop_fraction: 0.002
+  ray1_max_drop_fraction: 0.005
+  miou_min_useful_gain_fraction: 0.010
+  numerical_tie_tolerance: 0.000001
+  ordered_ties: [lower_ece, lower_training_gpu_hours]
+  no_feasible_candidate_action: report_nondominated_exploratory_candidates
+  allow_posthoc_threshold_relaxation: false
+
+statistics:
+  full_seeds: [0, 1, 2]
+  screen_seeds: [0]           # CONFIRMED: all 6 legacy runs are seed 0 only
+  bootstrap_unit: scene
+  bootstrap_repeats: 2000
+  paired_comparisons: true
+  noninferiority_one_sided_confidence: 0.95
+  report_training_seed_sd_separately: true
+  non_significance_implies_equivalence: false
+  origin_iou_averaging: aggregate_sufficient_statistics_not_average_slices
+
+stages:
+  P0:
+    enabled: true
+    approved: false
+    status: THIS_PASS
+    max_new_training_jobs: 0
+    training_jobs_run_this_pass: 0
+    evaluation_jobs_run_this_pass: 0   # v2: CPU-only unit tests only, zero GPU evaluation jobs run
+    outputs_produced: [loss_inventory_v2_addendum.json, gradient_coverage_v2.csv, protocol_manifest.json, annotation_manifest.json, split_manifest.json, legacy_reuse.json, P0_audit.md]
+  E1:
+    enabled: true
+    approved: true                     # RESOLVED 2026-09-27: user authorized generous resource use ("문제가 되지 않는 한 자원을 충분히 활용해줘"); eval-only, no training
+    depends_on: [P0]
+    status: "COMPLETE (diagnostic scope: calibration split only, 3 checkpoints) -- see research_v2/reports/E1_execution_plan.md section 'Results'. bias_frontier_sweep.py run on nomask/cameramask/l025; RayIoU-level bias sweep NOT run (mIoU-only diagnostic, by design -- see plan)."
+    max_new_training_jobs: 0
+    requires: [P0_PASS, EVAL_RESOURCE_APPROVAL]
+    eval_resource_approval_status: "GRANTED 2026-09-27 -- max_evaluation_gpu_hours=40, max_evaluation_jobs=20"
+    outputs_produced: [research_v2/diagnostics/E1_bias/nomask_bias_sweep.csv, cameramask_bias_sweep.csv, cameramask_bias_sweep_extended.csv, l025_bias_sweep.csv]
+    key_finding: "cameramask (w/mask) native decode is far from its own post-hoc mIoU optimum (peak near delta=+5, still +0.012 mIoU above delta=0) and even at that optimum remains far below nomask/l025's native mIoU -- a bias shift alone does not close the invisible-region gap for cameramask."
+  E2:
+    enabled: true
+    approved: true                     # RESOLVED 2026-09-27, same authorization as E1
+    depends_on: [P0]
+    status: "COMPLETE (full 6019-sample val set, all 3 checkpoints) -- see research_v2/reports/E2_execution_plan.md section 'Results'."
+    max_new_training_jobs: 0
+    requires: [P0_PASS, ORIGIN_METADATA_AUDIT, EVAL_RESOURCE_APPROVAL]
+    origin_metadata_audit_status: "DONE this pass -- see loss_inventory_v2_addendum.json rayiou_origin_builder_audit. This requirement IS satisfied; EVAL_RESOURCE_APPROVAL now also satisfied."
+    outputs_produced: "/NAS/work_dirs/research_v2_e2_decomp/{nomask,cameramask,l025}_rayiou_decomp/ (work_dir logs; origin-decomposition tables read directly from these run logs)"
+    key_finding: "For all 3 checkpoints, RayIoU by origin time-offset is reference > past > future (e.g. nomask IoU@2: ref=0.455, past=0.388, future=0.357). Future-relative-to-reference origins are the HARDEST condition, not an easy one -- the v2 concern that RayIoU might inflate scores via future-origin leakage is NOT supported by this evidence for these 3 checkpoints. Per v2 judgment rule, this is evidence to report, not grounds to dismiss any candidate."
+  E3:
+    enabled: false
+    approved: false
+    depends_on: [E1, E2]
+    status: NOT_STARTED
+  E4:
+    enabled: false
+    approved: false
+    depends_on: [E3]
+    status: NOT_STARTED
+  E5:
+    enabled: false
+    approved: false
+    depends_on: [E3]
+    status: NOT_STARTED
+  M:
+    enabled: false
+    approved: false
+    depends_on: [E4, E5]
+    status: NOT_STARTED
+  F1:
+    enabled: false
+    approved: false
+    depends_on: [M]
+    status: NOT_STARTED
+  F2:
+    enabled: false
+    approved: false
+    depends_on: [F1]
+    status: NOT_STARTED
+  R:
+    enabled: true
+    approved: false
+    depends_on: []
+    max_new_training_jobs: 0
+    scope: available_evidence_only
+    status: "usable now for a professor_summary reflecting P0-v2 findings; final_research_report/paper_experiment_outline premature until E1/E2 actually run"
+
+reporting:
+  language: Korean
+  primary_result_fractions_internal: true
+  paper_tables_in_percent: true
+  changes_in_percentage_points: true
+  include_failed_and_negative_results: true
+  separate_legacy_screen_full_profiles: true
+  separate_user_reported_and_verified_results: true
+  automatic_cvpr_acceptance_or_novelty_verdict: false
+  source_scope: provided_results_plus_primary_paper_verification_no_local_training_done
+  separate_recomputed_visibility_from_input_support: true
+  include_counterevidence: true
+  force_method_or_mismatch_success: false
+
+plan_version: '2.0'
+supersedes: "v1 execution order. v1 spec PROSE is not recoverable (see research_v2/archive_v1/README.md) but v1's actual resolved outputs remain at research/ untouched."
+
+annotation_contract:
+  label_validity_source: "Occ3D GT generation pipeline (external); ignore_index=255 is a purely local, code-injected training-policy sentinel, never present in raw dataset files -- see annotation_manifest.json finding_label_validity_source"
+  precomputed_camera_mask_in_final_weight: false   # matches template default; the lambda mechanism uses a continuous weight keyed BY the mask's spatial pattern, not the mask value itself in the loss formula
+  recomputed_gt_visibility_allowed_as_baseline: true
+  recomputed_visibility_is_visibility_free: false
+  lidar_mask_for_validity_dependency: "AUDITED AND DECLARED: mask_lidar exists in raw data but is used NOWHERE in this codebase -- confirmed via exhaustive grep, see annotation_manifest.json finding_mask_lidar_unused"
+  gt_unknown_as_free_allowed: false
+  future_images_in_model_input: false
+  future_training_poses_as_target_geometry: "N/A for training (target is always reference-frame GT) -- SEPARATE finding: RayIoU EVALUATION origins include future-relative-to-reference ego poses, see protocol_manifest.json v2_new_items.rayiou_origin_scope. Not conflated with training target geometry."
+  historical_gt_for_diagnostic: "AVAILABILITY UNKNOWN, not checked this pass -- see annotation_manifest.json open_items_for_e4"
+  changing_final_annotation_scope_requires_review: true
+
+method_selection:
+  selected_family: null
+  stage: M
+  status: "far from reached -- E1 through E5 all NOT_STARTED"
+
+deferred_candidate_v1:
+  enabled: false
+  spec_location: "research_v2/archive_v1/README.md (POINTER, not the actual spec text -- see note there about why the original prose isn't recoverable)"
+  requires_separate_implementation_approval: true

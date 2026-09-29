@@ -1,0 +1,48 @@
+{
+  "note": "v2-schema reclassification of the 6 legacy runs already fully documented in research/experiment_registry.jsonl and research/decisions.jsonl (v1). Not a re-audit from scratch -- carries v1's evidence forward, adds v2's category vocabulary (reusable/relabel_only/reevaluate/retrain/blocked) and the two v2-specific findings (RayIoU origin scope, lovasz UnboundLocalError latent bug) that affect ALL 6 runs identically since they share the same evaluator/loss code.",
+  "runs": [
+    {
+      "run_id": "legacy_e12_nomask_95c07e1d_seed0_20260924",
+      "v2_category": "reusable",
+      "conditions": [
+        "mIoU/RayIoU/AUROC/ECE/NLL values stand as-is (numbers unchanged by any v2 finding)",
+        "EMA-vs-raw checkpoint question (v1 finding F1) still open -- treat as reevaluate for any claim stronger than 'screen_e12_v2, raw checkpoint, single seed'",
+        "RayIoU number's origin-provenance is now more precisely characterized (not changed in value, but its INTERPRETATION should note origins may include future-relative-to-reference poses) -- relabel_only for interpretation, not reevaluate for the number itself"
+      ]
+    },
+    {
+      "run_id": "legacy_e12_cameramask_01ca9852_seed0_20260924",
+      "v2_category": "reusable",
+      "conditions": ["same three conditions as nomask above"]
+    },
+    {
+      "run_id": "legacy_e12_invfree_l000_acc35403_seed0_20260925",
+      "v2_category": "reusable",
+      "conditions": [
+        "same as above, PLUS: v2 P0's quantitative lovasz-share check (synthetic data) suggests the lambda=0 residual-supervision-via-lovasz magnitude may be small relative to full supervision, which is new SUPPORTING context (not a value change) for interpreting why lambda=0's numbers already look close to the lambda=0.25 pattern rather than to a hypothetical true-hard-drop"
+      ]
+    },
+    {
+      "run_id": "legacy_e12_invfree_l025_123aa016_seed0_20260926",
+      "v2_category": "reusable",
+      "conditions": ["same as l000"]
+    },
+    {
+      "run_id": "legacy_e12_invfree_l050_9e764cb7_seed0_20260926",
+      "v2_category": "reusable",
+      "conditions": ["same as l000"]
+    },
+    {
+      "run_id": "legacy_e12_invfree_l075_411c91d6_seed0_20260926",
+      "v2_category": "reusable",
+      "conditions": ["same as l000"]
+    },
+    {
+      "run_id": "legacy_e12_invfree_l100_ALIAS_of_nomask",
+      "v2_category": "reusable",
+      "conditions": ["alias decision unaffected by any v2 finding; lambda=1 equivalence re-confirmed by the v2 test script (test_lambda1_equivalence, still PASS)"]
+    }
+  ],
+  "no_run_is_blocked_or_retrain": "Consistent with v1: nothing found in v2's P0 pass invalidates the 6 trained models. All findings are about evaluator/annotation INTERPRETATION (RayIoU origin scope) or LATENT, never-triggered code bugs (lovasz UnboundLocalError, sem_scal div-by-zero), not about the training runs themselves being wrong.",
+  "cross_reference": "research/experiment_registry.jsonl and research/decisions.jsonl remain the primary, more detailed source for per-run hashes/checkpoints/metrics. This file only adds the v2-vocabulary layer on top."
+}

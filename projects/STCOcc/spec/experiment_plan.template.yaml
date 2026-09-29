@@ -1,0 +1,482 @@
+# v2 planning template; not an executable STCOcc training config.
+# Resolve paths, native protocol, annotation lineage and job budgets before use.
+schema_version: 2
+project: stcocc_selective_free_supervision_diagnostic_first
+created_date: '2026-09-27'
+execution:
+  default_mode: audit_only
+  require_execute_flag: true
+  require_plan_hash_approval: true
+  approved_plan_sha256: null
+  max_concurrent_training_jobs: 1
+  max_retries_identical_infra_failure: 1
+  allow_environment_reinstall: false
+  allow_destructive_file_changes: false
+  allow_remote_push: false
+  allow_external_model_download: false
+  max_concurrent_evaluation_jobs: 1
+  require_approval_for_expensive_evaluation: true
+  require_stage_review: true
+  automatic_sgh_implementation: false
+  automatic_method_paper_abandonment: false
+paths:
+  repository_root: AUTO_FROM_CURRENT_WORKING_DIRECTORY
+  output_root: research_v2
+  legacy_summary_csv: /NAS/work_dirs/stcocc_e12_eval/summary.csv
+  legacy_checkpoint_glob: /NAS/work_dirs/stcocc_r50_704x256_16f_occ3d_e12_stage*
+  evaluator: AUTO_RESOLVE_EXISTING_EVAL_ALL_METRICS
+  train_entrypoint: AUTO_RESOLVE_EXISTING_ENTRYPOINT
+runtime:
+  gpu_ids: null
+  expected_world_size: 2
+  max_gpu_hours: null
+  max_disk_gb: null
+  free_disk_reserve_gb: null
+  do_not_interrupt_existing_jobs: true
+  use_existing_environment: true
+  max_evaluation_gpu_hours: null
+  max_evaluation_jobs: null
+  evaluation_is_not_cost_free: true
+profiles:
+  legacy_e12:
+    source: AUTO_DISCOVER_EXISTING_CONFIG_AND_LOGS
+    reported_epochs: 12
+    reported_effective_batch: 16
+    immutable: true
+  screen_e12_v2:
+    base_config: RESOLVE_DURING_P0
+    total_optimizer_updates: null
+    loss_policy_id: RESOLVE_AND_FREEZE_AFTER_P0
+    same_initialization_for_comparisons: true
+  native_full_v2:
+    base_config: RESOLVE_DURING_P0
+    total_optimizer_updates: null
+    reported_epoch_target: 36
+    confirm_from_actual_native_recipe: true
+data:
+  dataset: Occ3D_nuScenes
+  expected_official_val_samples: 6019
+  freeze_training_split: true
+  partition_unit: scene
+  partition_seed: 20260927
+  val_calibration_fraction: 0.2
+  val_development_fraction: 0.4
+  val_confirmation_fraction: 0.4
+  prior_full_val_exposure: true
+  label_confirmation_as_pristine_test: false
+  require_split_hash: true
+  require_temporal_scene_boundary_check: true
+  split_policy: reuse_existing_frozen_scene_split_else_retrospective_val_20_40_40
+  fresh_train_holdout_for_existing_checkpoints: false
+  train_holdout_change_requires_comparable_retraining: true
+  allow_automatic_resplit: false
+  new_candidate_selection_on_confirmation: false
+loss_policy:
+  mode: RESOLVE_AND_FREEZE_AFTER_P0
+  actual_classification_kind: RESOLVE_DURING_P0
+  free_index: null
+  ignore_indices: null
+  applied_heads: RESOLVE_DURING_P0
+  classification_reduction: RESOLVE_NATIVE_EQUIVALENT_DURING_P0
+  sem_scal_weighting: weighted_sufficient_statistics
+  geo_scal_weighting: weighted_sufficient_statistics
+  lovasz: unchanged_and_explicitly_reported
+  preserve_legacy_partial_as_separate_policy: true
+  require_all_ones_gradient_equivalence: true
+  require_per_loss_gradient_coverage_test: true
+  assume_lower_lambda_increases_lovasz_relative_effect: false
+  measure_per_loss_gradient_norms: true
+  allterm_harddrop_is_separate_diagnostic: true
+selection:
+  primary_checkpoint: last_epoch
+  same_prediction_for_all_primary_metrics: true
+  raymean_max_drop_fraction: 0.002
+  ray1_max_drop_fraction: 0.005
+  miou_min_useful_gain_fraction: 0.01
+  numerical_tie_tolerance: 1.0e-06
+  ordered_ties:
+  - lower_ece
+  - lower_training_gpu_hours
+  no_feasible_candidate_action: report_nondominated_exploratory_candidates
+  allow_posthoc_threshold_relaxation: false
+  criteria_provenance: v1 provisional operating margins, not official acceptance criteria
+  freeze_before_new_results: true
+  compare_same_ray_constraints: true
+  finite_grid_frontier_is_upper_bound: false
+  frontier_above_interpretation: SUPPORTS_ADDITIONAL_TRAINING_EFFECT_IN_CHECKED_SCOPE
+  frontier_matched_interpretation: ADDITIONAL_TRAINING_EFFECT_NOT_ESTABLISHED
+  no_auto_mechanism_rejection: true
+statistics:
+  full_seeds:
+  - 0
+  - 1
+  - 2
+  screen_seeds:
+  - 0
+  bootstrap_unit: scene
+  bootstrap_repeats: 2000
+  paired_comparisons: true
+  noninferiority_one_sided_confidence: 0.95
+  report_training_seed_sd_separately: true
+  non_significance_implies_equivalence: false
+  origin_iou_averaging: aggregate_sufficient_statistics_not_average_slices
+stages:
+  P0:
+    enabled: true
+    approved: false
+    depends_on: []
+    max_new_training_jobs: 0
+    outputs:
+    - audit
+    - gradient_coverage
+    - protocol
+    - annotation
+    - split
+    - reuse
+  E1:
+    enabled: false
+    approved: false
+    depends_on:
+    - P0
+    max_new_training_jobs: 0
+    requires:
+    - P0_PASS
+    - EVAL_RESOURCE_APPROVAL
+    outputs:
+    - bias_frontiers
+    - operating_points
+    - calibration
+    - E1_report
+  E2:
+    enabled: false
+    approved: false
+    depends_on:
+    - P0
+    max_new_training_jobs: 0
+    requires:
+    - P0_PASS
+    - ORIGIN_METADATA_AUDIT
+    - EVAL_RESOURCE_APPROVAL
+    outputs:
+    - origin_metrics
+    - origin_distance
+    - support_cross
+    - E2_report
+  E3:
+    enabled: false
+    approved: false
+    depends_on:
+    - E1
+    - E2
+    max_new_training_jobs: 4
+    optional_jobs_require_reapproval: true
+    requires:
+    - LOW_COST_DIAGNOSTIC_REVIEW
+    - TRAIN_RESOURCE_APPROVAL
+    outputs:
+    - strength_selection_controls
+    - E3_report
+  E4:
+    enabled: false
+    approved: false
+    depends_on:
+    - E3
+    max_new_training_jobs: 2
+    offline_can_be_prepared_after: P0
+    requires:
+    - VISIBILITY_PROXY_VALIDATION
+    - MATCHED_COMPARISON_REVIEW
+    - TRAIN_RESOURCE_APPROVAL
+    outputs:
+    - temporal_visibility
+    - intervention_comparison
+    - E4_report
+  E5:
+    enabled: false
+    approved: false
+    depends_on:
+    - E3
+    max_new_training_jobs: null
+    requires:
+    - E4_FINDINGS_OR_DOCUMENTED_UNAVAILABILITY
+    - EXPLICIT_MINIMAL_JOB_LIST
+    - TRAIN_RESOURCE_APPROVAL
+    outputs:
+    - strong_baseline_comparison
+    - E5_report
+  M:
+    enabled: false
+    approved: false
+    depends_on:
+    - E4
+    - E5
+    max_new_training_jobs: null
+    requires:
+    - REVIEW_MAY_ACCEPT_DOCUMENTED_PARTIAL_STAGE
+    - METHOD_FAMILY_SELECTION
+    - EXPLICIT_JOB_LIST
+    automatic_sgh_implementation: false
+    outputs:
+    - method_decision
+    - minimal_ablation
+  F1:
+    enabled: false
+    approved: false
+    depends_on:
+    - M
+    max_new_training_jobs: 12
+    core_methods:
+    - native_nomask
+    - native_camera_mask
+    - strongest_simple
+    - proposed
+    seeds:
+    - 0
+    - 1
+    - 2
+    requires:
+    - METHOD_FREEZE
+    - FULL_PROTOCOL_APPROVAL
+    additional_runs_need_reapproval: true
+  F2:
+    enabled: false
+    approved: false
+    depends_on:
+    - F1
+    max_new_training_jobs: null
+    requires:
+    - EXPLICIT_TRANSFER_JOB_LIST
+    - AVAILABLE_DATA_AND_IMPLEMENTATION
+    additional_models_target: 2
+    alternative_gt_or_dataset_target: 1
+    depth_head_free_model_target: 1
+    broad_lambda_sweeps_allowed: false
+  R:
+    enabled: true
+    approved: false
+    depends_on: []
+    max_new_training_jobs: 0
+    scope: available_evidence_only
+    outputs:
+    - claim_evidence
+    - professor_summary
+    - final_research_report
+    - paper_experiment_outline
+reporting:
+  language: Korean
+  primary_result_fractions_internal: true
+  paper_tables_in_percent: true
+  changes_in_percentage_points: true
+  include_failed_and_negative_results: true
+  separate_legacy_screen_full_profiles: true
+  separate_user_reported_and_verified_results: true
+  automatic_cvpr_acceptance_or_novelty_verdict: false
+  source_scope: provided_results_plus_primary_paper_verification_no_local_training_done
+  separate_recomputed_visibility_from_input_support: true
+  include_counterevidence: true
+  force_method_or_mismatch_success: false
+plan_version: '2.0'
+supersedes: v1 execution order; originals preserved in archive_v1
+annotation_contract:
+  label_validity_source: RESOLVE_DURING_P0
+  precomputed_camera_mask_in_final_weight: false
+  recomputed_gt_visibility_allowed_as_baseline: true
+  recomputed_visibility_is_visibility_free: false
+  lidar_mask_for_validity_dependency: AUDIT_AND_DECLARE_NOT_SILENTLY_REMOVE
+  gt_unknown_as_free_allowed: false
+  future_images_in_model_input: false
+  future_training_poses_as_target_geometry: SEPARATE_APPROVED_BASELINE_ONLY
+  historical_gt_for_diagnostic: DECLARE_AVAILABILITY_AND_PROVENANCE
+  changing_final_annotation_scope_requires_review: true
+method_selection:
+  selected_family: null
+  stage: M
+  requires_evidence_from:
+  - E1
+  - E2
+  - E3
+  temporal_claim_requires: E4_VALID_HISTORY_PROXY
+  comparison_selection_requires: E5_REVIEW
+  available_candidates:
+  - global_free_weighting
+  - recomputed_visibility_residual_weight
+  - geometry_only
+  - support_geometry_joint
+  - other_evidence_based_candidate
+  prefer_smallest_supported_method: true
+  heavy_plane_sweep_fallback_default: false
+  depth_head_free_transfer_required_for_general_claim: true
+deferred_candidate_v1:
+  enabled: false
+  spec_location: archive_v1/CLAUDE_CODE_RESEARCH_SPEC.md
+  requires_separate_implementation_approval: true
+  combination: s + (1 - s) * g
+  original_alpha: 0.5
+  original_w_min: 0.05
+  original_settings_are_not_optima: true
+  first_frozen_batch_tests:
+  - s_visibility_agreement
+  - g_hardness_coverage_relation
+  - low_s_high_g_population
+  - origin_policy_sensitivity
+  - finite_difference_sign
+experiments:
+  E1:
+    checkpoint_priority:
+    - A0_nomask
+    - A1_camera_mask
+    - A2_lambda025
+    checkpoint_optional:
+    - A3_lambda000
+    - lambda050
+    - lambda075
+    delta_grid:
+    - -2
+    - -1.5
+    - -1
+    - -0.5
+    - 0
+    - 0.5
+    - 1
+    - 1.5
+    - 2
+    max_preapproved_grid_refinements: 1
+    bias_rule: RESOLVE_NATIVE_DECODE_EQUIVALENCE
+    one_delta_for_all_metrics: true
+    fit_split: calibration
+    selection_split: development
+    confirmation_selection_allowed: false
+    frontier_comparison:
+    - raw_points
+    - nomask_bias_frontier_vs_candidate
+    - frontier_vs_frontier
+    ray_guardrails:
+    - raymean
+    - ray1
+    temperature_scaling:
+      enabled: true
+      fit_objective: native_compatible_nll
+      fit_split: calibration
+      positive_scalar_per_checkpoint: true
+      variants:
+      - raw
+      - TS_only
+      - bias_only
+      - bias_then_TS
+      must_test_prediction_invariance: true
+      recompute_auroc: true
+    logit_source: original_logits_or_streamed_checkpoint_inference
+    argmax_only_bias_sweep_allowed: false
+  E2:
+    preserve_official_query_set: true
+    audit_origin_builder: true
+    record_origin_timestamps: true
+    time_groups:
+    - current
+    - past
+    - future
+    - unknown
+    split_past_inside_actual_input: true
+    distance_edges_m:
+    - 0
+    - 20
+    - 40
+    - inf
+    distance_reference:
+    - origin_to_gt_first_hit
+    - current_ego_to_gt_first_hit
+    slice_definition_uses_prediction: false
+    optional_cross_slices:
+    - gt_first_hit_support
+    - free_prefix_support
+    require_aggregate_reconstruction: true
+    supplemental_current_origin_is_official: false
+    framewise_dynamic_gt_replacement: false
+    temporal_gain_rejects_mismatch: false
+  E3:
+    profile: screen_e12_v2
+    initial_seed: 0
+    anchor_lambda: 0.25
+    initial_jobs:
+    - id: E3-L005
+      kind: legacy_scope_invisible_free_weight
+      lambda: 0.05
+    - id: E3-L010
+      kind: legacy_scope_invisible_free_weight
+      lambda: 0.1
+    - id: E3-GMATCH
+      kind: per_sample_oracle_mean_matched_global_free
+      reference_lambda: 0.25
+      diagnostic_uses_mask: true
+    - id: E3-SHUFFLE
+      kind: per_sample_free_weight_multiset_permutation
+      reference_lambda: 0.25
+      diagnostic_uses_mask: true
+    optional_jobs:
+    - id: E3-GFIX
+      kind: train_dataset_oracle_mean_fixed_global_free
+    - id: E3-HARDDROP
+      kind: allterm_invisible_free_drop
+    random_binary_dropout_replaces_permutation: false
+    anchor_retraining_needs_extra_approval: true
+    match_head_loss_schedule_scope: true
+  E4:
+    offline_first: true
+    actual_history_tokens_required: true
+    G_pose_union:
+      source: target_time_gt_at_actual_input_camera_poses
+      interpretation: geometric_potential_visibility_not_historical_observation
+    H_history_proxy:
+      source: actual_historical_frame_geometry_and_validity_registered_to_target
+      require_historical_gt_or_validated_equivalent: true
+      dynamic_or_time_inconsistent_region: unknown_or_conservative_exclusion
+      missing_history: H_UNAVAILABLE
+      replace_with_G_and_claim_actual_history: false
+    visibility_states:
+    - visible
+    - confirmed_not_visible
+    - unknown
+    support_groups:
+    - F_H
+    - F_N
+    - F_U
+    out_of_volume_occluder_handling: unknown_if_unverifiable
+    initial_intervention_lambda: 0.25
+    training_requires:
+    - OFFLINE_VISIBILITY_VALIDATED
+    - GROUP_OVERLAP_REVIEWED
+    - APPROVED_JOB_LIST
+    intervention_jobs:
+    - E4-N_ONLY
+    - E4-H_ONLY
+    primary_mass_control: matched_voxel_counts_and_strata_before_results
+    unknown_weight: 1.0
+    negative_effect_automatically_rejects_mismatch: false
+  E5:
+    required_candidates_for_relevance_review:
+    - E5-VCURRENT
+    - E5-VWINDOW
+    - E5-NOMASK-RAY
+    - E5-MASK-RAY
+    - E5-ADA-RAYREGION
+    conditional_candidates:
+    - E5-GLOBAL-RAY
+    - E5-GAUSSRENDER-ADAPTED
+    epsilon: PREFREEZE_E3_SELECTED_VALUE_OR_0.25
+    visibility_current: recomputed_gt_geometry
+    visibility_window: G_pose_union_not_H_truth
+    ray_origin_policy_is_separate_factor: true
+    approved_origins:
+    - current_camera
+    - actual_input_pose
+    - separate_virtual_or_training_trajectory_condition
+    local_validation_query_rays_in_training: false
+    adaocc_paper_id: 2407.01436v1
+    adaocc_component_details:
+    - multi_lidar_origins_on_training_path
+    - ray_visible_region
+    - occupied_endpoint_2m_expansion
+    - uncertainty_hard_mining_if_reproduced
+    mask_only_adaptation_label: AdaOcc-inspired ray-region control
+    generic_ray_loss_is_gaussrender: false
+    published_scores_comparable_to_local_stcocc: false

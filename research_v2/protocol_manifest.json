@@ -1,0 +1,25 @@
+{
+  "note": "v1's research/protocol_manifest.json is carried forward UNCHANGED for every fact that doesn't depend on the v2 spec's new distinctions (EMA finding, AMP/SyncBN/backbone-freeze, LR schedule self-reference issue, frame-input semantics, all still true and not re-verified from scratch here). This file only adds what's NEW or RENAMED in v2.",
+  "carried_forward_verbatim_from_v1": [
+    "optimizer_updates (21096 total, 1758/epoch, effective_batch=16)",
+    "amp_syncbn_ema_freeze (AMP off, no SyncBN, MEGVIIEMAHook active on every run, raw checkpoint evaluated not EMA -- STILL the single highest-priority open item)",
+    "frame_input (multi_adj_frame_id_cfg gives 1 raw stereo adjacent frame; history_frame_num=[16,8,4] is a recurrent history buffer, not 16 stacked images)",
+    "loss_scope (single primary occupancy_head, 4 scales)",
+    "evaluation_protocol.metric_equivalence_evidence (the live-vs-file-based evaluator check, still the only genuinely EXECUTED cross-check either version has)"
+  ],
+  "v2_profile_naming": {
+    "screen_e12_v1_becomes_screen_e12_v2": "the template renames the profile but the underlying config files (projects/STCOcc/configs/stcocc_r50_704x256_16f_occ3d_e12_stage{1,2}_*.py) are the SAME files -- no new config was created for this rename. `loss_policy_id: RESOLVE_AND_FREEZE_AFTER_P0` in the v2 template is resolved here identically to v1's conclusion: there is no separate legacy_partial policy to preserve, `controlled_partial_v1`'s definition already IS what these configs implement.",
+    "native_full_v2_candidate": "same candidate identified in v1's sources.md correction: projects/STCOcc/configs/stcocc_r50_704x256_16f_occ3d_36e_miou_ori_setting.py (+ its wo_train_cam_mask sibling), total_epoch=36, no AMP. STILL NOT FROZEN -- same open item as v1, carried forward, not resolved by this pass."
+  },
+  "v2_new_items": {
+    "rayiou_origin_scope": "see research_v2/audits/loss_inventory_v2_addendum.json rayiou_origin_builder_audit -- NEW in v2, not present in v1's protocol_manifest at all (v1 never audited the RayIoU origin builder). This is the single most consequential new protocol fact from this pass.",
+    "lovasz_flatten_probas_bug": "see loss_inventory_v2_addendum.json new_bug_found -- a second latent (never-triggered-in-practice) bug found in this pass, independent of v1's sem_scal division-by-zero finding.",
+    "gradient_norms_and_lovasz_share": "see loss_inventory_v2_addendum.json -- quantitative (not just PASS/FAIL) evidence for how much of the invisible-free gradient budget lovasz actually represents at different lambda, on synthetic data."
+  },
+  "still_open_from_v1_unchanged_by_v2": [
+    "EMA vs raw checkpoint (D03, HIGH severity)",
+    "scene-based calibration/development/confirmation split not yet generated",
+    "native_full_v2 base_config not frozen",
+    "DDP reduction / resume equivalence still PENDING (no GPU designated)"
+  ]
+}

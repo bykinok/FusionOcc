@@ -1,0 +1,172 @@
+# Resolved from projects/STCOcc/spec/experiment_plan.template.yaml during P0.
+# This file does NOT overwrite the template; it is a new, repo-specific instance.
+# Fields still null after P0 are listed explicitly in research/reports/stage_P0.md
+# under "미설정 항목" -- do not treat a present key with value null as "resolved".
+schema_version: 1
+project: stcocc_selective_free_supervision
+created_date: "2026-09-27"
+resolved_during: P0
+
+execution:
+  default_mode: audit_only
+  require_execute_flag: true
+  require_plan_hash_approval: true
+  approved_plan_sha256: null          # UNRESOLVED -- no plan has been approved for execution yet
+  max_concurrent_training_jobs: 1
+  max_retries_identical_infra_failure: 1
+  allow_environment_reinstall: false
+  allow_destructive_file_changes: false
+  allow_remote_push: false
+  allow_external_model_download: false
+
+paths:
+  repository_root: /workspace/FusionOcc
+  output_root: research
+  legacy_summary_csv: /NAS/work_dirs/stcocc_e12_eval/summary.csv          # CONFIRMED EXISTS
+  legacy_checkpoint_glob: /NAS/work_dirs/stcocc_r50_704x256_16f_occ3d_e12_stage*  # CONFIRMED EXISTS (6 of the expected dirs; l100 intentionally absent, l075 present only on the remote site -- see resolved_paths.json)
+  evaluator: projects/STCOcc/tools/eval_all_metrics.py                    # RESOLVED (pre-existing from this line of work; orchestrates tools/test.py + tools/compute_metrics_from_file.py)
+  train_entrypoint: tools/dist_train.sh (wraps tools/train.py --launcher pytorch)  # RESOLVED
+
+# Two physical sites are now in scope (user request, this session):
+sites:
+  local:
+    ssh_alias: null                    # this session's own sandbox, no SSH needed
+    gpu_ids_available: [0, 1]
+    gpu_ids_designated_for_training: null   # UNRESOLVED -- REQUIRED before --execute
+  remote_mando_h100_2:
+    ssh_alias: mando-h100_2
+    container: occfrmwrk_h100_2_new
+    repo_path_in_container: /workspace/FusionOcc
+    gpu_ids_available: [0, 1]
+    gpu_ids_designated_for_training: null   # UNRESOLVED -- REQUIRED before --execute
+    separate_nas: true                 # confirmed different physical filesystem from local (14T vs 42T total)
+
+runtime:
+  gpu_ids: null                       # UNRESOLVED (see sites.*.gpu_ids_designated_for_training) -- REQUIRED before --execute training
+  expected_world_size: 2              # per site, confirmed from all 6 legacy runs (2xGPU DDP)
+  max_gpu_hours: null                  # UNRESOLVED -- REQUIRED before --execute training
+  max_disk_gb: null                    # UNRESOLVED -- REQUIRED before --execute training
+  free_disk_reserve_gb: {local: 30000, remote_mando_h100_2: 11000}  # RESOLVED from actual df -h at audit time
+  do_not_interrupt_existing_jobs: true
+  use_existing_environment: true       # RESOLVED: torch 2.4.0+cu124, mmcv 2.1.0, mmdet3d 1.3.0, mmengine 0.10.3 (identical on both sites, confirmed)
+
+profiles:
+  legacy_e12:
+    source: "projects/STCOcc/configs/stcocc_r50_704x256_16f_occ3d_e12_stage{1,2}_*.py (14 config files, all new/untracked, none overwrote an existing config)"
+    reported_epochs: 12
+    reported_effective_batch: 16
+    immutable: true
+  screen_e12_v1:
+    base_config: "same files as legacy_e12 above -- legacy_e12 and screen_e12_v1 are, as implemented, THE SAME PROFILE (no separate historical partial-weighting policy ever existed to preserve as distinct from the new controlled_partial_v1 policy -- see loss_inventory.json and decisions.jsonl D05). This equivalence is itself a P0 finding, not an assumption: recorded explicitly rather than silently merging the two profile names."
+    total_optimizer_updates: 21096      # RESOLVED (see protocol_manifest.json optimizer_updates)
+    loss_policy_id: controlled_partial_v1
+    same_initialization_for_comparisons: true  # RESOLVED: all 6 runs share the same load_from pretrained backbone
+  native_full_v1:
+    base_config: "LEADING CANDIDATE (not yet frozen): projects/STCOcc/configs/stcocc_r50_704x256_16f_occ3d_36e_miou_ori_setting.py (w/ mask) and stcocc_r50_704x256_16f_occ3d_36e_miou_wo_train_cam_mask_ori_setting.py (w/o mask), total_epoch=36, OptimWrapper (no AMP). See sources.md correction. NOT YET independently confirmed to match screen_e12_v1 in every other axis (data split, EMA reporting convention)."
+    total_optimizer_updates: null       # UNRESOLVED -- depends on confirming base_config and its num_iters_per_epoch
+    reported_epoch_target: 36
+    confirm_from_actual_native_recipe: true   # STILL PENDING
+
+data:
+  dataset: Occ3D_nuScenes
+  expected_official_val_samples: 6019   # CONFIRMED (every eval log this session reported exactly 6019)
+  freeze_training_split: true
+  partition_unit: scene
+  partition_seed: 20260927
+  val_calibration_fraction: 0.20
+  val_development_fraction: 0.40
+  val_confirmation_fraction: 0.40
+  prior_full_val_exposure: true         # CONFIRMED TRUE -- see decisions.jsonl D01
+  label_confirmation_as_pristine_test: false
+  require_split_hash: true
+  require_temporal_scene_boundary_check: true
+  split_status: "NOT YET CREATED -- this is a P1 prerequisite (research/splits/ is currently empty). All 6 legacy numbers are pre-split, full-val, dev-exposed (D01)."
+
+loss_policy:
+  mode: controlled_partial_v1
+  actual_classification_kind: "sigmoid focal loss (mmcv.ops.sigmoid_focal_loss / py_sigmoid_focal_loss CPU fallback), NOT plain softmax CE"   # RESOLVED, see loss_inventory.json
+  free_index: 17                       # RESOLVED (hardcoded via empty_idx=occ_class_names.index('free'), not schema-driven)
+  ignore_indices: [255]                # RESOLVED (hardcoded literal at every call site)
+  applied_heads: "single primary occupancy_head, 4 scales (1/1,1/2,1/4,1/8)"   # RESOLVED
+  classification_reduction: "weighted mean over included voxels: (per_voxel_loss*voxel_weight).sum()/voxel_weight.sum(); reduces to plain mean when voxel_weight is None or all-ones (bit-identical, verified)"   # RESOLVED
+  sem_scal_weighting: weighted_sufficient_statistics   # RESOLVED, matches template's intent exactly (see loss_inventory.json)
+  geo_scal_weighting: weighted_sufficient_statistics   # RESOLVED, matches template's intent exactly
+  lovasz: unchanged_and_explicitly_reported             # RESOLVED -- confirmed NOT reweighted at any lambda (decisions.jsonl D05)
+  preserve_legacy_partial_as_separate_policy: true      # N/A in practice -- there is no distinct legacy_partial to preserve (see screen_e12_v1.base_config note above)
+  require_all_ones_gradient_equivalence: true           # SATISFIED -- gradient_coverage.csv lambda1_equivalence PASS x3
+  require_per_loss_gradient_coverage_test: true         # SATISFIED for CE/sem_scal/geo_scal on CPU; Lovasz has zero coverage by design (not weighted); CustomFocalLoss's CUDA-only distance term untested (PENDING GPU)
+
+method:
+  code_name: support_utility_free_weighting
+  status: "NOT STARTED -- this is P2/P3 scope, out of bounds for P0. Fields below are copied unresolved from the template for forward reference only."
+  camera_visibility_annotation_access: false
+  lidar_visibility_annotation_access: false
+  training_occupancy_gt_access: true
+  primary_weight_mode: fixed_mean
+  primary_alpha: 0.50
+  optional_alpha: [0.25]
+  w_min: 0.05
+
+selection:
+  primary_checkpoint: last_epoch
+  primary_checkpoint_variant: "UNRESOLVED -- raw vs EMA, see decisions.jsonl D03. All 6 legacy runs used raw."
+  same_prediction_for_all_primary_metrics: true   # CONFIRMED per run (each run's mIoU-eval and RayIoU-eval both point at the same iter_21096.pth)
+  raymean_max_drop_fraction: 0.002
+  ray1_max_drop_fraction: 0.005
+  miou_min_useful_gain_fraction: 0.010
+  numerical_tie_tolerance: 0.000001
+  ordered_ties: [lower_ece, lower_training_gpu_hours]
+  no_feasible_candidate_action: report_nondominated_exploratory_candidates
+  allow_posthoc_threshold_relaxation: false
+
+statistics:
+  full_seeds: [0, 1, 2]
+  screen_seeds: [0]           # CONFIRMED: every legacy run is seed 0 only
+  bootstrap_unit: scene
+  bootstrap_repeats: 2000
+  paired_comparisons: true
+  noninferiority_one_sided_confidence: 0.95
+  report_training_seed_sd_separately: true
+
+stages:
+  P0:
+    enabled: true
+    status: THIS_PASS
+    max_new_full_training_jobs: 0
+    training_jobs_run_this_pass: 0
+    outputs_produced: [loss_inventory.json (research/audits/), gradient_coverage.csv (research/audits/), protocol_manifest.json, audit_report.md (research/audits/)]
+  P1:
+    enabled_after: P0_PASS
+    approved: false
+    status: "PLANNED ONLY in this pass -- see research/reports/stage_P0.md section 'P1 실행 계획'. NOT executed."
+    max_new_training_jobs: 7
+    anchors: [A0_nomask, A1_cameramask, A2_oracle025]
+    mandatory_controls: [C1_global025, C2_oracle_budget_global, C3_shuffled_oracle]
+    conditional_controls: [A4_allterm_harddrop]
+    offline_controls: [free_logit_bias]
+    optional_global_alpha: [0.10, 0.50]
+  P2:
+    enabled_after: P1_REVIEW
+    approved: false
+  P3:
+    enabled_after: P2_PASS
+    approved: false
+  P4:
+    enabled_after: METHOD_FREEZE
+    approved: false
+  P5:
+    enabled_after: P4_REVIEW
+    approved: false
+  P6:
+    enabled: true
+    max_new_training_jobs: 0
+
+reporting:
+  language: Korean
+  primary_result_fractions_internal: true
+  paper_tables_in_percent: true
+  changes_in_percentage_points: true
+  include_failed_and_negative_results: true
+  separate_legacy_screen_full_profiles: true
+  separate_user_reported_and_verified_results: true
+  automatic_cvpr_acceptance_or_novelty_verdict: false

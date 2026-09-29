@@ -74,7 +74,15 @@ def KL_sep(p, target):
     return kl_term
 
 
-def geo_scal_loss(pred, ssc_target, ignore_index=255, empty_idx=0):
+def geo_scal_loss(pred, ssc_target, ignore_index=255, empty_idx=0, voxel_weight=None):
+    """
+    voxel_weight (optional): per-voxel float tensor, same shape as ssc_target
+        (Stage 2 invisible-free sweep). None (default) reproduces the exact
+        original behaviour: `mask`-based boolean indexing is mathematically
+        identical to multiplying by a 0/1 weight and summing over the full
+        tensor, so passing voxel_weight=None or voxel_weight=mask.float()
+        give bit-identical results.
+    """
     # Handle case where ssc_target is a list or numpy array
     if isinstance(ssc_target, list):
         # Convert list elements to tensors if needed
@@ -89,7 +97,7 @@ def geo_scal_loss(pred, ssc_target, ignore_index=255, empty_idx=0):
         ssc_target = torch.stack(target_tensors)
     elif isinstance(ssc_target, np.ndarray):
         ssc_target = torch.from_numpy(ssc_target)
-    
+
     # Ensure ssc_target is on the same device as pred
     if hasattr(pred, 'device'):
         ssc_target = ssc_target.to(pred.device)
@@ -103,16 +111,18 @@ def geo_scal_loss(pred, ssc_target, ignore_index=255, empty_idx=0):
 
     # Remove unknown voxels
     mask = ssc_target != ignore_index
-    nonempty_target = ssc_target != empty_idx
-    nonempty_target = nonempty_target[mask].float()
-    nonempty_probs = nonempty_probs[mask]
-    empty_probs = empty_probs[mask]
+    nonempty_target = (ssc_target != empty_idx).float()
+
+    if voxel_weight is None:
+        w = mask.float()
+    else:
+        w = voxel_weight.to(pred.device, dtype=pred.dtype) * mask.float()
 
     eps = 1e-5
-    intersection = (nonempty_target * nonempty_probs).sum()
-    precision = intersection / (nonempty_probs.sum()+eps)
-    recall = intersection / (nonempty_target.sum()+eps)
-    spec = ((1 - nonempty_target) * (empty_probs)).sum() / ((1 - nonempty_target).sum()+eps)
+    intersection = (nonempty_target * nonempty_probs * w).sum()
+    precision = intersection / ((nonempty_probs * w).sum() + eps)
+    recall = intersection / ((nonempty_target * w).sum() + eps)
+    spec = ((1 - nonempty_target) * empty_probs * w).sum() / (((1 - nonempty_target) * w).sum() + eps)
     with torch.amp.autocast('cuda', enabled=False):
         return (
             F.binary_cross_entropy_with_logits(inverse_sigmoid(precision, 'A'), torch.ones_like(precision))
@@ -122,7 +132,13 @@ def geo_scal_loss(pred, ssc_target, ignore_index=255, empty_idx=0):
 
 
 
-def sem_scal_loss(pred_, ssc_target, ignore_index=255):
+def sem_scal_loss(pred_, ssc_target, ignore_index=255, voxel_weight=None):
+    """
+    voxel_weight (optional): per-voxel float tensor, same shape as ssc_target
+        (Stage 2 invisible-free sweep). None (default) reproduces the exact
+        original behaviour (see geo_scal_loss docstring for why boolean-mask
+        indexing and continuous-weight summation are equivalent).
+    """
     # Handle case where ssc_target is a list or numpy array
     if isinstance(ssc_target, list):
         # Convert list elements to tensors if needed
@@ -148,41 +164,41 @@ def sem_scal_loss(pred_, ssc_target, ignore_index=255):
         loss = 0
         count = 0
         mask = ssc_target != ignore_index
+        if voxel_weight is None:
+            w = mask.float()
+        else:
+            w = voxel_weight.to(pred.device, dtype=pred.dtype) * mask.float()
         n_classes = pred.shape[1]
         begin = 1 if n_classes == 19 else 0
         for i in range(begin, n_classes-1):
 
-            # Get probability of class i
+            # Get probability of class i (full tensor; ignored/down-weighted
+            # voxels are zeroed out via `w` in every weighted sum below)
             p = pred[:, i]
+            completion_target = (ssc_target == i).float()
 
-            # Remove unknown voxels
-            target_ori = ssc_target
-            p = p[mask]
-            target = ssc_target[mask]
-
-            completion_target = torch.ones_like(target)
-            completion_target[target != i] = 0
-            completion_target_ori = torch.ones_like(target_ori).float()
-            completion_target_ori[target_ori != i] = 0
-            if torch.sum(completion_target) > 0:
+            pos_count = torch.sum(completion_target * w)
+            if pos_count > 0:
                 count += 1.0
-                nominator = torch.sum(p * completion_target)
+                nominator = torch.sum(p * completion_target * w)
                 loss_class = 0
-                if torch.sum(p) > 0:
-                    precision = nominator / (torch.sum(p)+ 1e-5)
+                p_count = torch.sum(p * w)
+                if p_count > 0:
+                    precision = nominator / (p_count + 1e-5)
                     loss_precision = F.binary_cross_entropy_with_logits(
                             inverse_sigmoid(precision, 'D'), torch.ones_like(precision)
                         )
                     loss_class += loss_precision
-                if torch.sum(completion_target) > 0:
-                    recall = nominator / (torch.sum(completion_target) +1e-5)
+                if pos_count > 0:
+                    recall = nominator / (pos_count + 1e-5)
                     # loss_recall = F.binary_cross_entropy(recall, torch.ones_like(recall))
 
                     loss_recall = F.binary_cross_entropy_with_logits(inverse_sigmoid(recall, 'E'), torch.ones_like(recall))
                     loss_class += loss_recall
-                if torch.sum(1 - completion_target) > 0:
-                    specificity = torch.sum((1 - p) * (1 - completion_target)) / (
-                        torch.sum(1 - completion_target) +  1e-5
+                neg_count = torch.sum((1 - completion_target) * w)
+                if neg_count > 0:
+                    specificity = torch.sum((1 - p) * (1 - completion_target) * w) / (
+                        neg_count + 1e-5
                     )
 
                     loss_specificity = F.binary_cross_entropy_with_logits(

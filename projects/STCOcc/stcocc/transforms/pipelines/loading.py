@@ -1208,14 +1208,27 @@ class BEVAug(object):
         return rot_mat
 
     def voxel_transform(self, results, flip_dx, flip_dy):
+        # NOTE: voxel_mask_camera[_1_x] must be flipped in lockstep with the
+        # matching voxel_semantics[_1_x] array -- otherwise the camera-visibility
+        # mask and the semantic GT become spatially misaligned after a BEV flip,
+        # which silently corrupts anything that keys off both together (e.g. the
+        # invisible-free supervision weighting in STCOcc.build_inv_free_voxel_weight).
         if flip_dx:
             results['voxel_semantics'] = results['voxel_semantics'][::-1,...].copy()
+            if 'voxel_mask_camera' in results:
+                results['voxel_mask_camera'] = results['voxel_mask_camera'][::-1, ...].copy()
             if 'voxel_semantics_1_2' in results:
                 results['voxel_semantics_1_2'] = results['voxel_semantics_1_2'][::-1, ...].copy()
+            if 'voxel_mask_camera_1_2' in results:
+                results['voxel_mask_camera_1_2'] = results['voxel_mask_camera_1_2'][::-1, ...].copy()
             if 'voxel_semantics_1_4' in results:
                 results['voxel_semantics_1_4'] = results['voxel_semantics_1_4'][::-1, ...].copy()
+            if 'voxel_mask_camera_1_4' in results:
+                results['voxel_mask_camera_1_4'] = results['voxel_mask_camera_1_4'][::-1, ...].copy()
             if 'voxel_semantics_1_8' in results:
                 results['voxel_semantics_1_8'] = results['voxel_semantics_1_8'][::-1, ...].copy()
+            if 'voxel_mask_camera_1_8' in results:
+                results['voxel_mask_camera_1_8'] = results['voxel_mask_camera_1_8'][::-1, ...].copy()
             if 'voxel_flows' in results:
                 results['voxel_flows'] = results['voxel_flows'][::-1, ...].copy()
                 results['voxel_flows'][..., 0] = - results['voxel_flows'][..., 0]
@@ -1223,12 +1236,20 @@ class BEVAug(object):
 
         if flip_dy:
             results['voxel_semantics'] = results['voxel_semantics'][:,::-1,...].copy()
+            if 'voxel_mask_camera' in results:
+                results['voxel_mask_camera'] = results['voxel_mask_camera'][:, ::-1, ...].copy()
             if 'voxel_semantics_1_2' in results:
                 results['voxel_semantics_1_2'] = results['voxel_semantics_1_2'][:, ::-1, ...].copy()
+            if 'voxel_mask_camera_1_2' in results:
+                results['voxel_mask_camera_1_2'] = results['voxel_mask_camera_1_2'][:, ::-1, ...].copy()
             if 'voxel_semantics_1_4' in results:
                 results['voxel_semantics_1_4'] = results['voxel_semantics_1_4'][:, ::-1, ...].copy()
+            if 'voxel_mask_camera_1_4' in results:
+                results['voxel_mask_camera_1_4'] = results['voxel_mask_camera_1_4'][:, ::-1, ...].copy()
             if 'voxel_semantics_1_8' in results:
                 results['voxel_semantics_1_8'] = results['voxel_semantics_1_8'][:, ::-1, ...].copy()
+            if 'voxel_mask_camera_1_8' in results:
+                results['voxel_mask_camera_1_8'] = results['voxel_mask_camera_1_8'][:, ::-1, ...].copy()
             if 'voxel_flows' in results:
                 results['voxel_flows'] = results['voxel_flows'][:, ::-1, ...].copy()
                 results['voxel_flows'][..., 1] = - results['voxel_flows'][..., 1]

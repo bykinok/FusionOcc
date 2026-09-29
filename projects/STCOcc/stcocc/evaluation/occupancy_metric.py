@@ -352,9 +352,10 @@ class OccupancyMetric(BaseMetric):
                  collect_device: str = 'cpu',
                  prefix: Optional[str] = None,
                  compute_uncertainty_metrics: bool = False,
+                 rayiou_decompose_by_origin: bool = False,
                  **kwargs):
         super().__init__(collect_device=collect_device, prefix=prefix)
-        
+
         self.num_classes = num_classes
         self.use_lidar_mask = use_lidar_mask
         self.use_image_mask = use_image_mask
@@ -365,6 +366,10 @@ class OccupancyMetric(BaseMetric):
         self.sort_by_timestamp = sort_by_timestamp
         # When False, only mIoU is computed (e.g. during test.py); use compute_metrics_from_file.py for uncertainty
         self.compute_uncertainty_metrics = bool(compute_uncertainty_metrics)
+        # research_v2 E2: default False -> _compute_rayiou behavior/output is byte-identical to
+        # before this flag existed. True adds a printed "RayIoU by Origin Time Offset" table
+        # (past/reference/future relative to the ref frame); does not change mIoU/mAVE/occ_score.
+        self.rayiou_decompose_by_origin = bool(rayiou_decompose_by_origin)
         # For radius/height breakdown (same as occ_metrics: [-40,-40,-1,40,40,5.4])
         self.point_cloud_range = point_cloud_range or [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]
         
@@ -1440,6 +1445,7 @@ class OccupancyMetric(BaseMetric):
         pred_sems, gt_sems = [], []
         pred_flows, gt_flows = [], []
         lidar_origins = []
+        lidar_origin_time_offsets = [] if self.rayiou_decompose_by_origin else None
         data_index = []
         
         print('\nStarting Evaluation...')
@@ -1522,14 +1528,21 @@ class OccupancyMetric(BaseMetric):
             gt_flows.append(gt_flow)
             
             # Get lidar origin
-            ref_sample_token, output_origin_tensor = nusdata.__getitem__(index)
+            if self.rayiou_decompose_by_origin:
+                ref_sample_token, output_origin_tensor, time_offset_tensor = \
+                    nusdata.get_origins_with_time_offsets(index)
+                lidar_origin_time_offsets.append(time_offset_tensor)
+            else:
+                ref_sample_token, output_origin_tensor = nusdata.__getitem__(index)
             lidar_origins.append(output_origin_tensor.unsqueeze(0))
-        
+
         # Compute ray-based IoU
         if self.dataset_name == 'openocc':
             miou, mave, occ_score = ray_based_miou_openocc(pred_sems, gt_sems, pred_flows, gt_flows, lidar_origins, logger=None)
         elif self.dataset_name == 'occ3d':
-            miou, mave, occ_score = ray_based_miou_occ3d(pred_sems, gt_sems, pred_flows, gt_flows, lidar_origins, logger=None)
+            miou, mave, occ_score = ray_based_miou_occ3d(
+                pred_sems, gt_sems, pred_flows, gt_flows, lidar_origins, logger=None,
+                lidar_origin_time_offset_list=lidar_origin_time_offsets)
         
         return {
             'mIoU': miou,

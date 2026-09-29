@@ -1,0 +1,21 @@
+{
+  "policy_applied": "reuse_existing_frozen_scene_split_else_retrospective_val_20_40_40",
+  "existing_frozen_split_check": {
+    "checked_path": "research/splits/ (v1's designated location)",
+    "result": "EMPTY -- no frozen scene-level split was ever created in v1 either (v1 flagged this as a P1 prerequisite, never executed). Confirmed by directory listing in this pass.",
+    "conclusion": "No existing frozen split to reuse -> fall through to the retrospective 20/40/40 policy."
+  },
+  "retrospective_split_status": "GENERATED 2026-09-27 (following user resource-authorization) -- research_v2/tools/make_scene_split.py, scene_token-grouped, seed 20260927, random shuffle (not temporal-block) assignment. Result: 30/60/60 scenes, 1202/2410/2407 samples for calibration/development/confirmation. See research_v2/splits/split_manifest_materialized.json for the full scene-token lists and split_hash_sha256.",
+  "all_6_legacy_runs": {
+    "evaluated_on": "full official val, 6019 samples, no partition",
+    "labeled_as": "retrospective_full_val, dev-exposed (identical framing to v1 decisions.jsonl D01, carried forward unchanged)",
+    "prior_full_val_exposure": true,
+    "label_confirmation_as_pristine_test": false,
+    "new_candidate_selection_on_confirmation": false,
+    "consequence": "any E1 development/selection work (picking a bias delta, a temperature T, or later a method family) MUST use the future calibration/development split once it exists, NOT the full-val numbers already seen. Until the split exists, E1's calibration/development activity described in this pass's execution plan is PLANNED, not executable start-to-finish."
+  },
+  "partition_seed": 20260927,
+  "partition_unit": "scene",
+  "fractions": {"calibration": 0.20, "development": 0.40, "confirmation": 0.40},
+  "confirmation_caveat": "even once generated, this 'confirmation' split is retrospective (the whole val set, including whatever ends up in this partition, was already looked at in aggregate when selecting lambda=0.25 as 'best' in the prior report) -- per spec 2.2, this must be labeled as such and never called a fresh independent test set."
+}

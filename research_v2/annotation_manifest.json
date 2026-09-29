@@ -1,0 +1,48 @@
+{
+  "audited_at": "2026-09-27",
+  "terminology_mapping_to_this_codebase": {
+    "dataset_camera_mask": "the raw `mask_camera` array shipped in Occ3D-nuScenes labels.npz (True=visible by camera). This is the ONLY dataset-shipped visibility annotation this codebase actually reads.",
+    "recomputed_visibility": "NOT CURRENTLY IMPLEMENTED anywhere in this codebase. No code path recomputes camera or lidar visibility from GT geometry + calibration/pose. Would need to be built for E5-VCURRENT/E5-VWINDOW (E5 scope, not P0).",
+    "input_support": "NOT CURRENTLY IMPLEMENTED. The v1 archived s/g/h candidate's `s_i` (per-view depth support) was designed but never built (no per-view depth distribution provider exists in this repo's STCOcc integration). See research_v2/archive_v1/README.md.",
+    "gt_geometry_utility": "NOT CURRENTLY IMPLEMENTED (the v1 archived candidate's `g_i` ray-utility score). Deferred per v2 template (`deferred_candidate_v1.enabled: false`).",
+    "label_validity": "governed entirely by `ignore_index=255`, which is an ARTIFICIAL value injected by LOCAL code (STCOccLoadOccGTFromFileCVPR2023's mask_mode policies), never present in the raw dataset file itself -- see finding_label_validity_source below."
+  },
+
+  "finding_label_validity_source": {
+    "raw_semantics_npz_content": "Directly inspected 3 raw labels.npz files this session: `semantics` array contains ONLY real class ids in [0,17] (occ3d's 18 classes), NEVER value 255 or any other sentinel. Confirmed no genuine 'unknown/unlabeled' voxel exists in the raw Occ3D GT as shipped -- every voxel in the 200x200x16 grid is already assigned a class (including 'free') by Occ3D's own upstream multi-sweep GT-generation pipeline (external, not locally re-verified in this pass -- see [R2] Occ3D paper Appendix D, cited but not independently reproduced here).",
+    "ignore_index_255_origin": "Purely a LOCAL, code-injected sentinel. STCOccLoadOccGTFromFileCVPR2023._apply_mask() writes 255 into `semantics` at positions selected by mask_mode (baseline_with_mask: wherever mask_camera==0; baseline_without_mask: nowhere, i.e. no 255 at all; condition_C/D variants: distance-based mixes). This is entirely a TRAINING-TIME SUPERVISION POLICY CHOICE, not a representation of 'this voxel's label is invalid/unknown' in any dataset-provenance sense.",
+    "consequence": "'label_validity' and 'camera_mask-derived weighting' are, in the CURRENT code, actually THE SAME MECHANISM for the w/mask (baseline_with_mask) policy -- there is no independent validity concept layered underneath. This is exactly the conflation spec v2 section 2.1 warns against ('label_validity를 camera visibility와 동일시하지 않는다'), and this audit confirms the conflation currently exists in the w/mask baseline's implementation (by design, historically), while the lambda-weighting mechanism (this line of work) does NOT conflate them -- it uses a continuous weight, never the target/ignore_index, for camera-visibility-based supervision strength (see loss_inventory.json)."
+  },
+
+  "finding_mask_lidar_unused": {
+    "raw_npz_confirmed_has_mask_lidar": true,
+    "grep_result": "zero references to 'mask_lidar' anywhere in projects/STCOcc/stcocc/ (checked exhaustively)",
+    "conclusion": "uses_lidar_mask_for_label_validity = FALSE, uses_dataset_lidar_mask_for_weight = FALSE -- and this is a genuine 'not used' finding, not a hidden dependency. Declared explicitly per spec v2's instruction not to silently remove OR silently keep such a dependency without declaring it: here there simply is none to declare removed."
+  },
+
+  "manifest_fields": {
+    "uses_dataset_camera_mask_for_weight": {
+      "legacy_e12_nomask": false,
+      "legacy_e12_cameramask": true,
+      "legacy_e12_invfree_lXXX (all 4 lambda runs)": "false for the WEIGHT mechanism itself (lambda uses a continuous voxel_weight, not the dataset mask value directly) -- BUT the weight's SPATIAL PATTERN is entirely determined by dataset_camera_mask (invisible=~mask_camera gates where lambda applies). This is a subtle but real distinction: the mask is used to SELECT WHERE lambda applies, even though the WEIGHT VALUE at those positions is lambda, not the mask itself. Recorded honestly as 'mask determines weighting location, not weighting existence' rather than a blanket true/false."
+    },
+    "uses_dataset_lidar_mask_for_weight": false,
+    "uses_lidar_mask_for_label_validity": false,
+    "uses_recomputed_current_visibility": false,
+    "uses_recomputed_temporal_visibility": false,
+    "uses_actual_input_images_or_features": true,
+    "uses_future_images": false,
+    "uses_future_training_poses_as_target_geometry": "UNVERIFIED for training (occupancy GT target is always the reference-frame target, per config reading) -- see rayiou_origin_builder_audit in loss_inventory_v2_addendum.json for the SEPARATE finding that EVALUATION-time RayIoU ray origins DO include future-relative-to-reference-frame ego poses (this is an evaluation-time origin choice, not a training-target choice -- the two must not be conflated per spec).",
+    "uses_historical_gt": "the model's OWN temporal_fusion history buffer (16/8/4-scale recurrent state, see research/protocol_manifest.json frame_input) is built from the model's OWN past predictions/features carried forward, not from re-loading historical GT labels. No historical GT loading found in the training loss path.",
+    "uses_dynamic_annotations_for_visibility": false,
+    "teacher_or_depth_pretraining_annotation_lineage": "load_from=projects/STCOcc/pretrain/forward_projection-r50-4d-stereo-pretrained.pth for every run in this line of work -- provenance of THIS pretrained checkpoint's own training data/annotations is NOT verified in this pass (would require tracing STCOcc's original stereo-depth pretraining recipe, out of scope for P0)."
+  },
+
+  "recomputed_visibility_is_not_visibility_free": {
+    "confirmed_understanding": "if E5-VCURRENT/E5-VWINDOW are ever implemented (recomputed geometric visibility replacing dataset_camera_mask), the resulting method MUST NOT be called 'visibility-free' -- it would still depend on GT+calibration/pose-derived visibility, just not on the PRECOMPUTED dataset annotation specifically. This distinction is recorded here as a constraint for any future E5/M work, matching template `annotation_contract.recomputed_visibility_is_visibility_free: false` verbatim -- not yet relevant to any P0/E1/E2 deliverable, since no recomputation is implemented yet."
+  },
+
+  "open_items_for_e4": {
+    "H_history_proxy_availability": "UNKNOWN -- whether this repo/NAS has access to historical per-frame occupancy GT (needed to build the real 'H' proxy in spec 7.1) has NOT been checked in this P0 pass. The nuScenes val infos pkl (stcocc-nuscenes_infos_val.pkl) structure would need inspection to see if it references per-timestamp historical GT paths beyond the single reference-frame labels.npz. Flagged as an E4-prerequisite check, not yet done."
+  }
+}

@@ -13,6 +13,23 @@ except ImportError:
     DET3D_METRICS = None
 
 
+def _squeeze_spurious_batch_dim(x):
+    """Some detectors (e.g. STCOcc, batch_size=1) return a per-sample prediction array
+    that still carries a leading batch axis of size 1, e.g. occ_results shaped
+    (1, 200, 200, 16) instead of (200, 200, 16). A real spatial/class dimension in these
+    occupancy fields is never of size 1, so any leading axis of size 1 here is always
+    that spurious batch dim, not real data -- squeezing it is safe and lossless.
+
+    Left un-squeezed, compute_metrics_from_file.py's GT-vs-prediction boolean indexing
+    raises 'boolean index did not match indexed array along dimension 0' for
+    (nearly) every sample, silently dropping them from mIoU/AUROC/ECE/NLL via the
+    surrounding try/except -- this squeeze is what fixes that.
+    """
+    if hasattr(x, 'shape') and hasattr(x, '__getitem__') and len(getattr(x, 'shape', ())) > 0 and x.shape[0] == 1:
+        return x[0]
+    return x
+
+
 def _get_rank():
     try:
         import torch.distributed as dist
@@ -57,6 +74,8 @@ if ENGINE_METRICS is not None and DET3D_METRICS is not None:
                         return data_sample.get(key)
                     return getattr(data_sample, key, None)
 
+                occ = _squeeze_spurious_batch_dim(occ)
+
                 # occ_results 와 index 는 compute_metrics_from_file_v2.py 의
                 # _process_one_chunk 에서 occ_results[i] / index[i] 형태로 접근하므로
                 # 반드시 list 로 래핑해야 한다. (uncertainty 필드도 동일 규칙)
@@ -67,13 +86,15 @@ if ENGINE_METRICS is not None and DET3D_METRICS is not None:
 
                 flow = _get('flow_results')
                 if flow is not None:
-                    pred_dict['flow_results'] = flow
+                    pred_dict['flow_results'] = _squeeze_spurious_batch_dim(flow)
                 for uk in ('uncertainty_msp', 'uncertainty_entropy'):
                     u = _get(uk)
                     if u is not None:
+                        u = _squeeze_spurious_batch_dim(u)
                         pred_dict[uk] = [u] if not isinstance(u, (list, tuple)) else u
                 sp = _get('softmax_probs')
                 if sp is not None:
+                    sp = _squeeze_spurious_batch_dim(sp)
                     pred_dict['softmax_probs'] = [sp] if not isinstance(sp, (list, tuple)) else sp
 
                 pred_dicts.append(pred_dict)

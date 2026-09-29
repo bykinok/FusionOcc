@@ -10,13 +10,30 @@ import numpy as np
 
 
 # This method is only for debugging
+def _reduce_per_voxel_loss(per_voxel_loss, voxel_weight):
+    """Reduce a (N,) per-voxel loss to a scalar.
+
+    voxel_weight is None (default, all existing call sites): exact original
+    behaviour, unweighted mean over the N included voxels.
+
+    voxel_weight given (Stage 2 invisible-free sweep): weighted mean
+    ``(loss * w).sum() / w.sum()``, which is identical to the unweighted
+    mean whenever w is uniformly 1 (e.g. lambda_inv_free == 1.0).
+    """
+    if voxel_weight is None:
+        return per_voxel_loss.mean()
+    voxel_weight = voxel_weight.to(per_voxel_loss.dtype)
+    return (per_voxel_loss * voxel_weight).sum() / voxel_weight.sum().clamp_min(1e-6)
+
+
 def py_sigmoid_focal_loss(pred,
                           target,
                           weight=None,
                           gamma=2.0,
                           alpha=0.25,
                           reduction='mean',
-                          avg_factor=None):
+                          avg_factor=None,
+                          voxel_weight=None):
     """PyTorch version of `Focal Loss <https://arxiv.org/abs/1708.02002>`_.
     Args:
         pred (torch.Tensor): The prediction with shape (N, C), C is the
@@ -31,6 +48,9 @@ def py_sigmoid_focal_loss(pred,
             a scalar. Defaults to 'mean'.
         avg_factor (int, optional): Average factor that is used to average
             the loss. Defaults to None.
+        voxel_weight (torch.Tensor, optional): Per-voxel (per-row, shape (N,))
+            weight used ONLY for the final reduction across voxels (Stage 2
+            invisible-free sweep). Defaults to None (original behaviour).
     """
     pred_sigmoid = pred.sigmoid()
     target = target.type_as(pred)
@@ -55,7 +75,7 @@ def py_sigmoid_focal_loss(pred,
         assert weight.ndim == loss.ndim
         loss = loss * weight
 
-    loss = loss.sum(-1).mean()
+    loss = _reduce_per_voxel_loss(loss.sum(-1), voxel_weight)
     # loss = weight_reduce_loss(loss, weight, reduction, avg_factor)
     return loss
 
@@ -66,7 +86,8 @@ def py_focal_loss_with_prob(pred,
                             gamma=2.0,
                             alpha=0.25,
                             reduction='mean',
-                            avg_factor=None):
+                            avg_factor=None,
+                            voxel_weight=None):
     """PyTorch version of `Focal Loss <https://arxiv.org/abs/1708.02002>`_.
     Different from `py_sigmoid_focal_loss`, this function accepts probability
     as input.
@@ -84,6 +105,10 @@ def py_focal_loss_with_prob(pred,
         avg_factor (int, optional): Average factor that is used to average
             the loss. Defaults to None.
     """
+    if voxel_weight is not None:
+        raise NotImplementedError(
+            'voxel_weight (lambda_inv_free) is not supported for the '
+            'activated/probability CustomFocalLoss branch (unused in this repo).')
     num_classes = pred.size(1)
     target = F.one_hot(target, num_classes=num_classes + 1)
     target = target[:, :num_classes]
@@ -119,7 +144,8 @@ def sigmoid_focal_loss(pred,
                        gamma=2.0,
                        alpha=0.25,
                        reduction='mean',
-                       avg_factor=None):
+                       avg_factor=None,
+                       voxel_weight=None):
     r"""A wrapper of cuda version `Focal Loss
     <https://arxiv.org/abs/1708.02002>`_.
     Args:
@@ -135,6 +161,9 @@ def sigmoid_focal_loss(pred,
             a scalar. Defaults to 'mean'. Options are "none", "mean" and "sum".
         avg_factor (int, optional): Average factor that is used to average
             the loss. Defaults to None.
+        voxel_weight (torch.Tensor, optional): Per-voxel (per-row, shape (N,))
+            weight used ONLY for the final reduction across voxels (Stage 2
+            invisible-free sweep). Defaults to None (original behaviour).
     """
     # Function.apply does not accept keyword arguments, so the decorator
     # "weighted_loss" is not applicable
@@ -155,7 +184,7 @@ def sigmoid_focal_loss(pred,
                 weight = weight.view(loss.size(0), -1)
         assert weight.ndim == loss.ndim
         loss = loss * weight
-    loss = loss.sum(-1).mean()
+    loss = _reduce_per_voxel_loss(loss.sum(-1), voxel_weight)
     # loss = weight_reduce_loss(loss, weight, reduction, avg_factor)
     return loss
 
@@ -213,7 +242,8 @@ class CustomFocalLoss(nn.Module):
                 weight=None,
                 avg_factor=None,
                 ignore_index=255,
-                reduction_override=None):
+                reduction_override=None,
+                voxel_weight=None):
         """Forward function.
         Args:
             pred (torch.Tensor): The prediction.
@@ -225,6 +255,9 @@ class CustomFocalLoss(nn.Module):
             reduction_override (str, optional): The reduction method used to
                 override the original reduction method of the loss.
                 Options are "none", "mean" and "sum".
+            voxel_weight (torch.Tensor, optional): (B, H, W, D) per-voxel weight
+                (Stage 2 invisible-free sweep). Defaults to None (original
+                behaviour, unweighted mean over included voxels).
         Returns:
             torch.Tensor: The calculated loss
         """
@@ -253,6 +286,10 @@ class CustomFocalLoss(nn.Module):
         weight_mask = weight[None, :] * c[visible_mask, None]
         # visible_mask[:, None]
 
+        voxel_weight_visible = None
+        if voxel_weight is not None:
+            voxel_weight_visible = voxel_weight.reshape(-1)[visible_mask]
+
         num_classes = pred.size(1)
         pred = pred.permute(0, 2, 3, 4, 1).reshape(-1, num_classes)[visible_mask]
         target = target.reshape(-1)[visible_mask]
@@ -279,7 +316,8 @@ class CustomFocalLoss(nn.Module):
                 gamma=self.gamma,
                 alpha=self.alpha,
                 reduction=reduction,
-                avg_factor=avg_factor)
+                avg_factor=avg_factor,
+                voxel_weight=voxel_weight_visible)
 
         else:
             raise NotImplementedError

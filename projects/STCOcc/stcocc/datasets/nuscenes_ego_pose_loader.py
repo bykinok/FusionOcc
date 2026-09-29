@@ -98,12 +98,21 @@ class nuScenesDataset(Dataset):
 
         return pose
 
-    def __getitem__(self, idx):
+    def _compute_origins(self, idx):
+        """Shared core: builds the (up to 8) ray-cast origins for sample idx, plus their
+        provenance (time_offset_s: signed seconds relative to the reference frame; negative
+        = past, 0 = reference frame itself, positive = future-relative-to-reference).
+
+        This is the single source of truth for __getitem__ (unchanged 2-tuple return, used by
+        the existing call sites) and get_origins_with_time_offsets (research_v2 E2, 3-tuple
+        return with provenance) -- kept as one function so the two never drift apart.
+        """
         ref_index = self.valid_index[idx]
 
         ref_sample_token = self.sample_tokens[ref_index]
         ref_scene_token = self.scene_tokens[ref_index]
         ref_sd_token = self.sample_data_tokens[ref_index]  # sample["data"]["LIDAR_TOP"]
+        ref_timestamp = self.timestamps[ref_index]
         flip_flag = self.flip_flags[ref_index]
 
         # reference coordinate frame
@@ -111,11 +120,13 @@ class nuScenesDataset(Dataset):
 
         # NOTE: getting output frames
         output_origin_list = []
+        output_time_offset_list = []
 
         for curr_index in range(len(self.valid_index)):
             # if this exists a valid target
             if curr_index == ref_index:
                 origin_tf = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+                time_offset_s = 0.0
             elif self.scene_tokens[curr_index] == ref_scene_token:
                 curr_sd_token = self.sample_data_tokens[curr_index]
 
@@ -124,6 +135,9 @@ class nuScenesDataset(Dataset):
                 ref_from_curr = ref_from_global.dot(global_from_curr)
 
                 origin_tf = np.array(ref_from_curr[:3, 3], dtype=np.float32)
+                # nuScenes timestamps are microseconds; negative = curr is BEFORE ref (past),
+                # positive = curr is AFTER ref (future-relative-to-reference).
+                time_offset_s = (self.timestamps[curr_index] - ref_timestamp) / 1e6
             else:
                 continue
 
@@ -144,12 +158,26 @@ class nuScenesDataset(Dataset):
             # origin
             if np.abs(origin_tf[0]) < 39 and np.abs(origin_tf[1]) < 39:
                 output_origin_list.append(origin_tf)
+                output_time_offset_list.append(time_offset_s)
 
         # select 8 origins
         if len(output_origin_list) > 8:
             select_idx = np.round(np.linspace(0, len(output_origin_list) - 1, 8)).astype(np.int64)
             output_origin_list = [output_origin_list[i] for i in select_idx]
+            output_time_offset_list = [output_time_offset_list[i] for i in select_idx]
 
+        return ref_sample_token, output_origin_list, output_time_offset_list
+
+    def __getitem__(self, idx):
+        ref_sample_token, output_origin_list, _ = self._compute_origins(idx)
         output_origin_tensor = torch.from_numpy(np.stack(output_origin_list))  # [T, 3]
-
         return (ref_sample_token, output_origin_tensor)
+
+    def get_origins_with_time_offsets(self, idx):
+        """research_v2 E2: like __getitem__, but also returns each origin's signed time
+        offset (seconds) relative to the reference frame -- see _compute_origins docstring.
+        Returns (ref_sample_token, output_origin_tensor [T,3], time_offset_tensor [T])."""
+        ref_sample_token, output_origin_list, output_time_offset_list = self._compute_origins(idx)
+        output_origin_tensor = torch.from_numpy(np.stack(output_origin_list))  # [T, 3]
+        time_offset_tensor = torch.tensor(output_time_offset_list, dtype=torch.float32)  # [T]
+        return (ref_sample_token, output_origin_tensor, time_offset_tensor)

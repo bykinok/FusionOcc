@@ -35,6 +35,15 @@ RADIUS_BIN_LABELS = ['0-20m', '20-35m', '35m+']
 HEIGHT_BINS = [(0, 2), (2, 4), (4, float('inf'))]
 HEIGHT_BIN_LABELS = ['0-2m', '2-4m', '4m+']
 
+# Origin time-offset bins (research_v2 E2): signed seconds of the ray-cast origin relative to
+# the reference frame. 'past' = origin sampled before the reference frame (backward-looking,
+# consistent with the model's actual temporal history); 'future' = origin sampled AFTER the
+# reference frame -- NOT part of the model's input, a pure evaluation-time construct. Per
+# research_v2/loss_inventory_v2_addendum.json:rayiou_origin_builder_audit, origins are NOT
+# restricted to the model's real input window; this table lets that be checked, not assumed.
+ORIGIN_TIME_BINS = [(float('-inf'), 0.0), (0.0, 1e-6), (1e-6, float('inf'))]
+ORIGIN_TIME_BIN_LABELS = ['past(<0s)', 'reference(0s)', 'future(>0s)']
+
 occ_class_names = [
     'others','barrier', 'bicycle', 'bus', 'car', 'construction_vehicle',
     'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck',
@@ -106,7 +115,7 @@ def generate_lidar_rays():
     return np.array(lidar_rays, dtype=np.float32)
 
 
-def process_one_sample(sem_pred, lidar_rays, output_origin, flow_pred):
+def process_one_sample(sem_pred, lidar_rays, output_origin, flow_pred, origin_time_offsets=None):
     # lidar origin in ego coordinate
     # lidar_origin = torch.tensor([[[0.9858, 0.0000, 1.8402]]])
     T = output_origin.shape[1]
@@ -171,6 +180,12 @@ def process_one_sample(sem_pred, lidar_rays, output_origin, flow_pred):
         # pred_pcds[0]은 [N_t, 3] 형태인데, N_t == N이어야 함
         # 만약 다르다면, coord_index_cpu로 인덱싱된 것만 사용해야 함
         pred_pcds = torch.cat([pred_pcds[0], pred_label, pred_dist_cpu, pred_flow], dim=-1)
+
+        if origin_time_offsets is not None:
+            # research_v2 E2: tag every ray from this origin with its time_offset_s (col index 7).
+            # Appending (not inserting) preserves the existing 0:3=xyz,3=class,4=depth,5:7=flow layout.
+            time_offset_col = torch.full((pred_pcds.shape[0], 1), float(origin_time_offsets[t]))
+            pred_pcds = torch.cat([pred_pcds, time_offset_col], dim=-1)
 
         pred_pcds_t.append(pred_pcds)
 
@@ -300,8 +315,16 @@ def _print_bin_table(bin_labels, gt_cnt_bins, pred_cnt_bins, tp_cnt_bins,
     print_log(table, logger=logger)
 
 
-def main(sem_pred_list, sem_gt_list, flow_pred_list, flow_gt_list, lidar_origin_list, logger):
+def main(sem_pred_list, sem_gt_list, flow_pred_list, flow_gt_list, lidar_origin_list, logger,
+         lidar_origin_time_offset_list=None):
+    """lidar_origin_time_offset_list: optional, research_v2 E2 only. Parallel list to
+    lidar_origin_list (one [T]-length array of signed seconds per sample, from
+    nuScenesDataset.get_origins_with_time_offsets). When None (default, all existing callers),
+    behavior and output are byte-identical to before this argument existed -- no origin
+    decomposition table is computed or printed.
+    """
     torch.cuda.empty_cache()
+    decompose_by_origin = lidar_origin_time_offset_list is not None
 
     # generate lidar rays
     lidar_rays = generate_lidar_rays()
@@ -333,19 +356,31 @@ def main(sem_pred_list, sem_gt_list, flow_pred_list, flow_gt_list, lidar_origin_
     pred_cnt_h = [np.zeros([n_cls]) for _ in range(n_h)]
     tp_cnt_h   = [np.zeros([n_thr, n_cls]) for _ in range(n_h)]
 
+    # ── origin 시간대별(research_v2 E2) 누적 변수 ──────────────────────────
+    n_o = len(ORIGIN_TIME_BINS)
+    gt_cnt_o   = [np.zeros([n_cls]) for _ in range(n_o)]
+    pred_cnt_o = [np.zeros([n_cls]) for _ in range(n_o)]
+    tp_cnt_o   = [np.zeros([n_thr, n_cls]) for _ in range(n_o)]
+
     # ── 배치 처리 ─────────────────────────────────────────────────────────
     batch_size = 500
     pcd_pred_batch, pcd_gt_batch = [], []
 
-    for idx, (sem_pred, sem_gt, flow_pred, flow_gt, lidar_origins) in enumerate(tqdm(
-            zip(sem_pred_list, sem_gt_list, flow_pred_list, flow_gt_list, lidar_origin_list), ncols=50)):
+    if decompose_by_origin:
+        _origin_iter = lidar_origin_time_offset_list
+    else:
+        import itertools
+        _origin_iter = itertools.repeat(None)
+
+    for idx, (sem_pred, sem_gt, flow_pred, flow_gt, lidar_origins, origin_time_offsets) in enumerate(tqdm(
+            zip(sem_pred_list, sem_gt_list, flow_pred_list, flow_gt_list, lidar_origin_list, _origin_iter), ncols=50)):
         sem_pred  = np.reshape(sem_pred,  [200, 200, 16])
         sem_gt    = np.reshape(sem_gt,    [200, 200, 16])
         flow_pred = np.reshape(flow_pred, [200, 200, 16, 2])
         flow_gt   = np.reshape(flow_gt,   [200, 200, 16, 2])
 
-        pcd_pred = process_one_sample(sem_pred, lidar_rays, lidar_origins, flow_pred)
-        pcd_gt   = process_one_sample(sem_gt,   lidar_rays, lidar_origins, flow_gt)
+        pcd_pred = process_one_sample(sem_pred, lidar_rays, lidar_origins, flow_pred, origin_time_offsets)
+        pcd_gt   = process_one_sample(sem_gt,   lidar_rays, lidar_origins, flow_gt, origin_time_offsets)
 
         # free ray 제외
         valid_mask = (pcd_gt[:, 3] != n_cls - 1)
@@ -409,6 +444,19 @@ def main(sem_pred_list, sem_gt_list, flow_pred_list, flow_gt_list, lidar_origin_
                         pcd_pred_item, pcd_gt_item, bin_mask,
                         gt_cnt_h[b], pred_cnt_h[b], tp_cnt_h[b], thresholds)
 
+                # ── origin 시간대별(research_v2 E2) 메트릭 ─────────────────
+                # pcd[:, 7] = origin's time_offset_s (only present when decompose_by_origin)
+                if decompose_by_origin:
+                    origin_offset_gt = pcd_gt_item[:, 7]
+                    for b, (t_min, t_max) in enumerate(ORIGIN_TIME_BINS):
+                        if t_max == float('inf'):
+                            bin_mask = (origin_offset_gt >= t_min)
+                        else:
+                            bin_mask = (origin_offset_gt >= t_min) & (origin_offset_gt < t_max)
+                        _accumulate_bin_stats(
+                            pcd_pred_item, pcd_gt_item, bin_mask,
+                            gt_cnt_o[b], pred_cnt_o[b], tp_cnt_o[b], thresholds)
+
             del pcd_pred_batch, pcd_gt_batch
             pcd_pred_batch, pcd_gt_batch = [], []
             torch.cuda.empty_cache()
@@ -455,6 +503,15 @@ def main(sem_pred_list, sem_gt_list, flow_pred_list, flow_gt_list, lidar_origin_
     _print_bin_table(
         HEIGHT_BIN_LABELS, gt_cnt_h, pred_cnt_h, tp_cnt_h,
         thresholds, logger, 'RayIoU by Height (z in ego frame)')
+
+    # ── origin 시간대별 RayIoU 출력 (research_v2 E2) ───────────────────────
+    if decompose_by_origin:
+        _print_bin_table(
+            ORIGIN_TIME_BIN_LABELS, gt_cnt_o, pred_cnt_o, tp_cnt_o,
+            thresholds, logger,
+            'RayIoU by Origin Time Offset (research_v2 E2 -- past/reference/future relative to '
+            'the reference frame; NOT the same as "camera-visible": see '
+            'research_v2/loss_inventory_v2_addendum.json rayiou_origin_builder_audit)')
 
     torch.cuda.empty_cache()
 

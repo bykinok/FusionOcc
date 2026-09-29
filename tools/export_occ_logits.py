@@ -73,6 +73,9 @@ def parse_args():
     parser.add_argument('--max-samples', type=int, default=None,
                         help='Max samples to export (default: all)')
     parser.add_argument('--cfg-options', nargs='+', action=DictAction, help='Override config options')
+    parser.add_argument('--keep-invisible', action='store_true',
+                        help='dense 모드에서 mask_camera로 voxel을 필터링하지 않고 전체를 export. '
+                             'mask_camera 값은 출력 npz의 mask_camera 키에 별도 저장됨 (research_v2 E1용).')
     args = parser.parse_args()
     return args
 
@@ -221,8 +224,17 @@ def _process_sparse_sample(sample, all_logits, all_gt, all_indices, warn_once,
     return True
 
 
-def _process_dense_sample(sample, all_logits, all_gt, all_indices, warn_once):
-    """dense logits (H,W,Z,C) 모델 (BEVFormer 등) 샘플 처리 — 하위 호환."""
+def _process_dense_sample(sample, all_logits, all_gt, all_indices, warn_once,
+                           all_mask_camera=None, keep_invisible=False):
+    """dense logits (H,W,Z,C) 모델 (BEVFormer 등) 샘플 처리 — 하위 호환.
+
+    keep_invisible=False (기본값, 기존 동작 유지): mask_camera==True인 voxel만 export.
+    keep_invisible=True (research_v2 E1 전용): mask_camera로 필터링하지 않고 전체 voxel을
+      export하며, mask_camera 값 자체는 all_mask_camera에 별도 저장한다. free-space
+      bias/temperature 분석은 invisible voxel(특히 invisible-free)이 핵심 대상이므로
+      mask_camera로 미리 걸러내면 그 영역이 통째로 사라진다 -- 이 함수의 원래(필터링)
+      동작은 그 목적에 맞지 않는다.
+    """
     logits = np.asarray(_get_field(sample, 'occ_logits'))
     gt = _get_field(sample, 'voxel_semantics')
     if gt is None:
@@ -247,6 +259,14 @@ def _process_dense_sample(sample, all_logits, all_gt, all_indices, warn_once):
     logits_flat = logits_flat[:n]
     gt_flat     = gt_flat[:n]
     mask_flat   = mask_flat[:n]
+
+    if keep_invisible:
+        all_logits.append(logits_flat)
+        all_gt.append(gt_flat)
+        all_indices.append(None)
+        if all_mask_camera is not None:
+            all_mask_camera.append(mask_flat)
+        return True
 
     valid = mask_flat.astype(bool)
     if valid.sum() == 0:
@@ -312,12 +332,19 @@ def main():
         print(f'  probs(semseg_norm), sparse_indices, gt_full, mask_camera 포함')
 
     all_logits, all_gt, all_indices = [], [], []
+    all_mask_camera = [] if args.keep_invisible else None
     n_export = 0
     n_skip_no_logits = 0
+    n_skip_duplicate = 0
     max_samples = args.max_samples or float('inf')
     has_sparse = None  # None = 아직 미결정, True/False = 첫 샘플에서 결정
     # 동일 경고를 한 번만 출력하기 위한 플래그
     warn_once = {'sparse_gt': True, 'dense_gt': True}
+    # InfiniteGroupEachSampleInBatchSamplerEval의 eval-time 길이 공식(t = len(flag) +
+    # world_size*16 + 1)이 world_size=1에서도 그만큼 과다 생성해, len(dataset)을 넘는 배치가
+    # 나오면 이미 방문한 인덱스를 다시 yield한다 (occupancy_metric.py의 processed_set 방어와
+    # 동일 패턴 -- 여기서도 index 기준으로 중복 제거).
+    processed_indices = set()
 
     for batch in tqdm(dataloader, desc='Export logits'):
         if n_export >= max_samples:
@@ -335,6 +362,14 @@ def main():
                 n_skip_no_logits += 1
                 continue
 
+            sample_index = _get_field(sample, 'index')
+            if sample_index is not None:
+                key = tuple(sample_index) if isinstance(sample_index, (list, tuple)) else sample_index
+                if key in processed_indices:
+                    n_skip_duplicate += 1
+                    continue
+                processed_indices.add(key)
+
             # sparse 모드 (SparseOcc): sparse_indices 존재 여부로 분기
             if _has_field(sample, 'sparse_indices'):
                 ok = _process_sparse_sample(
@@ -346,7 +381,9 @@ def main():
                 if ok and has_sparse is None:
                     has_sparse = True
             else:
-                ok = _process_dense_sample(sample, all_logits, all_gt, all_indices, warn_once)
+                ok = _process_dense_sample(sample, all_logits, all_gt, all_indices, warn_once,
+                                            all_mask_camera=all_mask_camera,
+                                            keep_invisible=args.keep_invisible)
                 if ok and has_sparse is None:
                     has_sparse = False
 
@@ -356,6 +393,9 @@ def main():
     if n_skip_no_logits > 0:
         print(f'[INFO] occ_logits 없이 건너뛴 샘플: {n_skip_no_logits}개 '
               f'(모델이 export_occ_logits를 지원하는지 확인하세요)')
+    if n_skip_duplicate > 0:
+        print(f'[INFO] 중복 index로 건너뛴 샘플: {n_skip_duplicate}개 '
+              f'(InfiniteGroupEachSampleInBatchSamplerEval의 eval-time 길이 과다 산출로 인한 재방문)')
 
     if not all_logits:
         raise RuntimeError(
@@ -365,7 +405,10 @@ def main():
 
     logits_all = np.concatenate(all_logits, axis=0)
     gt_all     = np.concatenate(all_gt,     axis=0)
-    mask_all   = np.ones(gt_all.shape[0], dtype=bool)  # 이미 mask 적용 완료
+    if args.keep_invisible:
+        mask_all = np.concatenate(all_mask_camera, axis=0)  # 실제 mask_camera 값 (필터링 아님, 보존용)
+    else:
+        mask_all = np.ones(gt_all.shape[0], dtype=bool)  # 이미 mask 적용 완료 (기존 동작)
 
     save_kwargs = dict(logits=logits_all, gt=gt_all, mask=mask_all)
 

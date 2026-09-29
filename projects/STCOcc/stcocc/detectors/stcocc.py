@@ -52,6 +52,8 @@ class STCOcc(CenterPoint):
                  temperature=None,
                  save_results=False,
                  compute_uncertainty=False,
+                 use_camera_mask=False,
+                 lambda_inv_free=1.0,
                  **kwargs):
         super(STCOcc, self).__init__(**kwargs)
         # ---------------------- init params ------------------------------
@@ -75,6 +77,27 @@ class STCOcc(CenterPoint):
         self.compute_uncertainty = compute_uncertainty
         self.scene_can_bus_info = dict()
         self.scene_loss = dict()
+        # ---------------------- invisible-free supervision weighting ------------------------------
+        # use_camera_mask: informational only (actual mask_camera->255 masking happens in the
+        #   dataset pipeline via STCOccLoadOccGTFromFileCVPR2023's mask_mode). Kept on the model so
+        #   sanity-check logging can report which policy is active.
+        # lambda_inv_free: loss weight applied ONLY to voxels that are BOTH camera-invisible AND
+        #   GT==free (empty_idx). 1.0 (default) reproduces the original "w/o mask" STCOcc loss
+        #   exactly (no-op). Requires 'voxel_mask_camera[_1_x]' to be present in the training
+        #   batch (see STCOccLoadOccGTFromFileCVPR2023(load_mask=True) + Collect3D keys).
+        #
+        #   research_v2 E3: lambda_inv_free MAY also be a dict
+        #     {'mode': 'radius_piecewise', 'boundary_m': R, 'near': lam_near, 'far': lam_far}
+        #   giving a horizontal-radius-dependent weight (radius computed in ego/lidar frame,
+        #   same point_cloud_range/voxel geometry as ray_metrics_occ3d.py's meshgrid3d, so the
+        #   boundary is directly comparable to RayIoU's RADIUS_BINS). near/far apply to
+        #   invisible-free voxels with radius < / >= boundary_m respectively. This is the single
+        #   generalization this research pass probes (see research_v2/reports/E3_execution_plan.md):
+        #   does letting lambda vary by distance beat the best flat scalar found in E1/v1?
+        self.use_camera_mask = use_camera_mask
+        self.lambda_inv_free = lambda_inv_free
+        self._inv_free_sanity_logged = False
+        self._radius_map_cache = {}
         # ---------------------- init loss ------------------------------
         self.class_weights = torch.tensor(np.array(class_weights), dtype=torch.float32, device='cuda')
         self.flow_loss = nn.L1Loss()
@@ -198,31 +221,161 @@ class STCOcc(CenterPoint):
         """Whether the model owns a specific component"""
         return getattr(self, component_name, None) is not None
 
+    @staticmethod
+    def _stack_voxel_field(x):
+        """Normalize a Collect3D voxel field to a single (B, ...) tensor.
+
+        Mirrors the list/ndarray handling already duplicated in sem_scal_loss,
+        geo_scal_loss and CustomFocalLoss.forward: mmengine's default collate
+        does not stack every extra Collect3D key into one tensor -- some arrive
+        as a list of B per-sample numpy arrays / tensors instead.
+        """
+        if isinstance(x, list):
+            items = []
+            for item in x:
+                if isinstance(item, np.ndarray):
+                    items.append(torch.from_numpy(item))
+                elif torch.is_tensor(item):
+                    items.append(item)
+                else:
+                    items.append(torch.tensor(item))
+            return torch.stack(items)
+        if isinstance(x, np.ndarray):
+            return torch.from_numpy(x)
+        return x
+
+    def _get_voxel_radius_map(self, shape, device):
+        """(X, Y, Z) horizontal-radius map in ego/lidar frame, cached per (X,Y,Z) shape.
+
+        Same point_cloud_range as ray_metrics_occ3d.py's _pc_range=[-40,-40,-1.0,40,40,5.4]
+        (this model's own `point_cloud_range` config, confirmed identical), so a boundary_m
+        used here lines up with RayIoU's RADIUS_BINS for interpretation.
+        """
+        key = tuple(shape)
+        if key not in self._radius_map_cache:
+            X, Y, Z = shape
+            pc_range = [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]
+            xs = (torch.arange(X, dtype=torch.float32) + 0.5) / X * (pc_range[3] - pc_range[0]) + pc_range[0]
+            ys = (torch.arange(Y, dtype=torch.float32) + 0.5) / Y * (pc_range[4] - pc_range[1]) + pc_range[1]
+            xx, yy = torch.meshgrid(xs, ys, indexing='ij')
+            radius = torch.sqrt(xx ** 2 + yy ** 2)  # (X, Y)
+            radius = radius.unsqueeze(-1).expand(X, Y, Z).contiguous()  # (X, Y, Z)
+            self._radius_map_cache[key] = radius
+        return self._radius_map_cache[key].to(device)
+
+    def build_inv_free_voxel_weight(self, target_voxel_semantic, camera_mask, device, log_stats=False):
+        """Per-voxel loss weight for the invisible-free supervision sweep (Stage 2).
+
+        weight = 1.0                     everywhere by default
+        weight = self.lambda_inv_free    where camera-invisible AND GT == free (empty_idx)
+
+        Ignored voxels (target == 255) get weight 0, but this is only a defensive
+        no-op: every consumer (focal/sem_scal/geo_scal) already excludes target==255
+        voxels via its own ignore_index mask before the weight is ever applied.
+
+        Args:
+            target_voxel_semantic: (B, X, Y, Z) tensor/ndarray of raw class ids (255 = ignore),
+                OR a list of B per-sample (X, Y, Z) tensors/ndarrays (mmengine's default
+                collate does not always stack extra Collect3D keys into a single tensor,
+                and either way it originates from a CPU-side dataloader worker).
+            camera_mask: same shape/list convention as target_voxel_semantic, bool.
+            device: target device for the returned weight (pass pred_voxel_semantic.device --
+                NOT target_voxel_semantic's own device, which is CPU straight out of the
+                dataloader; using the GT's device caused an "indices should be ... on the
+                same device" crash when indexing the weight with GPU-side visible_mask).
+        Returns:
+            (B, X, Y, Z) float tensor on `device`.
+        """
+        target_voxel_semantic = self._stack_voxel_field(target_voxel_semantic).to(device)
+        camera_mask = self._stack_voxel_field(camera_mask).to(device=device, dtype=torch.bool)
+
+        valid = target_voxel_semantic != 255
+        is_free = target_voxel_semantic == self.empty_idx
+        invisible = ~camera_mask
+        inv_free = invisible & is_free & valid
+        inv_occupied = invisible & (~is_free) & valid
+        visible = camera_mask & valid
+
+        weight = torch.ones_like(target_voxel_semantic, dtype=torch.float32)
+        if isinstance(self.lambda_inv_free, dict):
+            assert self.lambda_inv_free.get('mode') == 'radius_piecewise', \
+                "only 'radius_piecewise' dict mode is implemented for lambda_inv_free"
+            boundary_m = self.lambda_inv_free['boundary_m']
+            lam_near = self.lambda_inv_free['near']
+            lam_far = self.lambda_inv_free['far']
+            radius_map = self._get_voxel_radius_map(target_voxel_semantic.shape[1:], device)
+            radius_map = radius_map.unsqueeze(0).expand(target_voxel_semantic.shape[0], -1, -1, -1)
+            lam_per_voxel = torch.where(radius_map < boundary_m,
+                                         torch.full_like(radius_map, lam_near),
+                                         torch.full_like(radius_map, lam_far))
+            weight[inv_free] = lam_per_voxel[inv_free]
+            lambda_desc = 'radius_piecewise(boundary={}m, near={}, far={})'.format(
+                boundary_m, lam_near, lam_far)
+        else:
+            weight[inv_free] = self.lambda_inv_free
+            lambda_desc = '{:.3f}'.format(self.lambda_inv_free)
+        weight[~valid] = 0.0
+
+        if log_stats and not self._inv_free_sanity_logged:
+            self._inv_free_sanity_logged = True
+            print('[STCOcc][Supervision Stats] (first batch, lambda_inv_free={})'.format(
+                lambda_desc))
+            print('  visible               : {:,}'.format(int(visible.sum().item())))
+            print('  invisible occupied    : {:,}'.format(int(inv_occupied.sum().item())))
+            print('  invisible free        : {:,}'.format(int(inv_free.sum().item())))
+            print('  valid (non-ignore)    : {:,}'.format(int(valid.sum().item())))
+            print('  ignored (==255)       : {:,}'.format(int((~valid).sum().item())))
+
+        return weight
+
     def get_voxel_loss(self,
                        pred_voxel_semantic,
                        target_voxel_semantic,
                        loss_weight,
                        focal_loss=None,
                        tag='c_0',
+                       camera_mask=None,
                        ):
         # change pred_voxel_semantic from [bs, w, h, z, c] -> [bs, c, w, h, z]  !!!
         pred_voxel_semantic = pred_voxel_semantic.permute(0, 4, 1, 2, 3)
         loss_dict = {}
 
+        # Stage 2 invisible-free reweighting: only active when a camera mask is available
+        # for this scale AND lambda_inv_free != 1.0 (1.0 is mathematically a no-op, so we
+        # skip building the weight entirely and fall back to the exact original code path --
+        # this guarantees stcocc_invfree_l100 is bit-identical to the plain w/o-mask baseline).
+        voxel_weight = None
+        _lambda_is_noop = (not isinstance(self.lambda_inv_free, dict)) and self.lambda_inv_free == 1.0
+        if camera_mask is not None and not _lambda_is_noop:
+            voxel_weight = self.build_inv_free_voxel_weight(
+                target_voxel_semantic, camera_mask, device=pred_voxel_semantic.device,
+                log_stats=(tag == 'c_1_1'))
+
         loss_dict['loss_voxel_ce_{}'.format(tag)] = loss_weight * focal_loss(
             pred_voxel_semantic,
             target_voxel_semantic,
             self.class_weights,
-            ignore_index=255)
+            ignore_index=255,
+            voxel_weight=voxel_weight)
         loss_dict['loss_voxel_sem_scal_{}'.format(tag)] = loss_weight * sem_scal_loss(
             pred_voxel_semantic,
             target_voxel_semantic,
-            ignore_index=255)
+            ignore_index=255,
+            voxel_weight=voxel_weight)
         loss_dict['loss_voxel_geo_scal_{}'.format(tag)] = loss_weight * geo_scal_loss(
             pred_voxel_semantic,
             target_voxel_semantic,
             ignore_index=255,
-            empty_idx=self.empty_idx)
+            empty_idx=self.empty_idx,
+            voxel_weight=voxel_weight)
+        # NOTE: lovasz_softmax is intentionally NOT reweighted. It is a rank-based Lovasz
+        # extension of the Jaccard index (sorts voxels by error, then applies a cumulative-sum
+        # gradient over that ordering); there is no low-risk way to inject a continuous
+        # per-voxel weight into that ranking without redefining lovasz_grad's cumulative-sum
+        # formula, which would also be unverified for the Stage 1 baselines that share this
+        # function. lambda_inv_free therefore reweights 3 of the 4 voxel loss terms
+        # (CE/focal, sem_scal, geo_scal); lovasz always supervises all non-ignored voxels
+        # equally, same as the "w/o mask" baseline. See report for details.
         loss_dict['loss_voxel_lovasz_{}'.format(tag)] = loss_weight * lovasz_softmax(
             torch.softmax(pred_voxel_semantic, dim=1),
             target_voxel_semantic,
@@ -932,12 +1085,15 @@ class STCOcc(CenterPoint):
 
         # calc voxel loss
         for index in range(num_stage+1):
+            scale = 2 ** index
+            camera_mask_key = 'voxel_mask_camera' if scale == 1 else 'voxel_mask_camera_1_{}'.format(scale)
             loss_occ = self.get_voxel_loss(
                 intermediate_occ_pred_dict['pred_voxel_semantic_1_{}'.format(2**index)],
                 gt_semantic_voxel_dict['gt_semantic_voxel_1_{}'.format(2 **index)],
                 self.intermediate_pred_loss_weight[index],
                 focal_loss=self.focal_loss_dict['num_stage_1_{}'.format(2 **index)],
                 tag='c_1_{}'.format(2**index),
+                camera_mask=kwargs.get(camera_mask_key, None),
             )
             losses.update(loss_occ)
 

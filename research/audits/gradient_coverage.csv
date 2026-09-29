@@ -1,0 +1,13 @@
+loss_name,test_name,status,detail
+CE_focal_primitive,lambda1_equivalence,PASS,value_match=True grad_match=True max_grad_diff=0.000e+00
+sem_scal,lambda1_equivalence,PASS,value_match=True (6.100930 vs 6.100930) grad_match=True max_grad_diff=0.000e+00
+geo_scal,lambda1_equivalence,PASS,value_match=True (2.813300 vs 2.813300) grad_match=True max_grad_diff=0.000e+00
+sem_scal,lambda0_zero_gradient,PASS,n_invfree_voxels=11 max_abs_grad_at_invfree=0.000e+00
+geo_scal,lambda0_zero_gradient,PASS,n_invfree_voxels=11 max_abs_grad_at_invfree=0.000e+00
+CE_focal_primitive,lambda0_zero_gradient,PASS,n_invfree_voxels=11 max_abs_grad_at_invfree=0.000e+00
+ALL,edge_case_all_ignore,FAIL,sem_scal=EXCEPTION(division by zero); geo_scal=finite; CE_focal=finite
+ALL,edge_case_no_free,PASS,sem_scal=finite; geo_scal=finite; CE_focal=finite
+ALL,edge_case_no_occupied,FAIL,sem_scal=EXCEPTION(division by zero); geo_scal=finite; CE_focal=finite
+ALL,edge_case_all_visible,PASS,sem_scal=finite; geo_scal=finite; CE_focal=finite
+ALL,edge_case_all_invisible,PASS,sem_scal=finite; geo_scal=finite; CE_focal=finite
+ALL,edge_case_missing_class_5,PASS,sem_scal=finite; geo_scal=finite; CE_focal=finite

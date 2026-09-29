@@ -1,0 +1,62 @@
+{
+  "resolved_at": "2026-09-27",
+  "repository_root": "/workspace/FusionOcc",
+  "commit": "ad2a0c3153db3f6ec90e4d93d52246cd2f8fbaed",
+  "branch": "main",
+  "working_tree_dirty": true,
+  "note": "Uncommitted changes preserved as-is per spec 2.1; none of them were touched or reverted during this audit. One unrelated pre-existing modified file (projects/GaussianFormer/configs/gaussianformer/nuscenes_gs25600_occ3d_calib_eval.py) belongs to a different, unrelated piece of work and is out of scope -- not inspected, not touched.",
+  "sites": {
+    "local": {
+      "hostname_alias": "this session's sandbox",
+      "gpu_ids_available": [0, 1],
+      "gpu_model": "unspecified in this audit (H100-class per earlier session context; not re-verified here)",
+      "gpu_ids_designated_for_training": null,
+      "nas_mount": "/NAS",
+      "nas_free_gb": 30000
+    },
+    "remote_mando_h100_2": {
+      "ssh_alias": "mando-h100_2",
+      "container": "occfrmwrk_h100_2_new",
+      "repo_path_in_container": "/workspace/FusionOcc",
+      "same_commit_confirmed": true,
+      "gpu_ids_available": [0, 1],
+      "gpu_model": "NVIDIA H100 NVL (confirmed via nvidia-smi in a prior session)",
+      "gpu_ids_designated_for_training": null,
+      "nas_mount": "/NAS (separate physical filesystem from local -- confirmed different total size, 14T vs 42T)",
+      "nas_free_gb": 11000,
+      "caveat": "This container ALSO has an unrelated pre-existing modified file (GaussianFormer config) -- same as local. Confirms this is a real independent git checkout on shared infra, not a naive file copy."
+    }
+  },
+  "existing_paths": {
+    "/NAS/work_dirs/stcocc_e12_eval/summary.csv": {"exists": true, "site": "local"},
+    "/NAS/work_dirs/stcocc_r50_704x256_16f_occ3d_e12_stage1_nomask": {"exists": true, "site": "local"},
+    "/NAS/work_dirs/stcocc_r50_704x256_16f_occ3d_e12_stage1_cameramask": {"exists": true, "site": "local"},
+    "/NAS/work_dirs/stcocc_r50_704x256_16f_occ3d_e12_stage2_invfree_l000": {"exists": true, "site": "local"},
+    "/NAS/work_dirs/stcocc_r50_704x256_16f_occ3d_e12_stage2_invfree_l025": {"exists": true, "site": "local"},
+    "/NAS/work_dirs/stcocc_r50_704x256_16f_occ3d_e12_stage2_invfree_l050": {"exists": true, "site": "local"},
+    "/NAS/work_dirs/stcocc_r50_704x256_16f_occ3d_e12_stage2_invfree_l075": {"exists": true, "site": "remote_mando_h100_2", "not_present_locally": true},
+    "/NAS/work_dirs/stcocc_r50_704x256_16f_occ3d_e12_stage2_invfree_l100": {"exists": false, "reason": "intentionally skipped -- lambda=1.0 reuses the stage1_nomask run (see loss_inventory.json lambda_application.gate for why this is code-verified, not just assumed)"},
+    "projects/STCOcc/stcocc/detectors/stcocc.py": {"exists": true, "state": "modified (uncommitted)"},
+    "projects/STCOcc/configs/": {"exists": true, "note": "14 new stage1/stage2 config files, all untracked (new files, not overwriting any existing config)"},
+    "projects/STCOcc/tools/eval_all_metrics.py": {"exists": true, "state": "new, untracked"},
+    "projects/STCOcc/tools/fix_predictions_pkl.py": {"exists": true, "state": "new, untracked, UNUSED in the final pipeline (superseded by fixing the root cause in save_predictions_metric.py; kept for reference only)"},
+    "projects/BEVFormer/datasets/save_predictions_metric.py": {"exists": true, "state": "modified (uncommitted) -- spurious-batch-dim squeeze fix"},
+    "projects/STCOcc/stcocc/losses/focal_loss.py": {"exists": true, "state": "modified (uncommitted)"},
+    "projects/STCOcc/stcocc/losses/semkitti.py": {"exists": true, "state": "modified (uncommitted)"}
+  },
+  "checkpoint_sha256": {
+    "stage1_nomask/iter_21096.pth":              "549b75d6715552b7c3abf9b4a79d029bd9bf0bd850d51d6791ab32e098ed782a",
+    "stage1_nomask/iter_21096_ema.pth":           "4b83f238aa7d9061f73b281399408097e5befa8973195e02460154b214d7dc5a",
+    "stage1_cameramask/iter_21096.pth":           "504fad5e2df8cc7bc50fb04aac537d1687c14695acb52adcc767c5fd4beb95a1",
+    "stage1_cameramask/iter_21096_ema.pth":        "6bbd9d5e92152449ff0c1f0fac202b867d6e35e99d6dc19b363080a3fffc12ac",
+    "stage2_invfree_l000/iter_21096.pth":         "c2cb226bb7d8bf1ea36682280a8e15a2ff7b6f0dbcb860920ffe9a9b5336accf",
+    "stage2_invfree_l000/iter_21096_ema.pth":     "bfa2c7dfe7a9b5fe1bbebf851b7f50faf6e9e68a77ceffe52f1e9f98539ae249",
+    "stage2_invfree_l025/iter_21096.pth":         "3d836c3e78f44b97cdef5793cfe50e2f1bb4023f0d55b277f35acee65832fb42",
+    "stage2_invfree_l025/iter_21096_ema.pth":     "edf35ae3f5a7692bb18679123a57a915afd89154894eccbc9615384d4559eaa3",
+    "stage2_invfree_l050/iter_21096.pth":         "be491cb2436f2e7b611872a10903686ae586a7508edab0b1dad1de15e5c75be3",
+    "stage2_invfree_l050/iter_21096_ema.pth":     "84b8c4728cd9fef5a3afca8e7807131045752c790efd0e9deccc2217b850a4c1",
+    "stage2_invfree_l075/iter_21096.pth (remote)":     "6ac65604013ab76cf742f2534e5bf567ae510ed513a5907c032fc0aa22a287ed",
+    "stage2_invfree_l075/iter_21096_ema.pth (remote)": "9d8d607d83167f242730249dde17bb4ddfbc9ed0ce66fc20ab744de1a838feae"
+  },
+  "note_on_checkpoint_selection": "ALL prior evaluations (Stage1 nomask/cameramask, Stage2 l000-l075) used the RAW iter_21096.pth checkpoint, NOT iter_21096_ema.pth, even though every config has MEGVIIEMAHook active. See protocol_manifest.json 'ema_finding' for why this matters."
+}
