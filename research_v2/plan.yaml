@@ -35,19 +35,19 @@ paths:
 sites:
   local:
     gpu_ids_available: [0, 1]           # CONFIRMED via nvidia-smi 2026-09-27: both idle (0 MiB used)
-    gpu_ids_designated_for_training: []       # RESOLVED: none -- no training authorized this pass (E1/E2 are diagnostic-only)
+    gpu_ids_designated_for_training: [0, 1]   # RESOLVED 2026-09-29: user authorized E3 minimal training ("계속 진행해줘, 학습 예산 갱신하고")
     gpu_ids_designated_for_evaluation: [0, 1] # RESOLVED per user authorization 2026-09-27 ("문제가 되지 않는 한 자원을 충분히 활용해줘")
   remote_mando_h100_2:
     ssh_alias: mando-h100_2
     container: occfrmwrk_h100_2_new
-    gpu_ids_available: [0, 1]           # CONFIRMED via ssh nvidia-smi 2026-09-27: both idle
-    gpu_ids_designated_for_training: []       # RESOLVED: none -- no training authorized this pass
+    gpu_ids_available: [0, 1]           # RECONFIRMED 2026-09-29: BOTH BUSY (pid 730468/730625, ~62GB/61GB used, someone else's job -- NOT ours, not touched) -- unlike 2026-09-27's idle check, remote is currently unavailable
+    gpu_ids_designated_for_training: [0, 1]   # RESOLVED 2026-09-29, same authorization as local -- will use when free, currently occupied by another job
     gpu_ids_designated_for_evaluation: [0, 1] # RESOLVED per user authorization 2026-09-27
 
 runtime:
   gpu_ids: {local: [0, 1], remote_mando_h100_2: [0, 1]}   # RESOLVED for E1/E2 evaluation use; no training gpu_ids set (no training this pass)
   expected_world_size: 2
-  max_gpu_hours: 0                      # RESOLVED: 0 -- no training stage (E3+) authorized this pass
+  max_gpu_hours: 60                     # RESOLVED 2026-09-29: E3 training authorized ("계속 진행해줘, 학습 예산 갱신하고"). Estimate: 2 runs (n010_f050, n010_f100) x ~20 GPU-hours each (12 epoch, 2 GPU, based on l025's observed ~10h wall-clock x 2 GPU), +headroom.
   max_disk_gb: 2000                     # RESOLVED: 2TB cap on /NAS (30TB free measured 2026-09-27), logits written to /NAS not local overlay (local disk only 86GB free)
   free_disk_reserve_gb: {local: 30000, remote_mando_h100_2: 11000}  # RESOLVED (carried from v1, re-usable, filesystem hasn't changed)
   do_not_interrupt_existing_jobs: true
@@ -169,10 +169,13 @@ stages:
     outputs_produced: "/NAS/work_dirs/research_v2_e2_decomp/{nomask,cameramask,l025}_rayiou_decomp/ (work_dir logs; origin-decomposition tables read directly from these run logs)"
     key_finding: "For all 3 checkpoints, RayIoU by origin time-offset is reference > past > future (e.g. nomask IoU@2: ref=0.455, past=0.388, future=0.357). Future-relative-to-reference origins are the HARDEST condition, not an easy one -- the v2 concern that RayIoU might inflate scores via future-origin leakage is NOT supported by this evidence for these 3 checkpoints. Per v2 judgment rule, this is evidence to report, not grounds to dismiss any candidate."
   E3:
-    enabled: false
-    approved: false
+    enabled: true
+    approved: true                      # RESOLVED 2026-09-29, user authorized minimal training explicitly
     depends_on: [E1, E2]
-    status: NOT_STARTED
+    status: "STARTING -- radius-piecewise adaptive lambda_inv_free probe, 2 variants (n010_f050 on local, n010_f100 queued for remote/local depending on GPU availability). New branch: stcocc-selective-free-supervision (both local and remote mando-h100_2 checked out to it)."
+    max_new_training_jobs: 2
+    configs: [stcocc_r50_704x256_16f_occ3d_e12_stage3_adaptive_r20_n010_f050.py, stcocc_r50_704x256_16f_occ3d_e12_stage3_adaptive_r20_n010_f100.py]
+    baseline_for_comparison: stcocc_r50_704x256_16f_occ3d_e12_stage2_invfree_l025.py (flat lambda=0.25, already trained, no retrain needed)
   E4:
     enabled: false
     approved: false
