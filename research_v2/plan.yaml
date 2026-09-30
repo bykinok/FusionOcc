@@ -47,7 +47,7 @@ sites:
 runtime:
   gpu_ids: {local: [0, 1], remote_mando_h100_2: [0, 1]}   # RESOLVED for E1/E2 evaluation use; no training gpu_ids set (no training this pass)
   expected_world_size: 2
-  max_gpu_hours: 60                     # RESOLVED 2026-09-29: E3 training authorized ("계속 진행해줘, 학습 예산 갱신하고"). Estimate: 2 runs (n010_f050, n010_f100) x ~20 GPU-hours each (12 epoch, 2 GPU, based on l025's observed ~10h wall-clock x 2 GPU), +headroom.
+  max_gpu_hours: 90                     # RESOLVED 2026-09-30: bumped from 60 -- user approved 1 more reverse-direction probe (n025_f010) after both n010_f050/n010_f100 came back as clear negative results (dominated by flat lambda=0.75/1.00 on both mIoU AND RayIoU). Actual usage so far: n010_f050 ~22.3 GPU-h, n010_f100 ~22.7 GPU-h (measured from wall-clock x 2 GPU). 90 covers a 3rd run of similar length + headroom.
   max_disk_gb: 2000                     # RESOLVED: 2TB cap on /NAS (30TB free measured 2026-09-27), logits written to /NAS not local overlay (local disk only 86GB free)
   free_disk_reserve_gb: {local: 30000, remote_mando_h100_2: 11000}  # RESOLVED (carried from v1, re-usable, filesystem hasn't changed)
   do_not_interrupt_existing_jobs: true
@@ -172,10 +172,11 @@ stages:
     enabled: true
     approved: true                      # RESOLVED 2026-09-29, user authorized minimal training explicitly
     depends_on: [E1, E2]
-    status: "STARTING -- radius-piecewise adaptive lambda_inv_free probe, 2 variants (n010_f050 on local, n010_f100 queued for remote/local depending on GPU availability). New branch: stcocc-selective-free-supervision (both local and remote mando-h100_2 checked out to it)."
-    max_new_training_jobs: 2
-    configs: [stcocc_r50_704x256_16f_occ3d_e12_stage3_adaptive_r20_n010_f050.py, stcocc_r50_704x256_16f_occ3d_e12_stage3_adaptive_r20_n010_f100.py]
+    status: "IN PROGRESS -- round 1 (n010_f050, n010_f100) COMPLETE, both trained+evaluated: both are clear negative results, strictly dominated by flat lambda=0.75/1.00 on both mIoU and RayIoU simultaneously (see research_v2/reports/E3_adaptive_lambda_results.md). Round 2 (n025_f010, reverse direction: keep near at flat-optimal 0.25, lower far to 0.10) approved by user 2026-09-30, starting now."
+    max_new_training_jobs: 3
+    configs: [stcocc_r50_704x256_16f_occ3d_e12_stage3_adaptive_r20_n010_f050.py, stcocc_r50_704x256_16f_occ3d_e12_stage3_adaptive_r20_n010_f100.py, stcocc_r50_704x256_16f_occ3d_e12_stage3_adaptive_r20_n025_f010.py]
     baseline_for_comparison: stcocc_r50_704x256_16f_occ3d_e12_stage2_invfree_l025.py (flat lambda=0.25, already trained, no retrain needed)
+    round1_result: "BOTH FAILED -- n010_f050: mIoU 31.12/RayIoU 0.348, n010_f100: mIoU 31.41/RayIoU 0.351. Both worse than flat l075 (mIoU 31.74/RayIoU 0.369) on RayIoU despite similar mIoU -- not a new tradeoff point, just dominated."
   E4:
     enabled: false
     approved: false
