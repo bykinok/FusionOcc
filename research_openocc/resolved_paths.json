@@ -1,0 +1,33 @@
+{
+  "repository_root_host": "/home/h00323/Projects/occfrmwrk",
+  "repository_root_container": "/workspace/FusionOcc",
+  "reference_upstream_repo": "/home/h00323/Projects/occfrmwrk/Ref/STCOcc_ori (bykinok/FusionOcc upstream STCOcc source, used to resolve BLOCKED items in audit.md -- read-only, never modified)",
+  "occ3d_gt_root": "data/nuscenes/gts -> /home/h00323/DATA/mmDataset/nuscenes_fusionocc/gts (symlink)",
+  "openocc_gt_root": "data/nuscenes/openocc_v2 -> /home/h00323/DATA/mmDataset/nuscenes_stcocc/openocc_v2.1/openocc_v2 (symlink)",
+  "openocc_gt_scene_count": 850,
+  "openocc_gt_coverage": "28130/28130 train + 6019/6019 val samples have a labels.npz (100%, full-sample sweep, not a spot check)",
+  "openocc_ray_mask_root": "data/nuscenes/openocc_v2_ray_mask -- DOES NOT EXIST anywhere on this host or on /NAS (confirmed find); load_ray_mask stays False in every new config",
+  "duplicate_download_dir": "/home/h00323/Downloads/openocc_v2 (850 scenes) and openocc_v2.1.zip -- confirmed byte-identical (md5sum match on a sampled token) to the real GT root, not used by any config, informational only",
+  "train_info_pkl": "data/nuscenes/stcocc-nuscenes_infos_train.pkl (28130 samples, shared verbatim between Occ3D and OpenOcc configs -- only occ_path is reinterpreted)",
+  "val_info_pkl": "data/nuscenes/stcocc-nuscenes_infos_val.pkl (6019 samples)",
+  "pretrained_weights": {
+    "correct_existing_path": "projects/STCOcc/pretrain/forward_projection-r50-4d-stereo-pretrained.pth",
+    "md5": "3d8ac2db2d1b37d38ebb2b5ac7e45ac7",
+    "note": "stcocc_r50_704x256_16f_openocc_12e.py's load_from points at projects/STCOcc/pretrained/... (plural) which does not exist on disk. Not fixed in that reference config (preserved as-is per instructions); the new occ_only_screen configs use the correct, existing singular 'pretrain' path, same file the Occ3D configs already load."
+  },
+  "multiscale_gt_generator": {
+    "upstream_original": "Ref/STCOcc_ori/tools/generate_ms_occ.py (single-threaded, ~0.55s/sample)",
+    "repo_copy": "tools/generate_ms_occ.py (same algorithm, extended with mask_camera/mask_lidar downsampling; already supports --dataset openocc)",
+    "new_parallel_driver": "tools/generate_ms_occ_parallel.py (same functions, multiprocessing.Pool across samples, resumable, no algorithm change -- see implementation_changes.md)",
+    "run_log": "research_openocc/logs/generate_ms_occ_openocc.log"
+  },
+  "new_configs": [
+    "projects/STCOcc/configs/stcocc_r50_704x256_16f_openocc_occ_only_screen.py",
+    "projects/STCOcc/configs/stcocc_r50_704x256_16f_openocc_occ_only_screen_miou.py"
+  ],
+  "untouched_reference_config": "projects/STCOcc/configs/stcocc_r50_704x256_16f_openocc_12e.py (native reference, flow-enabled, not run this pass, preserved exactly as audited)",
+  "ssh_training_sites": {
+    "remote_mando_h100": {"ssh_alias": "mando-h100", "container": "occfrmwrk_h100_new", "gpus": 2},
+    "remote_mando_h100_2": {"ssh_alias": "mando-h100_2", "container": "occfrmwrk_h100_2_new", "gpus": 2}
+  }
+}

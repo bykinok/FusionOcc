@@ -34,18 +34,25 @@ paths:
 
 sites:
   local:
-    gpu_ids_available: [0, 1]           # CONFIRMED via nvidia-smi 2026-09-27: both idle (0 MiB used)
-    gpu_ids_designated_for_training: [0, 1]   # RESOLVED 2026-09-29: user authorized E3 minimal training ("계속 진행해줘, 학습 예산 갱신하고")
+    gpu_ids_available: [0, 1]           # CONFIRMED via nvidia-smi 2026-09-27: both idle (0 MiB used); this is the h00323-ubuntu machine, 2x RTX 3090 (NOT an H100 host)
+    gpu_ids_designated_for_training: [0, 1]   # SUPERSEDED 2026-10-01 -- see note below, training moved to the two remote H100 sites per user instruction
     gpu_ids_designated_for_evaluation: [0, 1] # RESOLVED per user authorization 2026-09-27 ("문제가 되지 않는 한 자원을 충분히 활용해줘")
+    note_2026-10-01: "User instructed training to use remote_mando_h100 + remote_mando_h100_2 going forward instead of this local site. Local kept available for evaluation / overflow."
+  remote_mando_h100:
+    ssh_alias: mando-h100
+    container: occfrmwrk_h100_new
+    gpu_ids_available: [0, 1]           # CONFIRMED 2026-10-01 via nvidia-smi over ssh: both idle (13 MiB used, 0% util), container occfrmwrk_h100_new is Up
+    gpu_ids_designated_for_training: [0, 1]   # RESOLVED 2026-10-01: user instructed use of this site for training ("학습은 ssh mando-h100의 occfrmwrk_h100_new 컨테이너... 사용해줘")
+    gpu_ids_designated_for_evaluation: [0, 1]
   remote_mando_h100_2:
     ssh_alias: mando-h100_2
     container: occfrmwrk_h100_2_new
-    gpu_ids_available: [0, 1]           # RECONFIRMED 2026-09-29: BOTH BUSY (pid 730468/730625, ~62GB/61GB used, someone else's job -- NOT ours, not touched) -- unlike 2026-09-27's idle check, remote is currently unavailable
-    gpu_ids_designated_for_training: [0, 1]   # RESOLVED 2026-09-29, same authorization as local -- will use when free, currently occupied by another job
+    gpu_ids_available: [0, 1]           # RECONFIRMED 2026-10-01 via nvidia-smi over ssh: both NOW IDLE (0 MiB used, 0% util) -- the other job seen busy on 2026-09-29 has since finished; container occfrmwrk_h100_2_new is Up
+    gpu_ids_designated_for_training: [0, 1]   # RESOLVED 2026-10-01: user instructed use of this site for training, same as remote_mando_h100
     gpu_ids_designated_for_evaluation: [0, 1] # RESOLVED per user authorization 2026-09-27
 
 runtime:
-  gpu_ids: {local: [0, 1], remote_mando_h100_2: [0, 1]}   # RESOLVED for E1/E2 evaluation use; no training gpu_ids set (no training this pass)
+  gpu_ids: {local: [0, 1], remote_mando_h100: [0, 1], remote_mando_h100_2: [0, 1]}   # UPDATED 2026-10-01: training now targets remote_mando_h100 + remote_mando_h100_2 per user instruction; local retained for evaluation/overflow
   expected_world_size: 2
   max_gpu_hours: 90                     # RESOLVED 2026-09-30: bumped from 60 -- user approved 1 more reverse-direction probe (n025_f010) after both n010_f050/n010_f100 came back as clear negative results (dominated by flat lambda=0.75/1.00 on both mIoU AND RayIoU). Actual usage so far: n010_f050 ~22.3 GPU-h, n010_f100 ~22.7 GPU-h (measured from wall-clock x 2 GPU). 90 covers a 3rd run of similar length + headroom.
   max_disk_gb: 2000                     # RESOLVED: 2TB cap on /NAS (30TB free measured 2026-09-27), logits written to /NAS not local overlay (local disk only 86GB free)

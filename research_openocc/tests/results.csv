@@ -1,0 +1,19 @@
+group,test,status,detail
+T1,class_names_order,PASS,17-class OpenOcc order matches car=0..free=16
+T1,perfect_prediction_iou,PASS,"iou at present classes [0, 1, 5, 16]: [1.0, 1.0, 1.0, 1.0]"
+T3,all_free,KNOWN_GAP,"raised ZeroDivisionError: division by zero (pre-existing, not OpenOcc-specific)"
+T3,all_ignore,KNOWN_GAP,"raised ZeroDivisionError: division by zero (pre-existing, not OpenOcc-specific)"
+T3,no_free_all_occupied,PASS,sem_scal=0.1024 geo_scal=11.5190
+T4,voxel_weight_none_vs_all_ones,PASS,sem: none=0.002198 ones=0.002198; geo: none=0.007770 ones=0.007770
+T5,lambda1_no_mask_succeeds,PASS,"losses keys=['loss_voxel_ce_c_1_1', 'loss_voxel_sem_scal_c_1_1', 'loss_voxel_geo_scal_c_1_1', 'loss_voxel_lovasz_c_1_1'], voxel_weight passed to focal_loss=[None]"
+T6,lambda_scalar_0.25_no_mask_raises,PASS,"raised before calling focal_loss (call_log=[]): [STCOcc] selective invisible-free supervision (lambda_inv_free=0.25) requires a camera visibility mask for scale 'c_1_1', but none was found in this bat"
+T6,lambda_dict_mode_no_mask_raises,PASS,"raised before calling focal_loss (call_log=[]): [STCOcc] selective invisible-free supervision (lambda_inv_free={'mode': 'radius_piecewise', 'boundary_m': 20.0, 'near': 0.25, 'far': 0.1}) requires a ca"
+T7,resolver_identical_across_call_sites,PASS,occ3d:./data/nuscenes/gts/scene-0001/abc123->./data/nuscenes/gts/scene-0001/abc123 (match=True); openocc:./data/nuscenes/gts/scene-0001/abc123->./data/nuscenes/openocc_v2/scene-0001/abc123 (match=True); occ3d:./data/nuscenes/gts/scene-0450/def456->./data/nuscenes/gts/scene-0450/def456 (match=True); openocc:./data/nuscenes/gts/scene-0450/def456->./data/nuscenes/openocc_v2/scene-0450/def456 (match=True)
+T7,resolver_openocc_substitutes_dir,PASS,
+T7,resolver_occ3d_is_noop,PASS,
+T8,load_flow_false_skips_flow_key,PASS,"result keys=['occ_path', 'voxel_semantics']"
+T8,load_flow_false_tolerates_missing_flow_key,PASS,"result keys=['occ_path', 'voxel_semantics']"
+T8,load_flow_true_requires_flow_key,PASS,raised KeyError as expected: 'flow is not a file in the archive'
+T9,downsample_1_2_shape_and_classes,PASS,"shape=(4, 4, 2) (expected (4, 4, 2)), classes=[0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 14, 15]"
+T9,downsample_1_4_shape_and_classes,PASS,"shape=(2, 2, 1) (expected (2, 2, 1)), classes=[0, 3, 11, 15]"
+T9,real_generated_file_spot_check,PASS,"/home/h00323/Projects/occfrmwrk/data/nuscenes/openocc_v2/scene-0001/140c678882194ae69e47136c81168b6d/labels_1_2.npz: shape=(100, 100, 8), classes_subset=True"

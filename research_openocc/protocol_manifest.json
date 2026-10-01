@@ -1,0 +1,41 @@
+{
+  "evaluator": "projects/STCOcc/stcocc/evaluation/occupancy_metric.py::OccupancyMetric",
+  "constructor_defaults": {
+    "num_classes": 17,
+    "use_lidar_mask": false,
+    "use_image_mask": false,
+    "dataset_name": "occ3d",
+    "eval_metric": "miou",
+    "note": "a config that only writes val_evaluator=dict(type='OccupancyMetric') silently gets ALL of these defaults -- this was exactly stcocc_r50_704x256_16f_openocc_12e.py's bug (audit.md section 2.7/5.2): ann_file=None means compute_metrics() returns {'mIoU':0.0,'count':0} immediately, and dataset_name='occ3d' (wrong default for an OpenOcc config) routes GT path resolution and RayIoU dispatch down the Occ3D branch."
+  },
+  "new_configs_val_evaluator": {
+    "dataset_name": "openocc",
+    "eval_metric": "rayiou (screen.py) / miou (screen_miou.py companion)",
+    "num_classes": 17,
+    "ann_file": "data/nuscenes/stcocc-nuscenes_infos_val.pkl",
+    "use_image_mask": false,
+    "compute_uncertainty_metrics": true,
+    "sort_by_timestamp": true
+  },
+  "rayiou_routing": {
+    "occ3d": "projects/STCOcc/stcocc/datasets/ray_metrics_occ3d.py (ray_based_miou_occ3d)",
+    "openocc": "projects/STCOcc/stcocc/datasets/ray_metrics_openocc.py (ray_based_miou_openocc)",
+    "dispatch_code": "occupancy_metric.py::_compute_rayiou, gated purely on self.dataset_name -- confirmed correct once dataset_name is actually set to 'openocc' in the config (previously unreachable for the openocc_12e config)"
+  },
+  "occ3d_vs_openocc_rayiou_feature_parity": {
+    "class_count_order_free_index": "handled correctly, independently, in each module",
+    "origin_time_offset_decomposition": "occ3d ONLY (research_v2 E2 addition: ORIGIN_TIME_BINS, past/reference/future breakdown). openocc's ray_metrics_openocc.py has no equivalent parameter/table at all -- not backported.",
+    "radius_height_breakdown": "occ3d ONLY (RADIUS_BINS, HEIGHT_BINS). openocc has neither.",
+    "threshold_1_2_4m_dvr_renderer_coord_system_no_hit_handling": "identical between the two modules"
+  },
+  "miou_class_names_bug_fixed_this_session": {
+    "location": "mmdet3d/datasets/occ_metrics.py::Metric_mIoU.__init__",
+    "before": "self.class_names hardcoded to the 18-class Occ3D list unconditionally, regardless of num_classes -- meaning an OpenOcc (num_classes=17) evaluation run would print/key its per-class IoU/AUROC/ECE/NLL results under the WRONG (Occ3D-ordered) class names.",
+    "after": "restored the num_classes==17 / ==18 branch (plus a class_names=None passthrough for any other count) that already exists in Ref/STCOcc_ori's own occ_metrics.py -- this was a local-repo-only regression from upstream, introduced at some point while adding the local radius/height-breakdown statistics extension, not an OpenOcc-specific design gap.",
+    "verified": "Metric_mIoU(num_classes=17).class_names[0]=='car', Metric_mIoU(num_classes=18).class_names[0]=='others' (this session, see implementation_changes.md)"
+  },
+  "known_gaps_not_fixed_this_pass": {
+    "strict_evaluation_mode": "compute_metrics()'s broad except-Exception->{'mIoU':0.0,'count':0} fallback (audit.md section 5.5, requirement 6.5) is UNCHANGED. A real failure (bad GT, shape mismatch, renderer error) during the upcoming smoke eval would still be recorded as a 0 score rather than raising -- the smoke-test run must be watched manually for this, not trusted blindly from its returned number alone.",
+    "eval_all_metrics.py_openocc_rayiou_config": "no stcocc_r50_704x256_16f_openocc_occ_only_screen_rayiou.py-style second config was made for this tool's --rayiou-config flag; the primary screen.py config already sets eval_metric='rayiou' directly, so tools/test.py against it is sufficient for this pass without needing eval_all_metrics.py's two-config convention."
+  }
+}

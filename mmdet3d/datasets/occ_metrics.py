@@ -47,11 +47,33 @@ class Metric_mIoU():
                  num_classes=18,
                  use_lidar_mask=False,
                  use_image_mask=False,
+                 class_names=None,
                  ):
-        self.class_names = ['others', 'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle',
-                            'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck',
-                            'driveable_surface', 'other_flat', 'sidewalk',
-                            'terrain', 'manmade', 'vegetation', 'free']
+        # class_names must track num_classes: Occ3D (18) and OpenOcc (17) use different
+        # class orders/free index, so this cannot be a single hardcoded list (see
+        # research_openocc/audit.md and implementation_changes.md -- this diverged from
+        # Ref/STCOcc_ori's own num_classes-keyed branch at some point during local
+        # extension with the radius/height statistics below; restored here).
+        if num_classes == 18:
+            self.class_names = ['others', 'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle',
+                                'motorcycle', 'pedestrian', 'traffic_cone', 'trailer', 'truck',
+                                'driveable_surface', 'other_flat', 'sidewalk',
+                                'terrain', 'manmade', 'vegetation', 'free']
+        elif num_classes == 17:
+            self.class_names = ['car', 'truck', 'trailer', 'bus', 'construction_vehicle',
+                                'bicycle', 'motorcycle', 'pedestrian', 'traffic_cone', 'barrier',
+                                'driveable_surface', 'other_flat', 'sidewalk',
+                                'terrain', 'manmade', 'vegetation', 'free']
+        elif num_classes == 16:
+            # Occ3D-Waymo (research_waymo/dataset_schema.md), raw free sentinel is 23 in
+            # the GT file but remapped to index 15 (=num_classes-1) by the loader before
+            # this class ever sees it -- see LoadOccGTFromFileWaymo.
+            self.class_names = ['GO', 'vehicle', 'pedestrian', 'sign', 'cyclist',
+                                'traffic_light', 'pole', 'construction_cone', 'bicycle',
+                                'motorcycle', 'building', 'vegetation', 'tree_trunk',
+                                'road', 'walkable', 'free']
+        else:
+            self.class_names = class_names
         self.save_dir = save_dir
         self.use_lidar_mask = use_lidar_mask
         self.use_image_mask = use_image_mask

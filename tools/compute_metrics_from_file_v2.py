@@ -27,6 +27,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from projects.STCOcc.stcocc.utils.gt_resolver import resolve_occ_gt_dir
+
 # V2: 3-bin radius scheme  (last bin = 35m+, upper bound is point-cloud max 50m)
 V2_RADIUS_BINS = [0, 20, 35, 50]
 
@@ -351,8 +353,7 @@ def main():
                             or info.get('occ_gt_path'))
                 if not occ_path:
                     continue
-                if self.dataset_name == 'openocc':
-                    occ_path = occ_path.replace('gts', 'openocc_v2')
+                occ_path = resolve_occ_gt_dir(occ_path, self.dataset_name)
                 if not occ_path.endswith('labels.npz'):
                     occ_path = os.path.join(occ_path, 'labels.npz')
                 if self.data_root and not os.path.isabs(occ_path):

@@ -1,0 +1,36 @@
+{
+  "audit_date": "2026-10-01",
+  "info_pkl": {
+    "train": {"path": "data/nuscenes/stcocc-nuscenes_infos_train.pkl", "samples": 28130},
+    "val": {"path": "data/nuscenes/stcocc-nuscenes_infos_val.pkl", "samples": 6019},
+    "shared_with_occ3d": true,
+    "fields_checked": ["occ_path", "token", "scene_token", "timestamp"]
+  },
+  "openocc_v2_gt": {
+    "scene_count": 850,
+    "scene_count_expected": "700 train + 150 val = 850, matches full nuScenes trainval release",
+    "full_res_labels_npz_coverage": "28130/28130 train + 6019/6019 val -- FULL SWEEP, zero missing (not sampled)",
+    "multiscale_labels_npz_before_this_session": "0/34149 (labels_1_2/1_4/1_8.npz did not exist at all -- see audit.md section 3.5)",
+    "multiscale_labels_npz_after_generation": "CONFIRMED COMPLETE: 28130/28130 train + 6019/6019 val, 0 missing (verified by direct filesystem check via resolve_occ_gt_dir over both info pkls, 2026-10-01). Also synced to ssh mando-h100's container (occfrmwrk_h100_new, /NAS bind-mounted from host /home/ailab/DATA) for the GPU smoke test -- NOT yet synced to mando-h100_2."
+  },
+  "occ3d_gts": {
+    "sample_count": 34149,
+    "note": "34149 = 28130 train + 6019 val, confirming the two GT releases share identical sample/scene scope"
+  },
+  "spot_checked_sample_schema": {
+    "openocc_scene-0001_sample": {
+      "semantics_dtype": "int32", "semantics_shape": [200, 200, 16],
+      "observed_values_one_sample": {"0": 280, "1": 1879, "7": 78, "8": 32, "10": 12106,
+        "11": 16, "12": 5282, "13": 13745, "14": 4827, "15": 11000, "16": 590755},
+      "instances_dtype": "uint8", "instances_unique_sample": "0..13",
+      "flow_dtype": "float32", "flow_shape": [200, 200, 16, 2],
+      "mask_keys_present": false
+    },
+    "occ3d_scene-0261_sample": {
+      "semantics_dtype": "uint8", "semantics_shape": [200, 200, 16],
+      "observed_values_one_sample": [1, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+      "mask_keys_present": true
+    }
+  },
+  "prior_openocc_artifacts_in_this_repo": "NONE -- git log shows stcocc_r50_704x256_16f_openocc_12e.py touched only once (initial STCOcc scaffold import), never trained/evaluated since. No work_dirs/, /NAS, research_v2/, or projects/STCOcc/reports/ artifact mentions 'openocc' anywhere prior to this session."
+}

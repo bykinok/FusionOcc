@@ -1,0 +1,30 @@
+{
+  "occ3d": {
+    "num_classes": 18,
+    "free_index": 17,
+    "ignore_index": 255,
+    "class_names": ["others", "barrier", "bicycle", "bus", "car", "construction_vehicle",
+      "motorcycle", "pedestrian", "traffic_cone", "trailer", "truck",
+      "driveable_surface", "other_flat", "sidewalk", "terrain", "manmade", "vegetation", "free"],
+    "gt_keys": ["semantics", "mask_lidar", "mask_camera"],
+    "has_camera_visibility_mask": true,
+    "verified_from": "data/nuscenes/gts/scene-0261/<token>/labels.npz (direct read this session)"
+  },
+  "openocc": {
+    "num_classes": 17,
+    "free_index": 16,
+    "ignore_index": 255,
+    "class_names": ["car", "truck", "trailer", "bus", "construction_vehicle", "bicycle",
+      "motorcycle", "pedestrian", "traffic_cone", "barrier", "driveable_surface",
+      "other_flat", "sidewalk", "terrain", "manmade", "vegetation", "free"],
+    "gt_keys": ["semantics", "instances", "flow"],
+    "has_camera_visibility_mask": false,
+    "verified_from": "data/nuscenes/openocc_v2/scene-0001/<token>/labels.npz (direct read this session): semantics dtype=int32 shape=(200,200,16), instances dtype=uint8, flow dtype=float32 shape=(200,200,16,2); observed value set {0,1,7,8,10,11,12,13,14,15,16} on one sample, 0 (car) present and 16 (free) dominant (~92-93% of voxels) -- consistent with class_names[0]='car'",
+    "class_order_source": "stcocc_r50_704x256_16f_openocc_12e.py occ_class_names (both this repo's and Ref/STCOcc_ori's copy agree) and CLAUDE_CODE_OPENOCC_REQUIREMENTS_KO.md section 3.3 (identical order)"
+  },
+  "shared": {
+    "label_validity_source": "dataset-native: any voxel not explicitly set to ignore_index(255) upstream of the loader is valid. ignore_index=255 itself is a code-injected training-policy sentinel (see research_v2 P0 audit), not a raw dataset value, for BOTH GT releases.",
+    "training_visibility_source_openocc": "none -- OpenOcc GT has no mask_camera/mask_lidar field at all (not merely unused). stcocc.py::get_voxel_loss now raises (T6 guard) if a non-1.0 lambda_inv_free is requested with camera_mask=None, specifically to prevent this profile from silently training as if a mask existed.",
+    "ray_mask2_field": "exists in both repos' OpenOcc loader (load_ray_mask=False by default, and the generated backing directory 'openocc_v2_ray_mask' does not exist on this host at all). Confirmed via grep across Ref/STCOcc_ori: never consumed anywhere outside the loader in either repo. Not camera visibility, not wired to anything -- vestigial/unused, left disabled in all new configs."
+  }
+}

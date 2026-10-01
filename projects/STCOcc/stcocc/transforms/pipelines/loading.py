@@ -18,6 +18,8 @@ from mmdet3d.registry import TRANSFORMS
 
 from torchvision.transforms.functional import rotate
 
+from ...utils.gt_resolver import resolve_occ_gt_dir
+
 def build_distance_aware_semantics(
     semantics: np.ndarray,
     mask_camera: np.ndarray,
@@ -326,11 +328,16 @@ class LoadOccGTFromFileCVPR2023(object):
 
 @TRANSFORMS.register_module(name='STCOccLoadOccGTFromFileOpenOcc')
 class LoadOccGTFromFileOpenOcc(object):
-    def __init__(self, scale_1_2=False, scale_1_4=False, scale_1_8=False, load_ray_mask=False):
+    def __init__(self, scale_1_2=False, scale_1_4=False, scale_1_8=False, load_ray_mask=False, load_flow=True):
         self.scale_1_2 = scale_1_2
         self.scale_1_4 = scale_1_4
         self.scale_1_8 = scale_1_8
         self.load_ray_mask = load_ray_mask
+        # occupancy-only profiles set load_flow=False: flow is never required for an
+        # occupancy-only model (flow_head=None), and OpenOcc multi-scale GT files only
+        # carry a placeholder 'flow' key (see research_openocc/implementation_changes.md),
+        # so this also means occupancy-only training does not depend on that placeholder.
+        self.load_flow = load_flow
 
     def __call__(self, results):
         # Safely get occ_gt_path
@@ -347,13 +354,16 @@ class LoadOccGTFromFileOpenOcc(object):
                 f"Please check if the dataset configuration is correct."
             )
 
+        # ray_mask2 is a vestigial/unused field (confirmed against Ref/STCOcc_ori: never
+        # consumed outside this loader in either repo) -- kept out of the shared GT
+        # resolver on purpose since it is not part of "GT identity".
         occ_ray_mask_path = gts_occ_gt_path.replace('gts', 'openocc_v2_ray_mask')
         occ_ray_mask = os.path.join(occ_ray_mask_path, 'labels.npz')
         occ_ray_mask_1_2 = os.path.join(occ_ray_mask_path, 'labels_1_2.npz')
         occ_ray_mask_1_4 = os.path.join(occ_ray_mask_path, 'labels_1_4.npz')
         occ_ray_mask_1_8 = os.path.join(occ_ray_mask_path, 'labels_1_8.npz')
 
-        occ_gt_path = gts_occ_gt_path.replace('gts', 'openocc_v2')
+        occ_gt_path = resolve_occ_gt_dir(gts_occ_gt_path, 'openocc')
         occ_gt_label = os.path.join(occ_gt_path, "labels.npz")
         occ_gt_label_1_2 = os.path.join(occ_gt_path, "labels_1_2.npz")
         occ_gt_label_1_4 = os.path.join(occ_gt_path, "labels_1_4.npz")
@@ -369,7 +379,7 @@ class LoadOccGTFromFileOpenOcc(object):
         
         occ_labels = np.load(occ_gt_label)
         semantics = occ_labels['semantics']
-        flow = occ_labels['flow']
+        flow = occ_labels['flow'] if self.load_flow else None
 
         if self.scale_1_2:
             if not os.path.exists(occ_gt_label_1_2):
@@ -381,10 +391,10 @@ class LoadOccGTFromFileOpenOcc(object):
             
             occ_labels_1_2 = np.load(occ_gt_label_1_2)
             semantics_1_2 = occ_labels_1_2['semantics']
-            flow_1_2 = occ_labels_1_2['flow']
             results['voxel_semantics_1_2'] = semantics_1_2
-            results['voxel_flow_1_2'] = flow_1_2
-            
+            if self.load_flow:
+                results['voxel_flow_1_2'] = occ_labels_1_2['flow']
+
             if self.load_ray_mask:
                 if not os.path.exists(occ_ray_mask_1_2):
                     raise FileNotFoundError(
@@ -406,10 +416,10 @@ class LoadOccGTFromFileOpenOcc(object):
             
             occ_labels_1_4 = np.load(occ_gt_label_1_4)
             semantics_1_4 = occ_labels_1_4['semantics']
-            flow_1_4 = occ_labels_1_4['flow']
             results['voxel_semantics_1_4'] = semantics_1_4
-            results['voxel_flow_1_4'] = flow_1_4
-            
+            if self.load_flow:
+                results['voxel_flow_1_4'] = occ_labels_1_4['flow']
+
             if self.load_ray_mask:
                 if not os.path.exists(occ_ray_mask_1_4):
                     raise FileNotFoundError(
@@ -431,10 +441,10 @@ class LoadOccGTFromFileOpenOcc(object):
             
             occ_labels_1_8 = np.load(occ_gt_label_1_8)
             semantics_1_8 = occ_labels_1_8['semantics']
-            flow_1_8 = occ_labels_1_8['flow']
             results['voxel_semantics_1_8'] = semantics_1_8
-            results['voxel_flow_1_8'] = flow_1_8
-            
+            if self.load_flow:
+                results['voxel_flow_1_8'] = occ_labels_1_8['flow']
+
             if self.load_ray_mask:
                 if not os.path.exists(occ_ray_mask_1_8):
                     raise FileNotFoundError(
@@ -460,7 +470,104 @@ class LoadOccGTFromFileOpenOcc(object):
             results['ray_mask'] = ray_mask
 
         results['voxel_semantics'] = semantics
-        results['voxel_flows'] = flow
+        if self.load_flow:
+            results['voxel_flows'] = flow
+
+        return results
+
+    def __repr__(self):
+        """str: Return a string that describes the module."""
+        return "{} ('scale_1_2={}, scale_1_4={}, scale_1_8={}')".format(
+            self.__class__.__name__, self.scale_1_2, self.scale_1_4, self.scale_1_8)
+
+
+@TRANSFORMS.register_module(name='STCOccLoadOccGTFromFileWaymo')
+class LoadOccGTFromFileWaymo(object):
+    """Occ3D-Waymo GT loader (research_waymo/dataset_schema.md).
+
+    Unlike Occ3D-nuScenes/OpenOcc, `results['occ_path']` here is already a
+    complete file-prefix (e.g. '.../voxel04/training/549/000'), baked in by
+    tools/create_data_waymo_occ.py -- no 'gts'-style string-replace resolver
+    is needed (Waymo's info pkl is purpose-built, not shared with Occ3D, so
+    there is nothing to disambiguate at load time).
+
+    Raw `voxel_label` uses 23 as the free sentinel (not num_classes-1) --
+    confirmed against the official Occ3D-Waymo README and cross-checked
+    against the CVT-Occ reference loader (FREE_LABEL=23, remapped to
+    num_classes-1 at load time); this class does the same remap.
+
+    `infov` (camera field-of-view mask) is treated as a VALIDITY signal, not
+    a visibility signal (research requirements 3.4: GT validity and
+    visibility are different information) -- voxels outside every camera's
+    FOV carry no vision-based information at all (Waymo's 5 cameras do not
+    cover 360 degrees, unlike nuScenes' 6), so they are relabeled to
+    ignore_index=255 unconditionally. `origin_voxel_state` (lidar mask) and
+    `final_voxel_state` (camera mask, the visibility signal) are exposed as
+    optional masks for a future oracle/diagnostic profile
+    (`legacy_occ3d_camera`-equivalent) but are NOT applied by default and are
+    NOT the same thing as the FOV validity mask above.
+    """
+
+    FREE_LABEL_RAW = 23
+
+    def __init__(self, scale_1_2=False, scale_1_4=False, scale_1_8=False,
+                 num_classes=16, apply_fov_ignore=True,
+                 use_lidar_mask=False, use_camera_mask=False):
+        self.scale_1_2 = scale_1_2
+        self.scale_1_4 = scale_1_4
+        self.scale_1_8 = scale_1_8
+        self.num_classes = num_classes
+        self.apply_fov_ignore = apply_fov_ignore
+        self.use_lidar_mask = use_lidar_mask
+        self.use_camera_mask = use_camera_mask
+
+    def _load_one_scale(self, path, expect_msg):
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"[STCOcc Waymo] Ground truth file not found: {path}\n{expect_msg}")
+        d = np.load(path)
+        semantics = d['voxel_label'].astype(np.int64)
+        semantics[semantics == self.FREE_LABEL_RAW] = self.num_classes - 1
+
+        if self.apply_fov_ignore or self.use_lidar_mask or self.use_camera_mask:
+            valid = np.ones_like(semantics, dtype=bool)
+            if self.apply_fov_ignore:
+                valid &= d['infov'].astype(bool)
+            if self.use_lidar_mask:
+                valid &= d['origin_voxel_state'].astype(bool)
+            if self.use_camera_mask:
+                valid &= d['final_voxel_state'].astype(bool)
+            semantics[~valid] = 255
+
+        return semantics
+
+    def __call__(self, results):
+        if 'occ_path' not in results:
+            sample_idx = results.get('sample_idx', 'unknown')
+            raise ValueError(
+                f"[STCOcc LoadOccGTFromFileWaymo] occ_path not found for sample {sample_idx}!")
+        occ_prefix = results['occ_path']
+
+        semantics = self._load_one_scale(
+            occ_prefix + '_04.npz',
+            f"Expected path: {occ_prefix}_04.npz")
+        results['voxel_semantics'] = semantics
+
+        if self.scale_1_2:
+            results['voxel_semantics_1_2'] = self._load_one_scale(
+                occ_prefix + '_04_1_2.npz',
+                "This file is required for multi-scale supervision -- generate it with "
+                "tools/generate_ms_occ_waymo_parallel.py first.")
+        if self.scale_1_4:
+            results['voxel_semantics_1_4'] = self._load_one_scale(
+                occ_prefix + '_04_1_4.npz',
+                "This file is required for multi-scale supervision -- generate it with "
+                "tools/generate_ms_occ_waymo_parallel.py first.")
+        if self.scale_1_8:
+            results['voxel_semantics_1_8'] = self._load_one_scale(
+                occ_prefix + '_04_1_8.npz',
+                "This file is required for multi-scale supervision -- generate it with "
+                "tools/generate_ms_occ_waymo_parallel.py first.")
 
         return results
 

@@ -1,10 +1,59 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 """Expected Calibration Error (ECE), NLL, and streaming AUROC/FPR95 for occupancy metrics."""
+import os
 import numpy as np
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 # Fixed number of score bins for streaming AUROC/FPR95 (avoids unbounded memory)
 AUROC_HIST_BINS = 256
+
+# Occ3D-Waymo raw GT stores free as 23 (not num_classes-1) -- see
+# research_waymo/dataset_schema.md. Confirmed against the official Occ3D README
+# and cross-checked against the CVT-Occ reference loader (FREE_LABEL=23).
+WAYMO_FREE_LABEL_RAW = 23
+
+
+def load_occ_gt_npz(occ_path: str, dataset_name: str, num_classes: int, want_mask: bool):
+    """Single GT-reading primitive for OccupancyMetric's internal (re)loading paths.
+
+    Mirrors the single-gt_resolver principle from research_openocc/ (GT identity
+    must not fork between training/inline-eval/file-eval) -- this is the
+    Waymo-aware counterpart to resolve_occ_gt_dir for the actual npz key names,
+    which differ per GT release (occ3d/openocc share 'semantics'+'mask_camera'
+    in a 'labels.npz'; occ3d_waymo uses 'voxel_label'+'final_voxel_state' in a
+    '<prefix>_04.npz', with raw free=23 remapped to num_classes-1 here exactly
+    like projects/STCOcc/stcocc/transforms/pipelines/loading.py's
+    LoadOccGTFromFileWaymo does for the training path).
+
+    Args:
+        occ_path: for occ3d/openocc, already resolved to end in 'labels.npz'
+            (by the caller, via resolve_occ_gt_dir + the existing
+            os.path.join(..., 'labels.npz') logic already at each call site);
+            for occ3d_waymo, the scene/frame file-prefix with NO suffix yet
+            (this function adds '_04.npz').
+        want_mask: whether to read/return the camera-visibility-equivalent
+            mask at all (occ3d: 'mask_camera'; occ3d_waymo: 'final_voxel_state').
+            Callers keep their existing occ3d/openocc gating logic
+            (`dataset_name == 'occ3d' or self.use_image_mask`) unchanged; for
+            Waymo this naturally evaluates to just `self.use_image_mask` since
+            dataset_name != 'occ3d', matching the "baseline-none has no mask by
+            default, oracle profile can opt in" design.
+
+    Returns:
+        (file_path, gt_semantics, mask_or_None)
+    """
+    if dataset_name == 'occ3d_waymo':
+        file_path = occ_path + '_04.npz'
+        occ_gt = np.load(file_path, allow_pickle=True)
+        gt_semantics = occ_gt['voxel_label'].astype(np.int64)
+        gt_semantics[gt_semantics == WAYMO_FREE_LABEL_RAW] = num_classes - 1
+        mask = occ_gt['final_voxel_state'].astype(bool) if (want_mask and 'final_voxel_state' in occ_gt.files) else None
+        return file_path, gt_semantics, mask
+    else:
+        occ_gt = np.load(occ_path, allow_pickle=True)
+        gt_semantics = occ_gt['semantics']
+        mask = occ_gt['mask_camera'].astype(bool) if (want_mask and 'mask_camera' in occ_gt.files) else None
+        return occ_path, gt_semantics, mask
 
 
 def compute_ece(conf: np.ndarray, acc: np.ndarray, n_bins: int = 10) -> float:

@@ -3,9 +3,12 @@ import numpy as np
 import pickle
 import os
 import sys
+import torch
 from typing import List, Dict, Any, Optional, Sequence, Tuple
 from mmengine.evaluator import BaseMetric
 from mmdet3d.registry import METRICS
+
+from ..utils.gt_resolver import resolve_occ_gt_dir
 
 # For AUROC / FPR95 (uncertainty metrics)
 try:
@@ -22,6 +25,7 @@ try:
         nll_neglog_sum_count,
         ece_bin_stats_update,
         ece_from_bin_stats,
+        load_occ_gt_npz,
     )
 except ImportError:
     # Loaded as standalone (e.g. by OccupancyMetricHybrid via importlib); load utils from same dir
@@ -37,6 +41,7 @@ except ImportError:
     nll_neglog_sum_count = _mod.nll_neglog_sum_count
     ece_bin_stats_update = _mod.ece_bin_stats_update
     ece_from_bin_stats = _mod.ece_from_bin_stats
+    load_occ_gt_npz = _mod.load_occ_gt_npz
 
 # Import original metric functions
 try:
@@ -647,9 +652,8 @@ class OccupancyMetric(BaseMetric):
             occ_path = info.get('occ3d_gt_path') or info.get('occ_path') or info.get('occ_gt_path')
             if not occ_path:
                 continue
-            if self.dataset_name == 'openocc':
-                occ_path = occ_path.replace('gts', 'openocc_v2')
-            if not occ_path.endswith('labels.npz'):
+            occ_path = resolve_occ_gt_dir(occ_path, self.dataset_name)
+            if self.dataset_name != 'occ3d_waymo' and not occ_path.endswith('labels.npz'):
                 occ_path = os.path.join(occ_path, 'labels.npz')
             if self.data_root and not os.path.isabs(occ_path):
                 root = os.path.normpath(self.data_root.rstrip(os.sep))
@@ -657,11 +661,11 @@ class OccupancyMetric(BaseMetric):
                 if not path_norm.startswith(root + os.sep) and path_norm != root:
                     occ_path = os.path.join(self.data_root, occ_path)
             try:
-                occ_gt = np.load(occ_path, allow_pickle=True)
-                gt_semantics = occ_gt['semantics']
+                occ_path, gt_semantics, mask_camera = load_occ_gt_npz(
+                    occ_path, self.dataset_name, self.num_classes,
+                    want_mask=(self.dataset_name == 'occ3d' or self.use_image_mask))
                 idx = data_index.index(index)
                 pr_semantics = pred_sems[idx]
-                mask_camera = occ_gt['mask_camera'].astype(bool) if (self.dataset_name == 'occ3d' or self.use_image_mask) else None
                 if 'miou' in self._f_metric_groups:
                     self.miou_metric.add_batch(pr_semantics, gt_semantics, None, mask_camera)
                 pr_flat = np.asarray(pr_semantics).reshape(-1)
@@ -1087,28 +1091,23 @@ class OccupancyMetric(BaseMetric):
             if 'occ3d_gt_path' in info:
                 occ_path = info['occ3d_gt_path']
             else:
-                occ_path = info['occ_path']
-                if self.dataset_name == 'openocc':
-                    occ_path = occ_path.replace('gts', 'openocc_v2')
-            
-            if not occ_path.endswith('labels.npz'):
+                occ_path = resolve_occ_gt_dir(info['occ_path'], self.dataset_name)
+
+            if self.dataset_name != 'occ3d_waymo' and not occ_path.endswith('labels.npz'):
                 occ_path = os.path.join(occ_path, 'labels.npz')
-            
+
             if self.data_root and not os.path.isabs(occ_path):
                 root = os.path.normpath(self.data_root.rstrip(os.sep))
                 path_norm = os.path.normpath(occ_path)
                 if not path_norm.startswith(root + os.sep) and path_norm != root:
                     occ_path = os.path.join(self.data_root, occ_path)
-            
+
             try:
-                occ_gt = np.load(occ_path, allow_pickle=True)
-                gt_semantics = occ_gt['semantics']
+                occ_path, gt_semantics, mask_camera = load_occ_gt_npz(
+                    occ_path, self.dataset_name, self.num_classes,
+                    want_mask=(self.dataset_name == 'occ3d' or self.use_image_mask))
                 idx = data_index.index(index)
                 pr_semantics = pred_sems[idx]
-                if self.dataset_name == 'occ3d' or self.use_image_mask:
-                    mask_camera = occ_gt['mask_camera'].astype(bool)
-                else:
-                    mask_camera = None
                 self.miou_metric.add_batch(pr_semantics, gt_semantics, None, mask_camera)
                 pr_flat = np.asarray(pr_semantics).reshape(-1)
                 gt_flat = np.asarray(gt_semantics).reshape(-1)
@@ -1424,6 +1423,7 @@ class OccupancyMetric(BaseMetric):
             from ..datasets.nuscenes_ego_pose_loader import nuScenesDataset
             from ..datasets.ray_metrics_occ3d import main as ray_based_miou_occ3d
             from ..datasets.ray_metrics_openocc import main as ray_based_miou_openocc
+            from ..datasets.ray_metrics_waymo import main as ray_based_miou_waymo
         except ImportError:
             import importlib.util as _ilu
             _eval_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1441,6 +1441,8 @@ class OccupancyMetric(BaseMetric):
             ray_based_miou_occ3d = _occ3d_mod.main
             _openocc_mod = _load_mod('ray_metrics_openocc', 'ray_metrics_openocc.py')
             ray_based_miou_openocc = _openocc_mod.main
+            _waymo_mod = _load_mod('ray_metrics_waymo', 'ray_metrics_waymo.py')
+            ray_based_miou_waymo = _waymo_mod.main
         
         pred_sems, gt_sems = [], []
         pred_flows, gt_flows = [], []
@@ -1486,47 +1488,75 @@ class OccupancyMetric(BaseMetric):
                 else:
                     pred_flows.append(np.zeros(pred_sem.shape + (2,)))
         
-        # Load NuScenes dataset for lidar origins
-        from nuscenes.nuscenes import NuScenes
-        nusc = NuScenes('v1.0-trainval', 'data/nuscenes/')
-        nusdata = nuScenesDataset(nusc, 'val')
-        
+        # Load NuScenes dataset for lidar origins. Waymo has no nuscenes-devkit
+        # equivalent (and no 'data/nuscenes/' on disk) -- skipped entirely below.
+        if self.dataset_name != 'occ3d_waymo':
+            from nuscenes.nuscenes import NuScenes
+            nusc = NuScenes('v1.0-trainval', 'data/nuscenes/')
+            nusdata = nuScenesDataset(nusc, 'val')
+
         # CRITICAL: Load ground truth in the same order as data_index (same as original)
         for index in data_index:
             if index >= len(self.data_infos):
                 break
             info = self.data_infos[index]
 
+            if self.dataset_name == 'occ3d_waymo':
+                # Priority: occ3d_gt_path > occ_path (STCOcc format), same as below,
+                # but load_occ_gt_npz appends '_04.npz' itself -- no 'labels.npz' join.
+                occ_path = info.get('occ3d_gt_path', info.get('occ_path'))
+                occ_path = resolve_occ_gt_dir(occ_path, self.dataset_name)
+                if self.data_root and not os.path.isabs(occ_path):
+                    root = os.path.normpath(self.data_root.rstrip(os.sep))
+                    path_norm = os.path.normpath(occ_path)
+                    if not path_norm.startswith(root + os.sep) and path_norm != root:
+                        occ_path = os.path.join(self.data_root, occ_path)
+
+                _, gt_semantics, _ = load_occ_gt_npz(
+                    occ_path, self.dataset_name, self.num_classes, want_mask=False)
+                gt_semantics = gt_semantics.astype(np.uint8)
+                # Occupancy-only baseline: no flow GT/predictions for Waymo.
+                gt_flow = np.zeros((200, 200, 16, 2), dtype=np.float16)
+
+                gt_sems.append(gt_semantics)
+                gt_flows.append(gt_flow)
+
+                # Single-origin simplification (T=1): Waymo's lidar2ego translation
+                # is near-zero (research_waymo/dataset_schema.md) -- see
+                # ray_metrics_waymo.py's module docstring for the full caveat.
+                origin_xyz = info.get('lidar2ego_translation', [0.0, 0.0, 0.0])
+                output_origin_tensor = torch.tensor([origin_xyz], dtype=torch.float32)
+                lidar_origins.append(output_origin_tensor.unsqueeze(0))
+                continue
+
             # Priority: occ3d_gt_path (SurroundOcc/BEVFormer format) > occ_path (STCOcc format)
             if 'occ3d_gt_path' in info:
                 occ_path = info['occ3d_gt_path']
             else:
-                occ_path = info['occ_path']
-                if self.dataset_name == 'openocc':
-                    occ_path = occ_path.replace('gts', 'openocc_v2')
-            
+                occ_path = resolve_occ_gt_dir(info['occ_path'], self.dataset_name)
+
             # Only append 'labels.npz' if not already present (BEVFormer includes it)
             if not occ_path.endswith('labels.npz'):
                 occ_path = os.path.join(occ_path, 'labels.npz')
-            
+
             # Prepend data_root if provided and path is relative; avoid duplicating data_root
             if self.data_root and not os.path.isabs(occ_path):
                 root = os.path.normpath(self.data_root.rstrip(os.sep))
                 path_norm = os.path.normpath(occ_path)
                 if not path_norm.startswith(root + os.sep) and path_norm != root:
                     occ_path = os.path.join(self.data_root, occ_path)
-            
+
             occ_gt = np.load(occ_path, allow_pickle=True)
-            
+
             gt_semantics = occ_gt['semantics'].astype(np.uint8)
             if self.dataset_name == 'occ3d':
                 gt_flow = np.zeros((200, 200, 16, 2), dtype=np.float16)
             elif self.dataset_name == 'openocc':
                 gt_flow = occ_gt['flow'].astype(np.float16)
-            
+
             gt_sems.append(gt_semantics)
             gt_flows.append(gt_flow)
-            
+
             # Get lidar origin
             if self.rayiou_decompose_by_origin:
                 ref_sample_token, output_origin_tensor, time_offset_tensor = \
@@ -1543,7 +1573,10 @@ class OccupancyMetric(BaseMetric):
             miou, mave, occ_score = ray_based_miou_occ3d(
                 pred_sems, gt_sems, pred_flows, gt_flows, lidar_origins, logger=None,
                 lidar_origin_time_offset_list=lidar_origin_time_offsets)
-        
+        elif self.dataset_name == 'occ3d_waymo':
+            miou, mave, occ_score = ray_based_miou_waymo(
+                pred_sems, gt_sems, pred_flows, gt_flows, lidar_origins, logger=None)
+
         return {
             'mIoU': miou,
             'mAVE': mave,

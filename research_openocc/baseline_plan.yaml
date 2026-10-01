@@ -1,0 +1,83 @@
+# OpenOcc occupancy-only baseline plan
+# Scope: GT-generalization axis only (STCOcc + OpenOcc-nuScenes), per
+# DATASET_RECOMMENDATIONS_20261001_KO.md. Architecture unchanged from Occ3D work.
+created_date: '2026-10-01'
+supersedes: none (new tree, does not touch research_v2/)
+
+supervision_policies:
+  none:
+    description: "all valid voxels, native objective, no selective weighting"
+    status: IMPLEMENTED (lambda_inv_free=1.0, the only legal value given no camera mask)
+    required_this_pass: true
+  global_free:
+    description: "uniform alpha on all valid free voxels (no camera-visibility distinction)"
+    status: NOT_IMPLEMENTED (low-cost control, not required this pass)
+  legacy_occ3d_camera:
+    description: "Occ3D-provided camera mask selective lambda"
+    status: NOT_APPLICABLE (OpenOcc has no camera mask -- requirement explicitly forbids
+      fabricating one; T6 guard in stcocc.py now makes this configuration raise instead
+      of silently degrading to 'none')
+  method_plugin:
+    description: "final annotation-free proposed method, voxel weight from a
+      SupervisionWeightProvider not yet designed"
+    status: NOT_IMPLEMENTED -- no proposed method exists yet to connect. This pass only
+      prepares the common weight interface (get_voxel_loss's camera_mask/voxel_weight
+      arguments), it does not invent or guess at the method.
+  optional_gt_raycast_reference:
+    description: "recomputed visibility from OpenOcc GT via ray casting, as a separate
+      control, NOT claimed as mask-free/input-derived"
+    status: NOT_IMPLEMENTED (opt-in, future work)
+
+profiles:
+  openocc_native_reference:
+    config: projects/STCOcc/configs/stcocc_r50_704x256_16f_openocc_12e.py
+    status: UNTOUCHED (preserved exactly as audited). Flow-enabled joint training,
+      num_gpus=8/samples_per_gpu=2 recipe with the unexplained-but-faithful 4.554
+      iters-per-epoch multiplier. NOT RUN this pass (requires the newly-generated
+      multi-scale GT just like the screen profile, plus its own val_evaluator fix
+      would be needed before it could even evaluate -- out of scope this pass, flagged
+      not silently fixed).
+    blocking_items_if_ever_run: ["val_evaluator still bare dict(type='OccupancyMetric'),
+      same bug as audit.md found", "load_from path does not exist (plural 'pretrained')"]
+  openocc_occ_only_screen:
+    config: projects/STCOcc/configs/stcocc_r50_704x256_16f_openocc_occ_only_screen.py
+    companion_eval: projects/STCOcc/configs/stcocc_r50_704x256_16f_openocc_occ_only_screen_miou.py
+    status: IMPLEMENTED, NOT YET TRAINED (pending approval + the smoke test in
+      research_openocc/evaluation_smoke.json)
+    policy: none (lambda_inv_free=1.0)
+    flow: disabled (no flow_head, load_flow=False, no voxel_flows in Collect3D)
+    effective_batch: 16 (num_gpus=2 x samples_per_gpu=8), matching the already-run
+      Occ3D screen profiles exactly
+    total_optimizer_updates: 21096 (total_epoch=12 * num_iters_per_epoch=1758),
+      IDENTICAL to research_v2's screen_e12_v2 Occ3D profile update count -- this is
+      intentional, to make the GT-transfer comparison a controlled same-budget swap
+    sampler: InfiniteGroupEachSampleInBatchSampler (grouped/sequential, matches Occ3D's
+      mmengine port) -- NOT DefaultSampler (which is what the untouched reference
+      config uses; see audit.md section 2.4)
+    reference_vs_screen_differences:
+      - "no 4.554 multiplier (uses the same formula as Occ3D screen profiles)"
+      - "num_gpus=2/samples_per_gpu=8 vs reference's num_gpus=8/samples_per_gpu=2
+         (same effective batch=16, different per-GPU batch -- chosen to match the
+         2-GPU sites actually available: ssh mando-h100 / mando-h100_2)"
+      - "by_epoch=False StepLR (iteration-count step_size) instead of the reference's
+         by_epoch=True StepLR (epoch-count step_size) -- both land on the same single
+         decay point at the final iteration (see implementation_changes.md), but the
+         by_epoch=False form is the one already proven correct in the Occ3D mmengine
+         port and is more robust to resume/val_interval edge cases"
+      - "flow completely absent vs reference's flow-enabled joint training"
+
+comparison_axis: "Occ3D screen_e12_v2 (research_v2/plan.yaml, already trained/evaluated,
+  21096 updates, effective batch 16, 12-epoch-equivalent) vs this OpenOcc screen profile
+  (same update count, same effective batch, same architecture/optimizer/augmentation) --
+  the only thing that differs is the GT release (Occ3D 'gts' vs OpenOcc 'openocc_v2')
+  and the consequent absence of a camera mask (policy=none both sides is the fairest
+  comparison point, since Occ3D's own screen sweep already separately shows lambda=0.25
+  beats lambda=1.0/none on RayIoU -- this profile establishes what 'none' looks like on
+  OpenOcc GT before any selective-weighting method is attempted there)."
+
+next_experiment_requires_separate_approval:
+  - "actually run openocc_occ_only_screen training to completion (currently: config
+     ready + multi-scale GT generated + 1-iter backward smoke test only)"
+  - "openocc_native_reference training (flow-enabled, requires its own val_evaluator fix
+     first, not done this pass)"
+  - "method_plugin design + connection once a concrete annotation-free method exists"

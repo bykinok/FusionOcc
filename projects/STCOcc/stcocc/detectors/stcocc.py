@@ -346,6 +346,24 @@ class STCOcc(CenterPoint):
         # this guarantees stcocc_invfree_l100 is bit-identical to the plain w/o-mask baseline).
         voxel_weight = None
         _lambda_is_noop = (not isinstance(self.lambda_inv_free, dict)) and self.lambda_inv_free == 1.0
+        if camera_mask is None and not _lambda_is_noop:
+            # T6 (research_openocc/audit.md): a camera mask is required to build a
+            # non-trivial invisible-free weight. Without one, the weight silently
+            # defaulted to None (= uniform weight, identical to lambda_inv_free=1.0)
+            # even when the config asked for a different lambda -- e.g. an OpenOcc
+            # profile (no camera mask available at all) with lambda_inv_free=0.25 would
+            # silently train as if lambda_inv_free=1.0. Fail loudly instead: a dataset/
+            # profile with no camera mask must explicitly use the 'none' policy
+            # (lambda_inv_free=1.0), not a non-1.0 lambda that can never actually apply.
+            raise RuntimeError(
+                "[STCOcc] selective invisible-free supervision (lambda_inv_free={!r}) "
+                "requires a camera visibility mask for scale '{}', but none was found in "
+                "this batch (camera_mask is None). This would otherwise silently fall "
+                "back to uniform voxel weights, i.e. behave as lambda_inv_free=1.0 while "
+                "being recorded/reported as {!r}. If this dataset/profile genuinely has no "
+                "camera mask (e.g. OpenOcc), set lambda_inv_free=1.0 (the 'none' baseline "
+                "policy) explicitly instead.".format(
+                    self.lambda_inv_free, tag, self.lambda_inv_free))
         if camera_mask is not None and not _lambda_is_noop:
             voxel_weight = self.build_inv_free_voxel_weight(
                 target_voxel_semantic, camera_mask, device=pred_voxel_semantic.device,

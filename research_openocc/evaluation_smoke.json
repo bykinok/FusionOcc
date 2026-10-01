@@ -1,0 +1,44 @@
+{
+  "run_date": "2026-10-01",
+  "site": "ssh mando-h100 / docker occfrmwrk_h100_new",
+  "config": "projects/STCOcc/configs/stcocc_r50_704x256_16f_openocc_occ_only_screen.py",
+  "code_sync_method": "tar (local host -> scp -> remote host /tmp -> docker cp -> extracted inside container over /workspace/FusionOcc; git NOT used, no commit/push made). Multi-scale GT tar (230MB compressed) extracted into the container's /NAS/mmDataset/nuscenes_stcocc/openocc_v2.1/openocc_v2 (bind-mounted from host /home/ailab/DATA). NOT yet synced to mando-h100_2.",
+
+  "step_1_training_smoke": {
+    "command": "bash tools/dist_train.sh <config> 2 --cfg-options train_cfg.max_iters=20 default_hooks.checkpoint.interval=20 default_hooks.logger.interval=1 --work-dir work_dirs/openocc_occ_only_screen_smoke",
+    "gpus": 2,
+    "iterations": 20,
+    "result": "SUCCESS -- all 20 iterations completed, config load -> real dataset sample -> forward -> loss -> backward all worked end-to-end.",
+    "loss_trajectory": "total loss 101.19 (iter 1) -> 96.30 (iter 20), monotonically decreasing, grad_norm finite throughout (288.4 -> 260.3), no NaN/Inf observed",
+    "loss_terms_present": ["loss_depth", "loss_voxel_ce_c_1_{1,2,4,8}", "loss_voxel_sem_scal_c_1_{1,2,4,8}", "loss_voxel_geo_scal_c_1_{1,2,4,8}", "loss_voxel_lovasz_c_1_{1,2,4,8}"],
+    "loss_terms_confirmed_absent": "no loss_voxel_flow_* term anywhere in the log -- confirms flow_head is genuinely not built (occupancy-only, requirement 4.1 satisfied, not just train_flow=False)",
+    "t6_guard_confirmed_not_tripped": "lambda_inv_free=1.0 (none policy) ran without the new RuntimeError guard firing, as expected since _lambda_is_noop=True bypasses the mask-required check",
+    "gpu_memory": "~38-42GB per GPU (well within H100 96GB)",
+    "checkpoints_saved": ["work_dirs/openocc_occ_only_screen_smoke/iter_20.pth (722MB)", "iter_20_ema.pth / epoch_1_ema.pth (241MB each, MEGVIIEMAHook)"]
+  },
+
+  "step_2_evaluation_smoke": {
+    "attempt_1": {
+      "gpus": 2,
+      "result": "FAILED (not a code-correctness bug): AssertionError: groups_num(1) must be >= global_batch_size(2). The 24-sample eval slice (first 24 entries of the val pkl, all from one scene) forms only 1 sequence group under InfiniteGroupEachSampleInBatchSamplerEval, which cannot be split across 2 ranks. This is a smoke-test harness limitation (too-small/too-homogeneous eval slice for 2-GPU distribution), not an OpenOcc integration defect."
+    },
+    "attempt_2": {
+      "gpus": 1,
+      "ann_file_used": "data/nuscenes/stcocc-nuscenes_infos_val_smoke24.pkl (first 24 entries of the real val pkl, generated this run; test_dataloader/val_dataloader/val_evaluator/test_evaluator.ann_file all pointed at this same file to keep dataset-order and evaluator-order consistent)",
+      "result": "SUCCESS -- end-to-end evaluation completed: data loading -> forward -> RayIoU evaluator dispatch -> per-class table -> final summary line.",
+      "dispatch_confirmed": "log path references projects/STCOcc/stcocc/datasets/ray_metrics_openocc.py (NOT ray_metrics_occ3d.py) -- confirms dataset_name='openocc' routing (audit.md finding, fixed via val_evaluator config) works correctly in a real run, not just in the config-load check.",
+      "class_names_confirmed": "per-class table printed OpenOcc's 17-class order (car, truck, trailer, bus, construction_vehicle, bicycle, motorcycle, pedestrian, traffic_cone, barrier, driveable_surface, other_flat, sidewalk, terrain, manmade, vegetation) -- not Occ3D's 18-class order.",
+      "metrics": {"mIoU": 0.0001, "mAVE": "nan", "occ_score": "nan", "count": 24},
+      "metrics_interpretation": "mIoU near-zero is EXPECTED and not a bug: the checkpoint was trained for only 20 iterations (~1/1000 of the planned 21096-update screen run), i.e. barely past random initialization. mAVE/occ_score=nan is CORRECT, not a failure: occupancy-only has no flow predictions, so the flow-dependent ave_list is empty -> np.nanmean(empty) -> nan with a RuntimeWarning('Mean of empty slice'), exactly satisfying requirement 4.1 ('mAVE, flow 기반 Occ score는 null/NOT_APPLICABLE'). This run is evidence the PIPELINE runs correctly end-to-end, not a performance result -- no claim is made about model quality from these numbers.",
+      "known_caveat": "OccupancyMetric.compute_metrics()'s broad except-Exception->0-score fallback (protocol_manifest.json known_gaps) was NOT specifically stress-tested here; this run's mIoU=0.0001 is a real (if tiny, under-trained) computed value, not a silently-swallowed failure -- confirmed by the presence of a real per-class table and the RayIoU dispatch log line, not just a bare zero."
+    }
+  },
+
+  "overall_result": "PASS -- config load, real dataset sample, forward, occupancy loss (4 terms x 4 scales), 1-iteration backward, 20-iteration short run, checkpoint save, and small-scale (24-sample, 1-GPU) RayIoU evaluation via the openocc-routed evaluator all succeeded. This satisfies CLAUDE_CODE_OPENOCC_REQUIREMENTS_KO.md section 7's minimum bar ('config load -> 실제 dataset sample -> forward -> loss -> 1 iteration backward -> 짧은 승인된 smoke run -> 소규모 동일 prediction 평가') for the occupancy-only baseline-none profile.",
+  "not_done_this_pass": [
+    "Full 21096-iteration training (separate approval required)",
+    "Full 6019-sample val evaluation (separate approval required)",
+    "2-GPU evaluation (the 2-GPU attempt's sampler assertion was worked around by switching to 1 GPU for this small slice, not fixed/investigated further -- a larger or multi-scene eval slice would avoid it naturally)",
+    "mando-h100_2 sync (code+data only pushed to mando-h100 for this smoke test)"
+  ]
+}

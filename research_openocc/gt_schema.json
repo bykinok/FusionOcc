@@ -1,0 +1,30 @@
+{
+  "full_resolution": {
+    "openocc": {
+      "path_pattern": "data/nuscenes/openocc_v2/scene-XXXX/<sample_token>/labels.npz",
+      "keys": {
+        "semantics": {"dtype": "int32", "shape": [200, 200, 16], "value_range": "0-16 (0=car .. 16=free)"},
+        "instances": {"dtype": "uint8", "shape": [200, 200, 16], "note": "instance ids, not used by STCOcc occupancy-only training/eval"},
+        "flow": {"dtype": "float32", "shape": [200, 200, 16, 2], "note": "real per-voxel flow vector; read only when load_flow=True"}
+      }
+    },
+    "occ3d": {
+      "path_pattern": "data/nuscenes/gts/scene-XXXX/<sample_token>/labels.npz",
+      "keys": {
+        "semantics": {"dtype": "uint8", "shape": [200, 200, 16], "value_range": "0-17 (0 unused/others-at-raw-level per Occ3D convention, 17=free)"},
+        "mask_lidar": {"dtype": "uint8", "shape": [200, 200, 16]},
+        "mask_camera": {"dtype": "uint8", "shape": [200, 200, 16]}
+      }
+    }
+  },
+  "multi_scale": {
+    "generated_by": "tools/generate_ms_occ.py / tools/generate_ms_occ_parallel.py (identical algorithm, bit-identical output, verified this session)",
+    "path_pattern": "<same dir as labels.npz>/labels_1_{2,4,8}.npz",
+    "downsample_method": "majority-vote per block with a 95%-empty threshold (downsample_label/downsample_mask in generate_ms_occ.py), NOT naive nearest/average -- empty_cls_idx is free_index (16 for openocc, 17 for occ3d)",
+    "shapes": {"1_2": [100, 100, 8], "1_4": [50, 50, 4], "1_8": [25, 25, 2]},
+    "keys_written": ["semantics", "flow", "mask_camera (occ3d only, if source has it)", "mask_lidar (occ3d only, if source has it)"],
+    "known_placeholder": "the 'flow' key in every labels_1_X.npz (both Occ3D's and OpenOcc's, this is upstream Ref/STCOcc_ori behavior, not a local bug) is literally the downsampled SEMANTIC LABEL array reused under the 'flow' key, not a real downsampled flow vector field. Confirmed never consumed downstream by the detector at any scale (get_flow_loss only ever reads full-resolution kwargs['voxel_flows']). The new load_flow=False path in LoadOccGTFromFileOpenOcc never reads this key at all, so this placeholder cannot affect the occupancy-only baseline.",
+    "class_preservation_verified": "downsampled class set is always a subset of the full-resolution class set (checked this session on real generated OpenOcc files: research_openocc/tests/test_openocc_baseline.py T9); bit-identical to the single-threaded reference function on sampled tokens.",
+    "coverage_openocc": "generated this session for all 28130 train + 6019 val samples via tools/generate_ms_occ_parallel.py (did not exist before; this was the single blocking reason stcocc_r50_704x256_16f_openocc_12e.py could not even start training -- see audit.md section 3.5)"
+  }
+}
