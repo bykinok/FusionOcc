@@ -214,10 +214,22 @@ def flatten_probas(probas, labels, ignore=None):
     """
     Flattens predictions in the batch
     """
-    # Handle case where labels is a list or numpy array
+    # Handle case where labels is a list or numpy array.
+    # NOTE (fixed 2026-10-02): this used to have a redundant `import numpy as np`
+    # inside each branch below. Python scoping makes any name assigned ANYWHERE in a
+    # function's body local to that whole function, so those local imports silently
+    # shadowed the real module-level `import numpy as np` at the top of this file --
+    # whenever `labels` was NOT a list (e.g. a bare tensor), the `if` branch (and its
+    # local import) never ran, yet the `elif isinstance(labels, np.ndarray)` line still
+    # referenced the now-local, never-assigned `np`, raising UnboundLocalError. This was
+    # previously a known-but-dormant bug (every real training call happened to pass
+    # `labels` as a python list, per the Collect3D collate behavior, so the tensor branch
+    # was never exercised) -- STCOcc.build_lovasz_target (reweight_lovasz=True) is the
+    # first caller that passes a stacked tensor instead of a list, which is what
+    # surfaced this. Removing the redundant local imports (module-level np is already in
+    # scope) fixes both branches with no behavior change for the list case.
     if isinstance(labels, list):
         # Convert list elements to tensors if needed
-        import numpy as np
         label_tensors = []
         for l in labels:
             if isinstance(l, np.ndarray):
@@ -228,7 +240,6 @@ def flatten_probas(probas, labels, ignore=None):
                 label_tensors.append(torch.tensor(l))
         labels = torch.stack(label_tensors)
     elif isinstance(labels, np.ndarray):
-        import numpy as np
         labels = torch.from_numpy(labels)
     
     # Ensure labels is on the same device as probas
