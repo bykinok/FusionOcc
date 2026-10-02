@@ -54,6 +54,7 @@ class STCOcc(CenterPoint):
                  compute_uncertainty=False,
                  use_camera_mask=False,
                  lambda_inv_free=1.0,
+                 reweight_lovasz=False,
                  **kwargs):
         super(STCOcc, self).__init__(**kwargs)
         # ---------------------- init params ------------------------------
@@ -96,6 +97,14 @@ class STCOcc(CenterPoint):
         #   does letting lambda vary by distance beat the best flat scalar found in E1/v1?
         self.use_camera_mask = use_camera_mask
         self.lambda_inv_free = lambda_inv_free
+        # reweight_lovasz: OFF by default (preserves exact behavior of every existing
+        # lambda_inv_free config -- all v1/E1/E2/E3 results were produced with this False).
+        # When True, extends lambda_inv_free to the one loss term it previously never
+        # reached (see build_lovasz_target docstring) via stochastic per-voxel exclusion,
+        # not a change to lovasz_grad itself. Opt-in so turning this on is a deliberate,
+        # separately-tracked experiment, never a silent redefinition of what an existing
+        # lambda_inv_free value means.
+        self.reweight_lovasz = reweight_lovasz
         self._inv_free_sanity_logged = False
         self._radius_map_cache = {}
         # ---------------------- init loss ------------------------------
@@ -328,6 +337,44 @@ class STCOcc(CenterPoint):
 
         return weight
 
+    def build_lovasz_target(self, target_voxel_semantic, voxel_weight):
+        """Stochastically extend lambda_inv_free to the Lovasz term (opt-in, reweight_lovasz=True only).
+
+        lovasz_softmax is rank-based (sorts voxels by error, applies a cumulative-sum
+        gradient over that ordering) -- there is no low-risk way to inject a continuous
+        per-voxel *multiplicative* weight into that ranking without redefining
+        lovasz_grad's cumulative-sum formula itself. But lovasz_softmax already supports
+        hard per-voxel exclusion via its `ignore` id (used for ignore_index=255), and that
+        mechanism generalizes cleanly to a *probabilistic* exclusion: independently keep
+        each sub-1.0-weight voxel with probability == its weight (Bernoulli), else relabel
+        it to ignore_index=255 for this Lovasz call only (the original target tensor used
+        by CE/sem_scal/geo_scal is untouched). In expectation over many training steps this
+        approximates giving that voxel `weight` of a full Lovasz gradient contribution --
+        it degenerates exactly to "always drop" at weight==0.0 and "always keep" (a no-op)
+        at weight==1.0, since `rand() < 0.0` and `rand() < 1.0` are deterministic in those
+        two cases. Only touches voxels where build_inv_free_voxel_weight actually set a
+        sub-1.0 weight (invisible-free under lambda_inv_free < 1.0); invisible-occupied and
+        already-ignored voxels are untouched, matching lambda_inv_free's existing scope.
+
+        Args:
+            target_voxel_semantic: (B, X, Y, Z) tensor, raw class ids (255 = ignore).
+            voxel_weight: same shape, or None (lambda_inv_free==1.0 bypass -- returned as-is,
+                preserving the existing "bit-identical to w/o-mask baseline" guarantee).
+        Returns:
+            (B, X, Y, Z) tensor to pass as `labels` to lovasz_softmax instead of
+            target_voxel_semantic; identical object when no stochastic exclusion applies.
+        """
+        if voxel_weight is None:
+            return target_voxel_semantic
+        needs_sampling = (voxel_weight < 1.0) & (target_voxel_semantic != 255)
+        if not needs_sampling.any():
+            return target_voxel_semantic
+        target_lovasz = target_voxel_semantic.clone()
+        keep = torch.rand_like(voxel_weight) < voxel_weight
+        drop = needs_sampling & ~keep
+        target_lovasz[drop] = 255
+        return target_lovasz
+
     def get_voxel_loss(self,
                        pred_voxel_semantic,
                        target_voxel_semantic,
@@ -386,17 +433,22 @@ class STCOcc(CenterPoint):
             ignore_index=255,
             empty_idx=self.empty_idx,
             voxel_weight=voxel_weight)
-        # NOTE: lovasz_softmax is intentionally NOT reweighted. It is a rank-based Lovasz
-        # extension of the Jaccard index (sorts voxels by error, then applies a cumulative-sum
-        # gradient over that ordering); there is no low-risk way to inject a continuous
-        # per-voxel weight into that ranking without redefining lovasz_grad's cumulative-sum
-        # formula, which would also be unverified for the Stage 1 baselines that share this
-        # function. lambda_inv_free therefore reweights 3 of the 4 voxel loss terms
-        # (CE/focal, sem_scal, geo_scal); lovasz always supervises all non-ignored voxels
-        # equally, same as the "w/o mask" baseline. See report for details.
+        # lovasz_softmax: NOT reweighted by default (reweight_lovasz=False, every existing
+        # lambda_inv_free config). It is a rank-based Lovasz extension of the Jaccard index
+        # (sorts voxels by error, applies a cumulative-sum gradient over that ordering), so
+        # there is no low-risk way to inject a continuous per-voxel *multiplicative* weight
+        # into that ranking without redefining lovasz_grad's cumulative-sum formula. When
+        # reweight_lovasz=True (opt-in), build_lovasz_target instead applies the SAME
+        # lambda_inv_free weight as a stochastic per-voxel exclusion (same ignore=255
+        # mechanism already used for invalid voxels, not a change to lovasz_grad) -- see its
+        # docstring. Default path (reweight_lovasz=False) is untouched: target_lovasz is
+        # target_voxel_semantic unchanged, bit-identical to every prior run.
+        target_lovasz = target_voxel_semantic
+        if self.reweight_lovasz:
+            target_lovasz = self.build_lovasz_target(target_voxel_semantic, voxel_weight)
         loss_dict['loss_voxel_lovasz_{}'.format(tag)] = loss_weight * lovasz_softmax(
             torch.softmax(pred_voxel_semantic, dim=1),
-            target_voxel_semantic,
+            target_lovasz,
             ignore=255,
         )
 

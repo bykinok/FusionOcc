@@ -338,6 +338,82 @@ def test_gradient_norms_and_harddrop(lam=0.25):
 # 5. (v2 NEW) Lovasz's relative share of total inv_free gradient as lambda
 #    changes -- template explicitly says do NOT assume this, check it.
 # ---------------------------------------------------------------------------
+def build_lovasz_target(target_voxel_semantic, voxel_weight):
+    """Standalone replica of STCOcc.build_lovasz_target (research_v2 reweight_lovasz=True
+    option, 2026-10-02) -- see that method's docstring for the full rationale. Kept as an
+    independent copy here (same convention as build_weight above) so this file never needs
+    to instantiate the full model to test the primitive."""
+    if voxel_weight is None:
+        return target_voxel_semantic
+    needs_sampling = (voxel_weight < 1.0) & (target_voxel_semantic != IGNORE_IDX)
+    if not needs_sampling.any():
+        return target_voxel_semantic
+    target_lovasz = target_voxel_semantic.clone()
+    keep = torch.rand_like(voxel_weight) < voxel_weight
+    drop = needs_sampling & ~keep
+    target_lovasz[drop] = 255
+    return target_lovasz
+
+
+# ---------------------------------------------------------------------------
+# reweight_lovasz=True (research_v2, 2026-10-02): stochastic per-voxel exclusion
+# ---------------------------------------------------------------------------
+def test_lovasz_stochastic_reweight():
+    logits, target, camera_mask = make_synthetic(seed=7)
+
+    # --- lambda=1.0 (voxel_weight=None): must return the exact same object, untouched ---
+    out = build_lovasz_target(target, None)
+    record("lovasz", "reweight_lambda1_noop",
+           "PASS" if out is target else "FAIL",
+           f"voxel_weight=None must short-circuit to the original tensor unchanged (identity check): {out is target}")
+
+    # --- lambda=0.0: every invisible-free voxel must be deterministically dropped (255),
+    #     invisible-occupied and already-valid voxels must be exactly untouched ---
+    w0, inv_free = build_weight(target, camera_mask, lam=0.0)
+    inv_occupied = (~camera_mask) & (target != FREE_IDX) & (target != IGNORE_IDX)
+    if inv_free.sum() == 0:
+        record("lovasz", "reweight_lambda0_deterministic", "SKIP", "0 invisible-free voxels in synthetic batch")
+    else:
+        out0 = build_lovasz_target(target, w0)
+        all_dropped = bool((out0[inv_free] == IGNORE_IDX).all())
+        occupied_untouched = bool(inv_occupied.sum() == 0 or (out0[inv_occupied] == target[inv_occupied]).all())
+        elsewhere = ~inv_free
+        elsewhere_untouched = bool((out0[elsewhere] == target[elsewhere]).all())
+        record("lovasz", "reweight_lambda0_deterministic",
+               "PASS" if (all_dropped and occupied_untouched and elsewhere_untouched) else "FAIL",
+               f"all_inv_free_dropped={all_dropped} inv_occupied_untouched={occupied_untouched} "
+               f"rest_untouched={elsewhere_untouched} (n_inv_free={int(inv_free.sum())}, n_inv_occupied={int(inv_occupied.sum())})")
+
+    # --- intermediate lambda (0.3): empirical keep-rate over many independent draws must
+    #     converge to lambda within binomial sampling tolerance (this is the actual claim
+    #     the opt-in makes: "approximates `weight` of a full gradient contribution in
+    #     expectation", so the expectation itself must be checked, not just the two edges) ---
+    lam = 0.3
+    w_mid, inv_free_mid = build_weight(target, camera_mask, lam=lam)
+    if inv_free_mid.sum() == 0:
+        record("lovasz", "reweight_lambda_mid_calibration", "SKIP", "0 invisible-free voxels in synthetic batch")
+    else:
+        n_trials = 400
+        kept = 0
+        total = 0
+        for i in range(n_trials):
+            torch.manual_seed(1000 + i)
+            out_mid = build_lovasz_target(target, w_mid)
+            kept += int((out_mid[inv_free_mid] != IGNORE_IDX).sum())
+            total += int(inv_free_mid.sum())
+        empirical_rate = kept / total
+        # binomial std error for `total` independent-ish Bernoulli(lambda) draws
+        se = (lam * (1 - lam) / total) ** 0.5
+        within_tol = abs(empirical_rate - lam) < max(6 * se, 0.03)
+        record("lovasz", "reweight_lambda_mid_calibration",
+               "PASS" if within_tol else "FAIL",
+               f"lambda={lam}, empirical_keep_rate={empirical_rate:.4f} over {total} draws "
+               f"({n_trials} trials x {int(inv_free_mid.sum())} inv_free voxels), se={se:.4f}, "
+               f"within_6se_or_0.03={within_tol}")
+
+    torch.manual_seed(0)  # restore the module-level seed for any tests appended after this one
+
+
 def test_lovasz_relative_share():
     logits, target, camera_mask = make_synthetic(seed=5)
     _, inv_free = build_weight(target, camera_mask, lam=0.0)
@@ -402,6 +478,7 @@ if __name__ == "__main__":
     test_edge_cases()
     test_gradient_norms_and_harddrop(lam=0.25)
     test_lovasz_relative_share()
+    test_lovasz_stochastic_reweight()
 
     out_path = "/workspace/FusionOcc/research_v2/audits/gradient_coverage_v2.csv"
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
