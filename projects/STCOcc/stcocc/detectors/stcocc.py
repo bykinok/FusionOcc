@@ -357,15 +357,22 @@ class STCOcc(CenterPoint):
         already-ignored voxels are untouched, matching lambda_inv_free's existing scope.
 
         Args:
-            target_voxel_semantic: (B, X, Y, Z) tensor, raw class ids (255 = ignore).
-            voxel_weight: same shape, or None (lambda_inv_free==1.0 bypass -- returned as-is,
-                preserving the existing "bit-identical to w/o-mask baseline" guarantee).
+            target_voxel_semantic: (B, X, Y, Z) tensor OR a list of B per-sample (X, Y, Z)
+                tensors/ndarrays (same non-stacked Collect3D convention as
+                build_inv_free_voxel_weight's own input -- mmengine's default collate does
+                not stack this key), raw class ids (255 = ignore).
+            voxel_weight: (B, X, Y, Z) tensor, or None (lambda_inv_free==1.0 bypass --
+                target_voxel_semantic returned as-is, list-or-tensor, preserving the
+                existing "bit-identical to w/o-mask baseline" guarantee).
         Returns:
             (B, X, Y, Z) tensor to pass as `labels` to lovasz_softmax instead of
-            target_voxel_semantic; identical object when no stochastic exclusion applies.
+            target_voxel_semantic (lovasz_softmax's flatten_probas already accepts a plain
+            tensor here, same as it does the list form); identical object, unstacked, only
+            in the voxel_weight=None short-circuit above.
         """
         if voxel_weight is None:
             return target_voxel_semantic
+        target_voxel_semantic = self._stack_voxel_field(target_voxel_semantic).to(voxel_weight.device)
         needs_sampling = (voxel_weight < 1.0) & (target_voxel_semantic != 255)
         if not needs_sampling.any():
             return target_voxel_semantic
