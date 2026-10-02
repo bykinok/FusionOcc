@@ -8,7 +8,22 @@ from typing import List, Dict, Any, Optional, Sequence, Tuple
 from mmengine.evaluator import BaseMetric
 from mmdet3d.registry import METRICS
 
-from ..utils.gt_resolver import resolve_occ_gt_dir
+try:
+    from ..utils.gt_resolver import resolve_occ_gt_dir
+except ImportError:
+    # Loaded as standalone (e.g. by compute_metrics_from_file.py outside the
+    # projects.STCOcc.stcocc package context); load gt_resolver from its
+    # known relative location instead of relying on package-relative import.
+    import importlib.util as _ilu
+    _resolver_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), '..', 'utils', 'gt_resolver.py')
+    _resolver_path = os.path.normpath(_resolver_path)
+    if not os.path.isfile(_resolver_path):
+        raise ImportError(f"gt_resolver not found at {_resolver_path}")
+    _resolver_spec = _ilu.spec_from_file_location('gt_resolver', _resolver_path)
+    _resolver_mod = _ilu.module_from_spec(_resolver_spec)
+    _resolver_spec.loader.exec_module(_resolver_mod)
+    resolve_occ_gt_dir = _resolver_mod.resolve_occ_gt_dir
 
 # For AUROC / FPR95 (uncertainty metrics)
 try:
