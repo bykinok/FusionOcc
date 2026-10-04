@@ -260,7 +260,7 @@ backend_args = None
 train_pipeline = [
     dict(type='STCOccPrepareImageInputs', is_train=True, data_config=data_config, sequential=True),
     dict(type='STCOccLoadAnnotations'),
-    dict(type='STCOccLoadOccGTFromFileCVPR2023', scale_1_2=True, scale_1_4=True, scale_1_8=True, load_mask=True, ignore_invisible=False),  # 학습 시 invisible voxel 무시 안함
+    dict(type='STCOccLoadOccGTFromFileCVPR2023', scale_1_2=True, scale_1_4=True, scale_1_8=True, load_mask=True, ignore_invisible=False, mask_mode='baseline_without_mask'),  # 학습 시 invisible voxel 무시 안함
     dict(type='STCOccBEVAug', bda_aug_conf=bda_aug_conf, classes=occ_class_names),
     dict(type='STCOccLoadPointsFromFile', coord_type='LIDAR', load_dim=5, use_dim=3, backend_args=backend_args),
     dict(type='STCOccPointToMultiViewDepth', downsample=1, grid_config=grid_config),
