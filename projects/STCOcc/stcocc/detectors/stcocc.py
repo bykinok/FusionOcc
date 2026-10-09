@@ -54,6 +54,7 @@ class STCOcc(CenterPoint):
                  compute_uncertainty=False,
                  use_camera_mask=False,
                  lambda_inv_free=1.0,
+                 lambda_inv_occupied=1.0,
                  reweight_lovasz=False,
                  **kwargs):
         super(STCOcc, self).__init__(**kwargs)
@@ -97,6 +98,18 @@ class STCOcc(CenterPoint):
         #   does letting lambda vary by distance beat the best flat scalar found in E1/v1?
         self.use_camera_mask = use_camera_mask
         self.lambda_inv_free = lambda_inv_free
+        # lambda_inv_occupied: loss weight applied ONLY to voxels that are BOTH
+        #   camera-invisible AND GT==occupied (not empty_idx) -- the complement of
+        #   lambda_inv_free's scope. 1.0 (default) is a no-op: preserves the exact
+        #   existing behavior of every lambda_inv_free config to date (invisible-occupied
+        #   has always been supervised at full weight regardless of lambda_inv_free).
+        #   Added 2026-10 to isolate whether invisible-occupied supervision (present in
+        #   every lambda_inv_free config, absent in the w/mask hard-baseline) explains
+        #   part of the w/mask-vs-lambda=0 mIoU gap, independent of the Lovasz-term
+        #   confound reweight_lovasz already addresses (see build_lovasz_target).
+        #   Only scalar values are supported (no radius_piecewise dict mode -- this is a
+        #   targeted ablation, not a new design axis to sweep).
+        self.lambda_inv_occupied = lambda_inv_occupied
         # reweight_lovasz: OFF by default (preserves exact behavior of every existing
         # lambda_inv_free config -- all v1/E1/E2/E3 results were produced with this False).
         # When True, extends lambda_inv_free to the one loss term it previously never
@@ -273,10 +286,13 @@ class STCOcc(CenterPoint):
         return self._radius_map_cache[key].to(device)
 
     def build_inv_free_voxel_weight(self, target_voxel_semantic, camera_mask, device, log_stats=False):
-        """Per-voxel loss weight for the invisible-free supervision sweep (Stage 2).
+        """Per-voxel loss weight for the invisible-free supervision sweep (Stage 2),
+        extended 2026-10 with an independent invisible-OCCUPIED weight for the
+        w/mask-vs-lambda=0 decomposition ablation.
 
-        weight = 1.0                     everywhere by default
-        weight = self.lambda_inv_free    where camera-invisible AND GT == free (empty_idx)
+        weight = 1.0                       everywhere by default
+        weight = self.lambda_inv_free      where camera-invisible AND GT == free (empty_idx)
+        weight = self.lambda_inv_occupied  where camera-invisible AND GT != free (occupied)
 
         Ignored voxels (target == 255) get weight 0, but this is only a defensive
         no-op: every consumer (focal/sem_scal/geo_scal) already excludes target==255
@@ -323,6 +339,9 @@ class STCOcc(CenterPoint):
         else:
             weight[inv_free] = self.lambda_inv_free
             lambda_desc = '{:.3f}'.format(self.lambda_inv_free)
+        if self.lambda_inv_occupied != 1.0:
+            weight[inv_occupied] = self.lambda_inv_occupied
+            lambda_desc += ', lambda_inv_occupied={:.3f}'.format(self.lambda_inv_occupied)
         weight[~valid] = 0.0
 
         if log_stats and not self._inv_free_sanity_logged:
@@ -399,7 +418,8 @@ class STCOcc(CenterPoint):
         # skip building the weight entirely and fall back to the exact original code path --
         # this guarantees stcocc_invfree_l100 is bit-identical to the plain w/o-mask baseline).
         voxel_weight = None
-        _lambda_is_noop = (not isinstance(self.lambda_inv_free, dict)) and self.lambda_inv_free == 1.0
+        _lambda_is_noop = ((not isinstance(self.lambda_inv_free, dict)) and self.lambda_inv_free == 1.0
+                            and self.lambda_inv_occupied == 1.0)
         if camera_mask is None and not _lambda_is_noop:
             # T6 (research_openocc/audit.md): a camera mask is required to build a
             # non-trivial invisible-free weight. Without one, the weight silently

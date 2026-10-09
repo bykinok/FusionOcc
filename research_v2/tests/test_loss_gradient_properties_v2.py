@@ -101,6 +101,24 @@ def build_weight(target, camera_mask, lam):
     return w, inv_free
 
 
+def build_weight_full(target, camera_mask, lam_free, lam_occ):
+    """build_weight extended with an independent invisible-OCCUPIED lambda,
+    mirroring STCOcc.build_inv_free_voxel_weight's 2026-10 lambda_inv_occupied
+    extension exactly (same inv_free/inv_occupied partition, same order of
+    assignment: lam_free into inv_free, then lam_occ into inv_occupied, then
+    ~valid -> 0 last so it always wins)."""
+    valid = target != IGNORE_IDX
+    is_free = target == FREE_IDX
+    invisible = ~camera_mask
+    inv_free = invisible & is_free & valid
+    inv_occupied = invisible & (~is_free) & valid
+    w = torch.ones_like(target, dtype=torch.float32)
+    w[inv_free] = lam_free
+    w[inv_occupied] = lam_occ
+    w[~valid] = 0.0
+    return w, inv_free, inv_occupied
+
+
 # ---------------------------------------------------------------------------
 # 1. lambda=1 equivalence: voxel_weight=None must equal voxel_weight=ones_like
 # ---------------------------------------------------------------------------
@@ -414,6 +432,60 @@ def test_lovasz_stochastic_reweight():
     torch.manual_seed(0)  # restore the module-level seed for any tests appended after this one
 
 
+def test_lambda_inv_occupied():
+    """lambda_inv_occupied (2026-10 extension): independently zeroes invisible-
+    OCCUPIED voxel weight, leaving invisible-free (lambda_inv_free's existing
+    scope) and visible voxels untouched. Three checks:
+      1. lam_occ=1.0 (default) is an exact no-op -> identical to build_weight.
+      2. lam_occ=0.0 zeroes ONLY inv_occupied; inv_free keeps lam_free's value,
+         visible/other stays 1.0, ignored stays 0.0.
+      3. lam_free=0 + lam_occ=0 together zero EVERY invisible voxel (free and
+         occupied alike) -- the CE/sem_scal/geo_scal-level supervision pattern
+         this ablation needs to approximate the w/mask hard-baseline's exclusion
+         (Lovasz coverage is the separate, already-tested reweight_lovasz axis).
+    """
+    logits, target, camera_mask = make_synthetic(seed=7)
+    valid = target != IGNORE_IDX
+    is_free = target == FREE_IDX
+    invisible = ~camera_mask
+    inv_free_ref = invisible & is_free & valid
+    inv_occ_ref = invisible & (~is_free) & valid
+    if inv_occ_ref.sum() == 0:
+        record("inv_occupied_weight", "lambda_inv_occupied", "SKIP", "0 invisible-occupied voxels in synthetic sample")
+        return
+
+    # 1. no-op at lam_occ=1.0
+    w_ref, inv_free_a = build_weight(target, camera_mask, lam=0.25)
+    w_full, inv_free_b, inv_occ_b = build_weight_full(target, camera_mask, lam_free=0.25, lam_occ=1.0)
+    noop_ok = torch.allclose(w_ref, w_full) and torch.equal(inv_free_a, inv_free_b)
+    record("inv_occupied_weight", "lam_occ=1.0_noop", "PASS" if noop_ok else "FAIL",
+           f"max|diff|={ (w_ref - w_full).abs().max().item():.3e} (expect exact 0, lam_occ=1.0 must reproduce legacy build_weight)")
+
+    # 2. lam_occ=0.0 touches ONLY inv_occupied, scoped correctly
+    w2, inv_free2, inv_occ2 = build_weight_full(target, camera_mask, lam_free=0.25, lam_occ=0.0)
+    occ_zeroed = bool((w2[inv_occ_ref] == 0.0).all())
+    free_untouched = bool((w2[inv_free_ref] == 0.25).all())
+    visible_mask = camera_mask & valid
+    visible_is_one = bool((w2[visible_mask] == 1.0).all())
+    ignored_zero = bool((w2[~valid] == 0.0).all())
+    scope_ok = occ_zeroed and free_untouched and visible_is_one and ignored_zero
+    record("inv_occupied_weight", "lam_occ=0.0_scope", "PASS" if scope_ok else "FAIL",
+           f"inv_occupied all-zero={occ_zeroed}, inv_free preserved at lam_free={free_untouched}, "
+           f"visible stays 1.0={visible_is_one}, ignored stays 0.0={ignored_zero}")
+
+    # 3. both zeroed -> every invisible voxel (free+occupied) is weight 0,
+    #    matching the CE/sem_scal/geo_scal-level exclusion w/mask's hard
+    #    ignore_index=255 relabeling achieves for ALL invisible voxels.
+    w3, inv_free3, inv_occ3 = build_weight_full(target, camera_mask, lam_free=0.0, lam_occ=0.0)
+    all_invisible_valid_zero = bool((w3[invisible & valid] == 0.0).all())
+    visible_still_one = bool((w3[visible_mask] == 1.0).all())
+    full_exclusion_ok = all_invisible_valid_zero and visible_still_one
+    record("inv_occupied_weight", "lam_free0_lam_occ0_full_exclusion", "PASS" if full_exclusion_ok else "FAIL",
+           f"every invisible&valid voxel (free+occupied) == 0: {all_invisible_valid_zero}; "
+           f"visible still 1.0: {visible_still_one} -- this is the CE/sem/geo-level analogue of w/mask's "
+           f"ignore_index=255 relabeling (Lovasz coverage is separately handled by reweight_lovasz)")
+
+
 def test_lovasz_relative_share():
     logits, target, camera_mask = make_synthetic(seed=5)
     _, inv_free = build_weight(target, camera_mask, lam=0.0)
@@ -479,6 +551,7 @@ if __name__ == "__main__":
     test_gradient_norms_and_harddrop(lam=0.25)
     test_lovasz_relative_share()
     test_lovasz_stochastic_reweight()
+    test_lambda_inv_occupied()
 
     out_path = "/workspace/FusionOcc/research_v2/audits/gradient_coverage_v2.csv"
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
